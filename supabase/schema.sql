@@ -72,3 +72,32 @@ alter table public.connections enable row level security;
 -- No client policies on purpose: only the service role (server) may touch this
 -- table. Without a policy, RLS denies all anon/authenticated access by default.
 drop policy if exists "connections_owner_all" on public.connections;
+
+-- ---------------------------------------------------------------------------
+-- MCP connectors — custom Model Context Protocol servers per user.
+-- The optional OAuth secret is stored encrypted (AES-256-GCM); discovered
+-- tools are cached as JSON. Server-only access (service role), like connections.
+-- ---------------------------------------------------------------------------
+create table if not exists public.mcp_connectors (
+  id                 uuid primary key default gen_random_uuid(),
+  user_id            uuid not null references auth.users (id) on delete cascade,
+  name               text not null,
+  url                text not null,
+  oauth_client_id    text,
+  secret_ciphertext  text,
+  secret_iv          text,
+  secret_tag         text,
+  tools              jsonb not null default '[]'::jsonb,
+  enabled            boolean not null default true,
+  last_status        text not null default 'unknown',
+  last_error         text,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+
+create index if not exists mcp_connectors_user_id_idx on public.mcp_connectors (user_id);
+
+alter table public.mcp_connectors enable row level security;
+
+-- Server-only (service role bypasses RLS); no client policy on purpose.
+drop policy if exists "mcp_connectors_owner_all" on public.mcp_connectors;

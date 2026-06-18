@@ -4,6 +4,8 @@ import { getModelById } from '../../shared/models.js'
 import { routeIntent } from '../lib/router.js'
 import { listConnections } from '../lib/vault.js'
 import { runTool } from '../adapters/index.js'
+import { getEnabledConnectors } from '../lib/mcpStore.js'
+import { callMcpTool } from '../lib/mcp.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -45,14 +47,42 @@ function toMessage(result, { modelLabel, stage } = {}) {
   }
 }
 
-// Runs a chat-capable model (claude/openai/gemini) by id.
-async function runChatModel(modelId, userId, { prompt, systemPrompt }) {
+// Builds the MCP toolset for a user: Anthropic-format tool defs plus a router
+// that executes a tool call against the right connector. Only the Claude
+// adapter uses these; other adapters ignore the extra args.
+async function buildMcpToolset(userId) {
+  const connectors = await getEnabledConnectors(userId)
+  const tools = []
+  const routeMap = new Map()
+  for (const c of connectors) {
+    for (const t of c.tools || []) {
+      tools.push({
+        name: t.name,
+        description: t.description || '',
+        input_schema: t.inputSchema || { type: 'object', properties: {} },
+      })
+      routeMap.set(t.name, { url: c.url, token: c.token })
+    }
+  }
+  const onToolCall = async (name, input) => {
+    const target = routeMap.get(name)
+    if (!target) return `No MCP connector provides tool "${name}".`
+    const r = await callMcpTool({ url: target.url, token: target.token, name, args: input })
+    return r.text || JSON.stringify(r.raw || {})
+  }
+  return { tools, onToolCall }
+}
+
+// Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP tools.
+async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp }) {
   const info = getModelById(modelId)
   if (!info) throw new Error(`Unknown model: ${modelId}`)
   const result = await runTool(info.provider, userId, {
     prompt,
     systemPrompt,
     model: info.apiModel,
+    tools: mcp?.tools,
+    onToolCall: mcp?.onToolCall,
   })
   return { result, label: info.label }
 }
@@ -75,6 +105,9 @@ router.post('/', async (req, res, next) => {
     const lastUser = [...history].reverse().find((m) => m.role === 'user')
     const userText = lastUser?.content?.trim() || ''
     const basePrompt = buildPrompt(history, videoContext)
+
+    // MCP tools the user has connected + enabled (used by the Claude adapter).
+    const mcp = await buildMcpToolset(req.user.id)
 
     // ---------- AUTO (intent router) MODE ----------
     if (auto) {
@@ -133,7 +166,7 @@ router.post('/', async (req, res, next) => {
             const prompt = priorOutput
               ? `${basePrompt}\n\n[Analysis from the previous step]\n${priorOutput}`
               : basePrompt
-            const r = await runChatModel(meta.model, req.user.id, { prompt, systemPrompt })
+            const r = await runChatModel(meta.model, req.user.id, { prompt, systemPrompt, mcp })
             result = r.result
             priorOutput = result.content
           }
@@ -163,6 +196,7 @@ router.post('/', async (req, res, next) => {
         const a = await runChatModel(modelA, req.user.id, {
           prompt: `${basePrompt}\n\n(Act as an analyst: break down the request and prepare concise notes for an executor model.)`,
           systemPrompt,
+          mcp,
         })
         analysis = a.result.content
         messages.push(toMessage(a.result, { modelLabel: a.label, stage: 'analyst' }))
@@ -177,6 +211,7 @@ router.post('/', async (req, res, next) => {
         const b = await runChatModel(modelB, req.user.id, {
           prompt: `${basePrompt}\n\n[Analyst notes]\n${analysis}\n\n(Act as the executor: produce the final answer.)`,
           systemPrompt,
+          mcp,
         })
         messages.push(toMessage(b.result, { modelLabel: b.label, stage: 'executor' }))
       } catch (e) {
@@ -188,7 +223,7 @@ router.post('/', async (req, res, next) => {
 
     // Single model.
     try {
-      const r = await runChatModel(modelA, req.user.id, { prompt: basePrompt, systemPrompt })
+      const r = await runChatModel(modelA, req.user.id, { prompt: basePrompt, systemPrompt, mcp })
       messages.push(toMessage(r.result, { modelLabel: r.label }))
     } catch (e) {
       const label = getModelById(modelA)?.label || modelA

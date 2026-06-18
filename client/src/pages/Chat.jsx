@@ -7,7 +7,21 @@ import { useAuth } from '../context/AuthContext'
 import { sendChat } from '../lib/chat'
 import { uploadVideo, analysisToContext } from '../lib/upload'
 import { buildSystemPrompt } from '../lib/systemPrompt'
+import { listSkills } from '../lib/skills'
 import { getModelById } from '@shared/models'
+
+// Starter prompts for the welcome-screen suggestion chips.
+const CHIPS = [
+  { label: 'Code', icon: '⌨️', text: 'Help me write code that ' },
+  { label: 'Learn', icon: '📚', text: 'Explain how ' },
+  { label: 'Create', icon: '✦', text: 'Create ' },
+  { label: 'Write', icon: '✎', text: 'Write ' },
+]
+
+function firstName(email = '') {
+  const n = (email.split('@')[0] || 'there').replace(/[._-]+/g, ' ')
+  return n.charAt(0).toUpperCase() + n.slice(1)
+}
 
 export default function Chat() {
   const { user } = useAuth()
@@ -19,20 +33,21 @@ export default function Chat() {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
 
-  // Model selection (persisted per user).
   const [modelA, setModelA] = useState('claude-sonnet')
   const [modelB, setModelB] = useState(null)
   const [pipeline, setPipeline] = useState(false)
-  const [auto, setAuto] = useState(false) // intent-router mode (Step 10)
+  const [auto, setAuto] = useState(false)
 
-  // Video upload (Step 9): the analysis pending injection into the next message.
   const [uploading, setUploading] = useState(false)
-  const [pendingVideo, setPendingVideo] = useState(null) // { filename, analysis }
-  const fileInputRef = useRef(null)
+  const [pendingVideo, setPendingVideo] = useState(null)
+
+  // Skills (for the "/" slash menu).
+  const [skills, setSkills] = useState([])
 
   const scrollRef = useRef(null)
+  const fileInputRef = useRef(null)
+  const taRef = useRef(null)
 
-  // Restore history + model settings for this user.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(storageKey)
@@ -47,9 +62,9 @@ export default function Chat() {
       setPipeline(Boolean(s.pipeline))
       setAuto(Boolean(s.auto))
     } catch {}
+    listSkills().then(setSkills).catch(() => {})
   }, [storageKey, settingsKey])
 
-  // Persist history + autoscroll.
   useEffect(() => {
     try {
       localStorage.setItem(storageKey, JSON.stringify(messages))
@@ -57,7 +72,6 @@ export default function Chat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, sending, storageKey])
 
-  // Persist model settings.
   useEffect(() => {
     try {
       localStorage.setItem(settingsKey, JSON.stringify({ modelA, modelB, pipeline, auto }))
@@ -65,6 +79,7 @@ export default function Chat() {
   }, [modelA, modelB, pipeline, auto, settingsKey])
 
   const pipelineActive = Boolean(modelA && modelB && pipeline)
+  const isEmpty = messages.length === 0 && !sending
 
   async function handleSend() {
     const text = input.trim()
@@ -77,7 +92,6 @@ export default function Chat() {
     setInput('')
     setSending(true)
 
-    // Inject any pending video analysis into this turn, then clear it.
     const videoContext = pendingVideo ? analysisToContext(pendingVideo.analysis) : null
     setPendingVideo(null)
 
@@ -107,28 +121,16 @@ export default function Chat() {
     }
   }
 
-  function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
-    }
-  }
-
   async function handleFile(e) {
     const file = e.target.files?.[0]
-    e.target.value = '' // allow re-selecting the same file
+    e.target.value = ''
     if (!file) return
-
     setError('')
     setUploading(true)
     try {
       const { filename, source, analysis } = await uploadVideo(file)
       setPendingVideo({ filename, analysis })
-      // Drop a "video analyzed" card into the thread.
-      setMessages((prev) => [
-        ...prev,
-        { id: uuid(), role: 'video', filename, source, analysis },
-      ])
+      setMessages((prev) => [...prev, { id: uuid(), role: 'video', filename, source, analysis }])
     } catch (err) {
       setError(err.message)
     } finally {
@@ -142,42 +144,27 @@ export default function Chat() {
     setPendingVideo(null)
   }
 
+  const composer = (
+    <Composer
+      input={input}
+      setInput={setInput}
+      onSend={handleSend}
+      sending={sending}
+      uploading={uploading}
+      onUploadClick={() => fileInputRef.current?.click()}
+      skills={skills}
+      taRef={taRef}
+    />
+  )
+
   return (
     <div className="flex h-full flex-col">
       {/* Header with model controls */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-nexus-border px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setAuto((v) => !v)}
-            title="Auto-route: the intent router picks the tools for each message"
-            className={[
-              'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition',
-              auto
-                ? 'border-nexus-accent bg-nexus-accent/15 text-nexus-accent2'
-                : 'border-nexus-border text-gray-300 hover:bg-white/5',
-            ].join(' ')}
-          >
-            <span
-              className={[
-                'relative inline-flex h-3.5 w-6 items-center rounded-full transition',
-                auto ? 'bg-nexus-accent' : 'bg-gray-600',
-              ].join(' ')}
-            >
-              <span
-                className={[
-                  'inline-block h-2.5 w-2.5 transform rounded-full bg-white transition',
-                  auto ? 'translate-x-3' : 'translate-x-0.5',
-                ].join(' ')}
-              />
-            </span>
-            Auto-route
-          </button>
-
+          <AutoToggle auto={auto} setAuto={setAuto} />
           {auto ? (
-            <span className="text-xs text-gray-500">
-              The intent router picks the tools for each message.
-            </span>
+            <span className="text-xs text-gray-500">The intent router picks the tools for each message.</span>
           ) : (
             <ModelControls
               modelA={modelA}
@@ -198,120 +185,215 @@ export default function Chat() {
         </button>
       </div>
 
-      {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6">
-        <div className="mx-auto w-full max-w-3xl space-y-5">
-          {messages.length === 0 && !sending && (
-            <div className="mt-20 text-center">
-              <h2 className="text-lg font-medium text-gray-200">Start a conversation</h2>
-              <p className="mt-1 text-sm text-gray-500">
-                {pipelineActive
-                  ? `Pipeline: ${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}`
-                  : 'Your Instructions and enabled Skills are applied automatically.'}
-              </p>
+      {/* Hidden file input (shared) */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".mp4,.mov,.webm,video/mp4,video/quicktime,video/webm"
+        onChange={handleFile}
+        className="hidden"
+      />
+
+      {isEmpty ? (
+        /* ---------- Welcome screen (Claude-style) ---------- */
+        <div className="flex flex-1 flex-col items-center justify-center px-4">
+          <div className="w-full max-w-2xl">
+            <h1 className="mb-8 text-center text-3xl font-semibold text-gray-100">
+              <span className="bg-gradient-to-r from-nexus-accent to-nexus-accent2 bg-clip-text text-transparent">
+                ✦
+              </span>{' '}
+              Welcome, {firstName(user?.email)}
+            </h1>
+            {error && <p className="mb-3 text-center text-xs text-red-400">{error}</p>}
+            {composer}
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              {CHIPS.map((c) => (
+                <button
+                  key={c.label}
+                  onClick={() => {
+                    setInput(c.text)
+                    taRef.current?.focus()
+                  }}
+                  className="flex items-center gap-1.5 rounded-full border border-nexus-border bg-nexus-panel px-3 py-1.5 text-sm text-gray-300 transition hover:bg-white/5"
+                >
+                  <span>{c.icon}</span>
+                  {c.label}
+                </button>
+              ))}
             </div>
-          )}
-
-          {messages.map((m) =>
-            m.role === 'video' ? (
-              <VideoAnalysisCard key={m.id} message={m} />
-            ) : m.role === 'routing' ? (
-              <RoutingCard key={m.id} routing={m.routing} />
-            ) : (
-              <Message key={m.id} message={m} />
-            )
-          )}
-
-          {sending && (
-            <TypingIndicator
-              label={
-                pipelineActive
-                  ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}`
-                  : getModelById(modelA)?.label
-              }
-            />
-          )}
-        </div>
-      </div>
-
-      {/* Composer */}
-      <div className="border-t border-nexus-border px-4 py-3">
-        <div className="mx-auto w-full max-w-3xl">
-          {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
-          {pipelineActive && (
-            <p className="mb-2 text-xs text-nexus-accent2">
-              Pipeline mode on — {getModelById(modelA)?.label} analyzes, then{' '}
-              {getModelById(modelB)?.label} executes.
-            </p>
-          )}
-          {pendingVideo && (
-            <div className="mb-2 flex items-center justify-between gap-2 rounded-lg bg-nexus-accent/10 px-3 py-1.5 text-xs text-nexus-accent2">
-              <span className="truncate">
-                📹 {pendingVideo.filename} — analysis will be injected into your next message
-              </span>
-              <button
-                onClick={() => setPendingVideo(null)}
-                className="text-gray-400 hover:text-gray-200"
-              >
-                ✕
-              </button>
-            </div>
-          )}
-          <div className="flex items-end gap-2 rounded-2xl border border-nexus-border bg-nexus-panel p-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".mp4,.mov,.webm,video/mp4,video/quicktime,video/webm"
-              onChange={handleFile}
-              className="hidden"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading || sending}
-              title="Upload a video (.mp4, .mov, .webm) for analysis"
-              className="rounded-xl p-2 text-gray-400 transition hover:bg-white/5 hover:text-gray-200 disabled:opacity-50"
-            >
-              {uploading ? (
-                <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-gray-600 border-t-nexus-accent2" />
-              ) : (
-                <PaperclipIcon className="h-5 w-5" />
-              )}
-            </button>
-            <textarea
-              rows={1}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Message Nexus AI…  (Enter to send, Shift+Enter for newline)"
-              className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-sm text-gray-100 outline-none placeholder:text-gray-600"
-            />
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || sending}
-              className="rounded-xl bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {sending ? '…' : 'Send'}
-            </button>
           </div>
         </div>
+      ) : (
+        /* ---------- Active conversation ---------- */
+        <>
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6">
+            <div className="mx-auto w-full max-w-3xl space-y-5">
+              {messages.map((m) =>
+                m.role === 'video' ? (
+                  <VideoAnalysisCard key={m.id} message={m} />
+                ) : m.role === 'routing' ? (
+                  <RoutingCard key={m.id} routing={m.routing} />
+                ) : (
+                  <Message key={m.id} message={m} />
+                )
+              )}
+              {sending && (
+                <TypingIndicator
+                  label={
+                    pipelineActive
+                      ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}`
+                      : getModelById(modelA)?.label
+                  }
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-nexus-border px-4 py-3">
+            <div className="mx-auto w-full max-w-3xl">
+              {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
+              {pipelineActive && (
+                <p className="mb-2 text-xs text-nexus-accent2">
+                  Pipeline mode on — {getModelById(modelA)?.label} analyzes, then {getModelById(modelB)?.label} executes.
+                </p>
+              )}
+              {pendingVideo && (
+                <div className="mb-2 flex items-center justify-between gap-2 rounded-lg bg-nexus-accent/10 px-3 py-1.5 text-xs text-nexus-accent2">
+                  <span className="truncate">📹 {pendingVideo.filename} — injected into your next message</span>
+                  <button onClick={() => setPendingVideo(null)} className="text-gray-400 hover:text-gray-200">✕</button>
+                </div>
+              )}
+              {composer}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ---------------- Composer (shared, with "/" skills menu) ---------------- */
+
+function Composer({ input, setInput, onSend, sending, uploading, onUploadClick, skills, taRef }) {
+  const [slashOpen, setSlashOpen] = useState(false)
+  const [slashQuery, setSlashQuery] = useState('')
+
+  function onChange(e) {
+    const v = e.target.value
+    setInput(v)
+    // Open the skills menu when a "/" begins a token at the end of the input.
+    const m = /(?:^|\s)\/([\w-]*)$/.exec(v)
+    if (m) {
+      setSlashOpen(true)
+      setSlashQuery(m[1].toLowerCase())
+    } else {
+      setSlashOpen(false)
+    }
+  }
+
+  function insertSkill(skill) {
+    // Replace the trailing "/query" with a reference to the skill.
+    setInput((prev) => prev.replace(/(?:^|\s)\/[\w-]*$/, (match) => {
+      const lead = match.startsWith(' ') ? ' ' : ''
+      return `${lead}[skill: ${skill.name}] `
+    }))
+    setSlashOpen(false)
+    taRef.current?.focus()
+  }
+
+  function onKeyDown(e) {
+    if (slashOpen && e.key === 'Escape') {
+      setSlashOpen(false)
+      return
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !slashOpen) {
+      e.preventDefault()
+      onSend()
+    }
+  }
+
+  const filtered = skills.filter((s) => s.name.toLowerCase().includes(slashQuery))
+
+  return (
+    <div className="relative">
+      {slashOpen && filtered.length > 0 && (
+        <div className="absolute bottom-full mb-2 max-h-56 w-full overflow-y-auto rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
+          <p className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">Skills</p>
+          {filtered.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => insertSkill(s)}
+              className="flex w-full flex-col items-start rounded-lg px-3 py-2 text-left transition hover:bg-white/5"
+            >
+              <span className="text-sm text-gray-200">
+                {s.name}
+                {!s.enabled && <span className="ml-2 text-[10px] text-gray-600">(off)</span>}
+              </span>
+              {s.description && <span className="truncate text-xs text-gray-500">{s.description}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex items-end gap-2 rounded-2xl border border-nexus-border bg-nexus-panel p-2 shadow-lg">
+        <button
+          onClick={onUploadClick}
+          disabled={uploading || sending}
+          title="Upload a video (.mp4, .mov, .webm) for analysis"
+          className="rounded-xl p-2 text-gray-400 transition hover:bg-white/5 hover:text-gray-200 disabled:opacity-50"
+        >
+          {uploading ? (
+            <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-gray-600 border-t-nexus-accent2" />
+          ) : (
+            <PaperclipIcon className="h-5 w-5" />
+          )}
+        </button>
+        <textarea
+          ref={taRef}
+          rows={1}
+          value={input}
+          onChange={onChange}
+          onKeyDown={onKeyDown}
+          placeholder="Type / for skills, or ask anything…  (Enter to send, Shift+Enter for newline)"
+          className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-sm text-gray-100 outline-none placeholder:text-gray-600"
+        />
+        <button
+          onClick={onSend}
+          disabled={!input.trim() || sending}
+          className="rounded-xl bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {sending ? '…' : 'Send'}
+        </button>
       </div>
     </div>
   )
 }
 
-// ---- subcomponents ----
+/* ---------------- subcomponents ---------------- */
+
+function AutoToggle({ auto, setAuto }) {
+  return (
+    <button
+      type="button"
+      onClick={() => setAuto((v) => !v)}
+      title="Auto-route: the intent router picks the tools for each message"
+      className={[
+        'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition',
+        auto ? 'border-nexus-accent bg-nexus-accent/15 text-nexus-accent2' : 'border-nexus-border text-gray-300 hover:bg-white/5',
+      ].join(' ')}
+    >
+      <span className={['relative inline-flex h-3.5 w-6 items-center rounded-full transition', auto ? 'bg-nexus-accent' : 'bg-gray-600'].join(' ')}>
+        <span className={['inline-block h-2.5 w-2.5 transform rounded-full bg-white transition', auto ? 'translate-x-3' : 'translate-x-0.5'].join(' ')} />
+      </span>
+      Auto-route
+    </button>
+  )
+}
 
 function StageBadge({ stage }) {
   if (!stage) return null
-  const map = {
-    analyst: 'bg-amber-500/15 text-amber-300',
-    executor: 'bg-emerald-500/15 text-emerald-300',
-  }
-  return (
-    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${map[stage] || ''}`}>
-      {stage}
-    </span>
-  )
+  const map = { analyst: 'bg-amber-500/15 text-amber-300', executor: 'bg-emerald-500/15 text-emerald-300' }
+  return <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${map[stage] || ''}`}>{stage}</span>
 }
 
 function Message({ message }) {
@@ -352,6 +434,16 @@ function Message({ message }) {
   )
 }
 
+function MediaBlock({ media, type }) {
+  if (!media) return null
+  const src = media.url || (media.base64 ? `data:${media.mimeType};base64,${media.base64}` : null)
+  if (!src) return null
+  if (type === 'audio') return <audio controls src={src} className="mt-3 w-full" />
+  if (type === 'video') return <video controls src={src} className="mt-3 w-full rounded-lg" />
+  if (type === 'image') return <img src={src} alt="generated" className="mt-3 max-w-full rounded-lg" />
+  return null
+}
+
 function RoutingCard({ routing }) {
   const { task, primary_tool, secondary_tool, pipeline, source } = routing
   return (
@@ -360,15 +452,11 @@ function RoutingCard({ routing }) {
         <span className="font-medium text-gray-300">🧭 Routed</span>
         <span className="rounded bg-white/5 px-1.5 py-0.5 text-gray-300">{task}</span>
         <span className="text-gray-500">→</span>
-        <span className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-nexus-accent2">
-          {primary_tool}
-        </span>
+        <span className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-nexus-accent2">{primary_tool}</span>
         {pipeline && secondary_tool && (
           <>
             <span className="text-gray-500">→</span>
-            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300">
-              {secondary_tool}
-            </span>
+            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300">{secondary_tool}</span>
           </>
         )}
         <span className="text-gray-600">· {source}</span>
@@ -385,31 +473,24 @@ function VideoAnalysisCard({ message }) {
       : source === 'error'
         ? { text: 'analysis error', cls: 'bg-red-500/15 text-red-300' }
         : { text: 'stub (no Gemini key)', cls: 'bg-amber-500/15 text-amber-300' }
-
   return (
     <div className="flex justify-start">
       <div className="w-full max-w-[85%]">
         <div className="mb-1 flex items-center gap-2">
-          <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-medium text-gray-300">
-            📹 Video analysis
-          </span>
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.cls}`}>
-            {badge.text}
-          </span>
+          <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-medium text-gray-300">📹 Video analysis</span>
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.cls}`}>{badge.text}</span>
         </div>
         <div className="space-y-2 rounded-2xl border border-nexus-border bg-nexus-panel px-4 py-3 text-sm">
           <p className="truncate text-xs text-gray-500">{filename}</p>
-          <Field label="Scene" value={analysis.scene} />
-          <Field label="Objects" value={(analysis.objects || []).join(', ')} />
+          <CardField label="Scene" value={analysis.scene} />
+          <CardField label="Objects" value={(analysis.objects || []).join(', ')} />
           <div className="flex gap-6">
-            <Field label="Tone" value={analysis.tone} />
-            <Field label="Duration" value={analysis.duration} />
+            <CardField label="Tone" value={analysis.tone} />
+            <CardField label="Duration" value={analysis.duration} />
           </div>
           {analysis.keyMoments?.length > 0 && (
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                Key moments
-              </p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Key moments</p>
               <ul className="mt-1 space-y-0.5">
                 {analysis.keyMoments.map((m, i) => (
                   <li key={i} className="text-gray-300">
@@ -425,32 +506,13 @@ function VideoAnalysisCard({ message }) {
   )
 }
 
-function Field({ label, value }) {
+function CardField({ label, value }) {
   return (
     <div>
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-        {label}
-      </p>
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
       <p className="text-gray-200">{value || '—'}</p>
     </div>
   )
-}
-
-function MediaBlock({ media, type }) {
-  if (!media) return null
-  const src = media.url || (media.base64 ? `data:${media.mimeType};base64,${media.base64}` : null)
-  if (!src) return null
-
-  if (type === 'audio') {
-    return <audio controls src={src} className="mt-3 w-full" />
-  }
-  if (type === 'video') {
-    return <video controls src={src} className="mt-3 w-full rounded-lg" />
-  }
-  if (type === 'image') {
-    return <img src={src} alt="generated" className="mt-3 max-w-full rounded-lg" />
-  }
-  return null
 }
 
 function TypingIndicator({ label }) {
@@ -458,9 +520,7 @@ function TypingIndicator({ label }) {
     <div className="flex justify-start">
       <div className="w-full max-w-[85%]">
         <div className="mb-1">
-          <span className="rounded-full bg-nexus-accent/15 px-2 py-0.5 text-[10px] font-medium text-nexus-accent2">
-            {label}
-          </span>
+          <span className="rounded-full bg-nexus-accent/15 px-2 py-0.5 text-[10px] font-medium text-nexus-accent2">{label}</span>
         </div>
         <div className="inline-flex items-center gap-1 rounded-2xl border border-nexus-border bg-nexus-panel px-4 py-3">
           <Dot delay="0ms" />
@@ -473,10 +533,5 @@ function TypingIndicator({ label }) {
 }
 
 function Dot({ delay }) {
-  return (
-    <span
-      className="inline-block h-2 w-2 animate-bounce rounded-full bg-gray-500"
-      style={{ animationDelay: delay }}
-    />
-  )
+  return <span className="inline-block h-2 w-2 animate-bounce rounded-full bg-gray-500" style={{ animationDelay: delay }} />
 }
