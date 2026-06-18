@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Env files (never commit secrets)
+.env
+**/.env
+!**/.env.example
+
+# Build output
+client/dist/
+dist/
+
+# Uploads (Step 9 video uploads)
+server/uploads/
+
+# Local tooling / helper scripts (contain dev credentials — never commit)
+.tools/
+
+# Logs / OS junk
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
