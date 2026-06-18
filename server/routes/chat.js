@@ -61,13 +61,19 @@ async function buildMcpToolset(userId) {
         description: t.description || '',
         input_schema: t.inputSchema || { type: 'object', properties: {} },
       })
-      routeMap.set(t.name, { url: c.url, token: c.token })
+      routeMap.set(t.name, { url: c.url, token: c.token, authProvider: c.authProvider })
     }
   }
   const onToolCall = async (name, input) => {
     const target = routeMap.get(name)
     if (!target) return `No MCP connector provides tool "${name}".`
-    const r = await callMcpTool({ url: target.url, token: target.token, name, args: input })
+    const r = await callMcpTool({
+      url: target.url,
+      token: target.token,
+      authProvider: target.authProvider,
+      name,
+      args: input,
+    })
     return r.text || JSON.stringify(r.raw || {})
   }
   return { tools, onToolCall }

@@ -3,24 +3,21 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 // Thin wrapper around the MCP TypeScript SDK for connecting to a REMOTE MCP
 // server over the Streamable HTTP transport, listing its tools, and calling
-// them. Auth: if a bearer token (the optional OAuth secret) is provided, it's
-// sent as `Authorization: Bearer <token>` — this covers open servers and
-// static-token servers. Full OAuth authorization-code flow is a future add.
+// them. Auth modes:
+//   - token:        sent as `Authorization: Bearer <token>` (open / static-token servers)
+//   - authProvider: full OAuth (the SDK attaches + refreshes tokens) — for
+//                   login-based servers like Higgsfield / Notion.
 
-function makeTransport(url, token) {
-  const requestInit = {}
-  if (token) {
-    requestInit.headers = { Authorization: `Bearer ${token}` }
-  }
-  return new StreamableHTTPClientTransport(new URL(url), { requestInit })
+function makeTransport(url, { token, authProvider } = {}) {
+  const opts = {}
+  if (authProvider) opts.authProvider = authProvider
+  else if (token) opts.requestInit = { headers: { Authorization: `Bearer ${token}` } }
+  return new StreamableHTTPClientTransport(new URL(url), opts)
 }
 
-async function withClient(url, token, fn) {
-  const transport = makeTransport(url, token)
-  const client = new Client(
-    { name: 'nexus-ai', version: '0.1.0' },
-    { capabilities: {} }
-  )
+async function withClient(url, auth, fn) {
+  const transport = makeTransport(url, auth)
+  const client = new Client({ name: 'nexus-ai', version: '0.1.0' }, { capabilities: {} })
   try {
     await client.connect(transport)
     return await fn(client)
@@ -31,10 +28,20 @@ async function withClient(url, token, fn) {
   }
 }
 
-// Connects and returns the server's tools as a normalized array
-// [{ name, description, inputSchema }]. Throws on connection/auth failure.
-export async function discoverTools({ url, token }) {
-  return withClient(url, token, async (client) => {
+// Returns true if an error looks like an auth challenge (needs OAuth login).
+export function isAuthError(err) {
+  const m = (err?.message || '').toLowerCase()
+  return (
+    err?.name === 'UnauthorizedError' ||
+    m.includes('unauthorized') ||
+    m.includes('401') ||
+    m.includes('invalid_token') ||
+    m.includes('www-authenticate')
+  )
+}
+
+export async function discoverTools({ url, token, authProvider }) {
+  return withClient(url, { token, authProvider }, async (client) => {
     const result = await client.listTools()
     return (result.tools || []).map((t) => ({
       name: t.name,
@@ -44,10 +51,8 @@ export async function discoverTools({ url, token }) {
   })
 }
 
-// Calls a single tool and returns its result content (flattened to text where
-// possible, with the raw result attached).
-export async function callMcpTool({ url, token, name, args }) {
-  return withClient(url, token, async (client) => {
+export async function callMcpTool({ url, token, authProvider, name, args }) {
+  return withClient(url, { token, authProvider }, async (client) => {
     const result = await client.callTool({ name, arguments: args || {} })
     const text = (result.content || [])
       .filter((c) => c.type === 'text')

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { v4 as uuid } from 'uuid'
 import Markdown from '../components/Markdown'
 import ModelControls from '../components/ModelControls'
-import { PaperclipIcon } from '../components/icons'
+import { PlusIcon } from '../components/icons'
 import { useAuth } from '../context/AuthContext'
 import { sendChat } from '../lib/chat'
 import { uploadVideo, analysisToContext } from '../lib/upload'
@@ -275,13 +276,24 @@ export default function Chat() {
 /* ---------------- Composer (shared, with "/" skills menu) ---------------- */
 
 function Composer({ input, setInput, onSend, sending, uploading, onUploadClick, skills, taRef }) {
+  const navigate = useNavigate()
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashQuery, setSlashQuery] = useState('')
+  const [plusOpen, setPlusOpen] = useState(false)
+  const plusRef = useRef(null)
+
+  // Close the "+" menu on outside click.
+  useEffect(() => {
+    function onDoc(e) {
+      if (plusRef.current && !plusRef.current.contains(e.target)) setPlusOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
 
   function onChange(e) {
     const v = e.target.value
     setInput(v)
-    // Open the skills menu when a "/" begins a token at the end of the input.
     const m = /(?:^|\s)\/([\w-]*)$/.exec(v)
     if (m) {
       setSlashOpen(true)
@@ -292,12 +304,21 @@ function Composer({ input, setInput, onSend, sending, uploading, onUploadClick, 
   }
 
   function insertSkill(skill) {
-    // Replace the trailing "/query" with a reference to the skill.
-    setInput((prev) => prev.replace(/(?:^|\s)\/[\w-]*$/, (match) => {
-      const lead = match.startsWith(' ') ? ' ' : ''
-      return `${lead}[skill: ${skill.name}] `
-    }))
+    setInput((prev) =>
+      prev.replace(/(?:^|\s)\/[\w-]*$/, (match) => {
+        const lead = match.startsWith(' ') ? ' ' : ''
+        return `${lead}[skill: ${skill.name}] `
+      })
+    )
     setSlashOpen(false)
+    taRef.current?.focus()
+  }
+
+  function openSkillsMenu() {
+    setPlusOpen(false)
+    setInput((prev) => (prev.endsWith('/') || prev === '' ? prev || '/' : prev + ' /'))
+    setSlashOpen(true)
+    setSlashQuery('')
     taRef.current?.focus()
   }
 
@@ -314,8 +335,17 @@ function Composer({ input, setInput, onSend, sending, uploading, onUploadClick, 
 
   const filtered = skills.filter((s) => s.name.toLowerCase().includes(slashQuery))
 
+  // "+" menu — only real, working actions (no broken placeholders).
+  const plusItems = [
+    { icon: '📎', label: 'Add a video', hint: '.mp4 .mov .webm', onClick: () => { setPlusOpen(false); onUploadClick() } },
+    { icon: '⭐', label: 'Skills', hint: 'insert a skill', onClick: openSkillsMenu },
+    { icon: '🔗', label: 'Connectors', hint: 'manage MCP', onClick: () => navigate('/connections') },
+    { icon: '📄', label: 'Instructions', hint: 'system prompt', onClick: () => navigate('/instructions') },
+  ]
+
   return (
     <div className="relative">
+      {/* "/" skills menu */}
       {slashOpen && filtered.length > 0 && (
         <div className="absolute bottom-full mb-2 max-h-56 w-full overflow-y-auto rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
           <p className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">Skills</p>
@@ -335,35 +365,56 @@ function Composer({ input, setInput, onSend, sending, uploading, onUploadClick, 
         </div>
       )}
 
-      <div className="flex items-end gap-2 rounded-2xl border border-nexus-border bg-nexus-panel p-2 shadow-lg">
-        <button
-          onClick={onUploadClick}
-          disabled={uploading || sending}
-          title="Upload a video (.mp4, .mov, .webm) for analysis"
-          className="rounded-xl p-2 text-gray-400 transition hover:bg-white/5 hover:text-gray-200 disabled:opacity-50"
-        >
-          {uploading ? (
-            <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-gray-600 border-t-nexus-accent2" />
-          ) : (
-            <PaperclipIcon className="h-5 w-5" />
-          )}
-        </button>
+      <div className="flex flex-col gap-2 rounded-2xl border border-nexus-border bg-nexus-panel p-3 shadow-lg">
         <textarea
           ref={taRef}
-          rows={1}
+          rows={3}
           value={input}
           onChange={onChange}
           onKeyDown={onKeyDown}
-          placeholder="Type / for skills, or ask anything…  (Enter to send, Shift+Enter for newline)"
-          className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-sm text-gray-100 outline-none placeholder:text-gray-600"
+          placeholder="Type / for skills, or ask anything…"
+          className="max-h-60 min-h-[72px] w-full flex-1 resize-none bg-transparent px-1 text-sm text-gray-100 outline-none placeholder:text-gray-600"
         />
-        <button
-          onClick={onSend}
-          disabled={!input.trim() || sending}
-          className="rounded-xl bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {sending ? '…' : 'Send'}
-        </button>
+        <div className="flex items-center justify-between">
+          {/* "+" menu */}
+          <div className="relative" ref={plusRef}>
+            <button
+              onClick={() => setPlusOpen((v) => !v)}
+              disabled={uploading || sending}
+              title="Add"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-nexus-border text-gray-300 transition hover:bg-white/5 disabled:opacity-50"
+            >
+              {uploading ? (
+                <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-gray-600 border-t-nexus-accent2" />
+              ) : (
+                <PlusIcon className="h-5 w-5" />
+              )}
+            </button>
+            {plusOpen && (
+              <div className="absolute bottom-full left-0 mb-2 w-60 overflow-hidden rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
+                {plusItems.map((it) => (
+                  <button
+                    key={it.label}
+                    onClick={it.onClick}
+                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-200 transition hover:bg-white/5"
+                  >
+                    <span className="text-base">{it.icon}</span>
+                    <span className="flex-1">{it.label}</span>
+                    <span className="text-[10px] text-gray-600">{it.hint}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={onSend}
+            disabled={!input.trim() || sending}
+            className="rounded-xl bg-nexus-accent px-5 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {sending ? '…' : 'Send'}
+          </button>
+        </div>
       </div>
     </div>
   )

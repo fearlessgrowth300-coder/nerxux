@@ -20,6 +20,17 @@ export async function addConnector({ name, url, oauthClientId, oauthSecret }) {
   }
 }
 
+// Starts the OAuth flow. Returns { authUrl } to open in a popup, or
+// { authorized: true } if the connector already has valid tokens.
+export async function authorizeConnector(id) {
+  try {
+    const { data } = await api.post(`/api/mcp/${id}/authorize`)
+    return data
+  } catch (err) {
+    throw apiError(err, 'Failed to start authorization')
+  }
+}
+
 export async function refreshConnector(id) {
   try {
     const { data } = await api.post(`/api/mcp/${id}/refresh`)

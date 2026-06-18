@@ -6,6 +6,15 @@ import chatRouter from './routes/chat.js'
 import uploadRouter from './routes/upload.js'
 import mcpRouter from './routes/mcp.js'
 
+// Never let a stray async error from a third-party transport (e.g. an MCP
+// socket erroring after close) take down the whole server — log and continue.
+process.on('unhandledRejection', (reason) => {
+  console.error('[nexus-ai] unhandledRejection:', reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[nexus-ai] uncaughtException:', err)
+})
+
 const app = express()
 const PORT = process.env.PORT || 4000
 

@@ -9,6 +9,7 @@ import {
 import {
   getConnectors,
   addConnector,
+  authorizeConnector,
   refreshConnector,
   setConnectorEnabled,
   removeConnector,
@@ -180,6 +181,35 @@ function McpConnectors() {
     refresh()
   }, [])
 
+  // When the OAuth popup finishes, it postMessages us — refresh the list.
+  useEffect(() => {
+    function onMsg(e) {
+      if (e.data?.type === 'mcp-oauth') {
+        setTimeout(refresh, 600)
+      }
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+  }, [])
+
+  // Begins OAuth: opens the provider login in a popup (or refreshes if already authorized).
+  async function handleAuthorize(id) {
+    setBusy(id)
+    setError('')
+    try {
+      const res = await authorizeConnector(id)
+      if (res.authUrl) {
+        window.open(res.authUrl, 'mcp-oauth', 'width=520,height=720')
+      } else if (res.authorized) {
+        await refresh()
+      }
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   async function handleAdd() {
     if (!form.name.trim() || !form.url.trim()) {
       setFormError('Name and Remote MCP server URL are required.')
@@ -193,8 +223,11 @@ function McpConnectors() {
       setForm(EMPTY_FORM)
       setShowAdvanced(false)
       await refresh()
-      if (created.status === 'error') {
-        setError(`Added "${created.name}", but couldn't connect: ${created.error}. Use Refresh after fixing the URL/auth.`)
+      if (created.status === 'needs_auth') {
+        // Server needs login — kick off OAuth right away (Claude-style).
+        handleAuthorize(created.id)
+      } else if (created.status === 'error') {
+        setError(`Added "${created.name}", but couldn't connect: ${created.error}. Use Refresh after fixing the URL.`)
       }
     } catch (e) {
       setFormError(e.message)
@@ -286,13 +319,22 @@ function McpConnectors() {
                     <StatusDot
                       connected={c.status === 'connected'}
                       on={`${c.toolCount} tool${c.toolCount === 1 ? '' : 's'}`}
-                      off={c.status === 'error' ? 'Connection failed' : 'Unknown'}
+                      off={c.status === 'needs_auth' ? 'Sign-in required' : c.status === 'error' ? 'Connection failed' : 'Unknown'}
                     />
                   </div>
                   <p className="mt-0.5 truncate font-mono text-xs text-gray-500">{c.url}</p>
-                  {c.error && <p className="mt-1 text-xs text-red-400">{c.error}</p>}
+                  {c.error && c.status !== 'needs_auth' && <p className="mt-1 text-xs text-red-400">{c.error}</p>}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  {c.status !== 'connected' && (
+                    <button
+                      onClick={() => handleAuthorize(c.id)}
+                      disabled={busy === c.id}
+                      className="rounded-lg bg-nexus-accent px-3 py-1.5 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {busy === c.id ? '…' : 'Connect'}
+                    </button>
+                  )}
                   <Toggle on={c.enabled} disabled={busy === c.id} onClick={() => handleToggle(c)} />
                   <button
                     onClick={() => handleRefresh(c.id)}

@@ -101,3 +101,14 @@ alter table public.mcp_connectors enable row level security;
 
 -- Server-only (service role bypasses RLS); no client policy on purpose.
 drop policy if exists "mcp_connectors_owner_all" on public.mcp_connectors;
+
+-- OAuth state for MCP connectors that require browser login (e.g. Higgsfield,
+-- Notion). Tokens are stored encrypted; client info (DCR) + PKCE verifier +
+-- CSRF state are transient working values used during the auth handshake.
+alter table public.mcp_connectors
+  add column if not exists oauth_client jsonb,
+  add column if not exists oauth_verifier text,
+  add column if not exists oauth_state text,
+  add column if not exists oauth_tokens_ciphertext text,
+  add column if not exists oauth_tokens_iv text,
+  add column if not exists oauth_tokens_tag text;

@@ -6,9 +6,44 @@ import {
   refreshConnector,
   setConnectorEnabled,
   deleteConnector,
+  startOAuth,
+  completeOAuth,
 } from '../lib/mcpStore.js'
 
 const router = Router()
+
+// Renders a tiny page that signals the opener window and closes the popup.
+function popupResult(ok, message) {
+  return `<!doctype html><meta charset="utf-8"><body style="background:#0b0f17;color:#e5e7eb;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh">
+  <div style="text-align:center">
+    <h2 style="color:${ok ? '#34d399' : '#f87171'}">${ok ? '✓ Connected' : '✗ Connection failed'}</h2>
+    <p style="color:#9ca3af">${message}</p>
+    <p style="color:#6b7280;font-size:13px">You can close this window.</p>
+  </div>
+  <script>
+    try { window.opener && window.opener.postMessage({ type: 'mcp-oauth', ok: ${ok} }, '*') } catch (e) {}
+    setTimeout(function(){ window.close() }, 1200)
+  </script></body>`
+}
+
+// PUBLIC — the MCP server redirects the browser here after the user authorizes.
+// No bearer token is present on this navigation, so it sits before requireAuth.
+router.get('/oauth/callback', async (req, res) => {
+  const { code, state, error } = req.query
+  if (error) return res.send(popupResult(false, String(error)))
+  if (!code || !state) return res.send(popupResult(false, 'Missing code or state'))
+  try {
+    const result = await completeOAuth(String(state), String(code))
+    if (result.status === 'connected') {
+      return res.send(popupResult(true, `${result.name} is connected.`))
+    }
+    return res.send(popupResult(false, `Authorized, but tool discovery failed.`))
+  } catch (e) {
+    return res.send(popupResult(false, e.message))
+  }
+})
+
+// Everything below requires a valid session.
 router.use(requireAuth)
 
 // GET /api/mcp — list the user's MCP connectors (with cached tools + status).
@@ -31,6 +66,16 @@ router.post('/', async (req, res, next) => {
       oauthSecret,
     })
     res.json({ connector })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/mcp/:id/authorize — begin the OAuth flow; returns { authUrl } to
+// open in a popup, or { authorized: true } if tokens already exist.
+router.post('/:id/authorize', async (req, res, next) => {
+  try {
+    res.json(await startOAuth(req.user.id, req.params.id))
   } catch (err) {
     next(err)
   }
