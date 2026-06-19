@@ -47,6 +47,15 @@ router.get('/oauth/callback', async (req, res) => {
 // Everything below requires a valid session.
 router.use(requireAuth)
 
+// GET /api/mcp/callback-url — the OAuth redirect URI to register with a
+// provider (e.g. Facebook/Google app settings) for pre-registered clients.
+router.get('/callback-url', (req, res) => {
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0]
+  const host = req.headers['x-forwarded-host'] || req.get('host')
+  const callbackUrl = process.env.MCP_OAUTH_CALLBACK || `${proto}://${host}/api/mcp/oauth/callback`
+  res.json({ callbackUrl })
+})
+
 // GET /api/mcp — list the user's MCP connectors (with cached tools + status).
 router.get('/', async (req, res, next) => {
   try {

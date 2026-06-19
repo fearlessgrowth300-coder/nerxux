@@ -8,6 +8,7 @@ import {
 } from '../lib/connections'
 import {
   getConnectors,
+  getCallbackUrl,
   addConnector,
   authorizeConnector,
   refreshConnector,
@@ -163,6 +164,7 @@ function McpConnectors() {
 
   const [modalOpen, setModalOpen] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [callbackUrl, setCallbackUrl] = useState('')
   const [form, setForm] = useState(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
@@ -180,6 +182,7 @@ function McpConnectors() {
   }
   useEffect(() => {
     refresh()
+    getCallbackUrl().then((u) => u && setCallbackUrl(u))
   }, [])
 
   // When the OAuth popup finishes, it postMessages us — refresh the list.
@@ -455,18 +458,37 @@ function McpConnectors() {
           </button>
           {showAdvanced && (
             <div className="space-y-3 border-l border-nexus-border pl-3">
+              <p className="text-xs text-gray-500">
+                Some servers (e.g. Facebook, Google) require your own OAuth app instead of auto-registration.
+                Create an app on the provider, paste its Client ID + Secret here, and register the redirect URI below.
+              </p>
+              {callbackUrl && (
+                <div className="rounded-lg bg-nexus-bg p-2">
+                  <p className="text-[10px] uppercase tracking-wide text-gray-500">Redirect URI to register with the provider</p>
+                  <div className="mt-1 flex items-center gap-2">
+                    <code className="flex-1 truncate text-xs text-nexus-accent2">{callbackUrl}</code>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(callbackUrl)}
+                      className="rounded border border-nexus-border px-2 py-0.5 text-[10px] text-gray-300 hover:bg-white/5"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+              )}
               <Field
                 label="OAuth Client ID (optional)"
                 value={form.oauthClientId}
                 onChange={(v) => setForm((f) => ({ ...f, oauthClientId: v }))}
-                placeholder="client id"
+                placeholder="provider app / client id"
               />
               <Field
                 label="OAuth Client Secret / token (optional)"
                 type="password"
                 value={form.oauthSecret}
                 onChange={(v) => setForm((f) => ({ ...f, oauthSecret: v }))}
-                placeholder="sent as a Bearer token"
+                placeholder="app secret (OAuth), or a bearer token"
               />
             </div>
           )}

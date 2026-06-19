@@ -2,6 +2,15 @@ import { api, apiError } from './api'
 
 // Client for MCP connectors (custom Model Context Protocol servers).
 
+export async function getCallbackUrl() {
+  try {
+    const { data } = await api.get('/api/mcp/callback-url')
+    return data.callbackUrl
+  } catch {
+    return null
+  }
+}
+
 export async function getConnectors() {
   try {
     const { data } = await api.get('/api/mcp')
