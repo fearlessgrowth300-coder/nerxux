@@ -5,6 +5,7 @@ import {
   addConnector,
   refreshConnector,
   setConnectorEnabled,
+  setToolPermission,
   deleteConnector,
   startOAuth,
   completeOAuth,
@@ -99,6 +100,19 @@ router.patch('/:id', async (req, res, next) => {
       Boolean(req.body?.enabled)
     )
     res.json({ connector })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// PATCH /api/mcp/:id/tool — set a per-tool permission. Body: { tool, perm }
+router.patch('/:id/tool', async (req, res, next) => {
+  try {
+    const { tool, perm } = req.body || {}
+    if (!tool || !['allow', 'approval', 'blocked'].includes(perm)) {
+      return res.status(400).json({ error: 'tool and a valid perm are required' })
+    }
+    res.json({ connector: await setToolPermission(req.user.id, req.params.id, tool, perm) })
   } catch (err) {
     next(err)
   }

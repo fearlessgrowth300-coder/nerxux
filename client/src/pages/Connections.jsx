@@ -12,6 +12,7 @@ import {
   authorizeConnector,
   refreshConnector,
   setConnectorEnabled,
+  setToolPermission,
   removeConnector,
 } from '../lib/mcp'
 
@@ -271,6 +272,19 @@ function McpConnectors() {
     }
   }
 
+  // Optimistically set a per-tool permission.
+  async function handlePerm(connectorId, tool, perm) {
+    setConnectors((prev) =>
+      prev.map((c) => (c.id === connectorId ? { ...c, toolPerms: { ...c.toolPerms, [tool]: perm } } : c))
+    )
+    try {
+      await setToolPermission(connectorId, tool, perm)
+    } catch (e) {
+      setError(e.message)
+      refresh()
+    }
+  }
+
   return (
     <section className="mt-10">
       <div className="mb-3 flex items-center justify-between">
@@ -362,16 +376,26 @@ function McpConnectors() {
                     {expanded === c.id ? 'Hide' : 'Show'} {c.toolCount} tool{c.toolCount === 1 ? '' : 's'}
                   </button>
                   {expanded === c.id && (
-                    <ul className="mt-2 space-y-1">
-                      {c.tools.map((t) => (
-                        <li key={t.name} className="rounded-lg bg-nexus-bg px-3 py-2 text-xs">
-                          <span className="font-mono text-gray-200">{t.name}</span>
-                          {t.description && (
-                            <span className="ml-2 text-gray-500">{t.description}</span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
+                    <div className="mt-2">
+                      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                        Tool permissions
+                      </p>
+                      <p className="mb-2 text-xs text-gray-500">Choose when Nexus is allowed to use each tool.</p>
+                      <ul className="space-y-1">
+                        {c.tools.map((t) => (
+                          <li key={t.name} className="flex items-center justify-between gap-3 rounded-lg bg-nexus-bg px-3 py-2 text-xs">
+                            <div className="min-w-0">
+                              <span className="font-mono text-gray-200">{t.name}</span>
+                              {t.description && <span className="ml-2 truncate text-gray-500">{t.description}</span>}
+                            </div>
+                            <PermSelect
+                              value={c.toolPerms?.[t.name] || 'allow'}
+                              onChange={(perm) => handlePerm(c.id, t.name, perm)}
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
                 </div>
               )}
@@ -469,6 +493,25 @@ function Field({ label, value, onChange, placeholder, type = 'text' }) {
         className="w-full rounded-lg border border-nexus-border bg-nexus-bg px-3 py-2.5 text-sm text-gray-100 outline-none transition placeholder:text-gray-600 focus:border-nexus-accent"
       />
     </label>
+  )
+}
+
+function PermSelect({ value, onChange }) {
+  const styles = {
+    allow: 'border-emerald-500/40 text-emerald-300',
+    approval: 'border-amber-500/40 text-amber-300',
+    blocked: 'border-red-500/40 text-red-300',
+  }
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={`shrink-0 rounded-lg border bg-nexus-panel px-2 py-1 text-[11px] outline-none ${styles[value] || ''}`}
+    >
+      <option value="allow">Always allow</option>
+      <option value="approval">Needs approval</option>
+      <option value="blocked">Blocked</option>
+    </select>
   )
 }
 

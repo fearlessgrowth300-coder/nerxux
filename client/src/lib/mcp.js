@@ -49,6 +49,15 @@ export async function setConnectorEnabled(id, enabled) {
   }
 }
 
+export async function setToolPermission(id, tool, perm) {
+  try {
+    const { data } = await api.patch(`/api/mcp/${id}/tool`, { tool, perm })
+    return data.connector
+  } catch (err) {
+    throw apiError(err, 'Failed to set tool permission')
+  }
+}
+
 export async function removeConnector(id) {
   try {
     await api.delete(`/api/mcp/${id}`)

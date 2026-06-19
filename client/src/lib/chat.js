@@ -1,9 +1,6 @@
 import { api, apiError } from './api'
 
-// Sends the conversation + model selection to the backend.
-// `history` is [{ role, content }].
-// Manual mode: pass modelA/modelB/pipeline.
-// Auto mode: pass auto:true and the intent router decides.
+// Sends the conversation + options to the backend.
 // Returns { messages: [...], routing?: {...} }.
 export async function sendChat({
   history,
@@ -13,6 +10,9 @@ export async function sendChat({
   systemPrompt,
   videoContext,
   auto = false,
+  attachments,
+  webSearch,
+  connectorIds,
 }) {
   try {
     const { data } = await api.post('/api/chat', {
@@ -23,6 +23,9 @@ export async function sendChat({
       systemPrompt,
       videoContext,
       auto,
+      attachments,
+      webSearch,
+      connectorIds,
     })
     return { messages: data.messages, routing: data.routing || null }
   } catch (err) {

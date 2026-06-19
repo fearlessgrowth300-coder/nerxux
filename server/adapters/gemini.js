@@ -23,10 +23,15 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, media }
     ...(system ? { systemInstruction: system } : {}),
   })
 
-  // Build content parts: prompt text + optional inline media (vision).
+  // Build content parts: prompt text + optional inline media / attachments.
   const parts = [{ text: prompt }]
   if (media?.base64 && media?.mimeType) {
     parts.push({ inlineData: { mimeType: media.mimeType, data: media.base64 } })
+  }
+  for (const a of arguments[0]?.attachments || []) {
+    if (a.base64 && a.mimeType && (a.kind === 'image' || a.kind === 'pdf')) {
+      parts.push({ inlineData: { mimeType: a.mimeType, data: a.base64 } })
+    }
   }
 
   const result = await generativeModel.generateContent(parts)

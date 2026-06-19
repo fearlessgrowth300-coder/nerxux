@@ -19,11 +19,26 @@ function publicRow(row) {
     authorized: Boolean(row.oauth_tokens_ciphertext),
     tools: row.tools || [],
     toolCount: (row.tools || []).length,
+    toolPerms: row.tool_perms || {},
     enabled: row.enabled,
     status: row.last_status,
     error: row.last_error || null,
     updated_at: row.updated_at,
   }
+}
+
+// Sets a per-tool permission: 'allow' | 'approval' | 'blocked'.
+export async function setToolPermission(userId, id, toolName, perm) {
+  const row = await getRow(userId, id)
+  const perms = { ...(row.tool_perms || {}), [toolName]: perm }
+  const { data, error } = await supabaseAdmin
+    .from('mcp_connectors')
+    .update({ tool_perms: perms, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select()
+    .single()
+  if (error) throw error
+  return publicRow(data)
 }
 
 async function getRow(userId, id) {
@@ -221,11 +236,16 @@ export async function getEnabledConnectors(userId) {
     .eq('user_id', userId)
     .eq('enabled', true)
   if (error) throw error
-  return (data || []).map((row) => ({
-    id: row.id,
-    name: row.name,
-    url: row.url,
-    tools: row.tools || [],
-    ...authFor(row),
-  }))
+  return (data || []).map((row) => {
+    const perms = row.tool_perms || {}
+    // Exclude blocked tools from what the model can call.
+    const tools = (row.tools || []).filter((t) => perms[t.name] !== 'blocked')
+    return {
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      tools,
+      ...authFor(row),
+    }
+  })
 }

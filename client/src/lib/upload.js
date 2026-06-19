@@ -1,20 +1,20 @@
 import { api, apiError } from './api'
 
-// Uploads a video file (multipart) for Gemini vision analysis.
-// Returns { filename, source, analysis }. `source` is 'gemini' | 'stub' | 'error'.
-export async function uploadVideo(file) {
+// Uploads a file (image / PDF / video). Returns the attachment descriptor:
+//  - image/pdf: { kind, filename, mimeType, base64 }
+//  - video:     { kind:'video', filename, source, analysis }
+export async function uploadFile(file) {
   try {
     const form = new FormData()
-    form.append('video', file)
+    form.append('file', file)
     const { data } = await api.post('/api/upload', form)
     return data
   } catch (err) {
-    throw apiError(err, 'Video upload failed')
+    throw apiError(err, 'Upload failed')
   }
 }
 
-// Flattens a structured analysis into a readable context block that gets
-// injected into the next model's prompt.
+// Flattens a video analysis into a readable context block for the next message.
 export function analysisToContext(analysis) {
   if (!analysis) return ''
   const lines = [
@@ -26,9 +26,7 @@ export function analysisToContext(analysis) {
   ]
   if (analysis.keyMoments?.length) {
     lines.push('- Key moments:')
-    for (const m of analysis.keyMoments) {
-      lines.push(`  - ${m.time || '?'}: ${m.description || ''}`)
-    }
+    for (const m of analysis.keyMoments) lines.push(`  - ${m.time || '?'}: ${m.description || ''}`)
   }
   return lines.join('\n')
 }

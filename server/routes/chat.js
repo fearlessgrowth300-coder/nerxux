@@ -50,8 +50,12 @@ function toMessage(result, { modelLabel, stage } = {}) {
 // Builds the MCP toolset for a user: Anthropic-format tool defs plus a router
 // that executes a tool call against the right connector. Only the Claude
 // adapter uses these; other adapters ignore the extra args.
-async function buildMcpToolset(userId) {
-  const connectors = await getEnabledConnectors(userId)
+async function buildMcpToolset(userId, connectorIds) {
+  let connectors = await getEnabledConnectors(userId)
+  // Per-chat selection: if the client sent a list, only use those connectors.
+  if (Array.isArray(connectorIds)) {
+    connectors = connectors.filter((c) => connectorIds.includes(c.id))
+  }
   const tools = []
   const routeMap = new Map()
   for (const c of connectors) {
@@ -79,8 +83,9 @@ async function buildMcpToolset(userId) {
   return { tools, onToolCall }
 }
 
-// Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP tools.
-async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp }) {
+// Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP
+// tools, attachments (images/PDF), and web search.
+async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp, attachments, webSearch }) {
   const info = getModelById(modelId)
   if (!info) throw new Error(`Unknown model: ${modelId}`)
   const result = await runTool(info.provider, userId, {
@@ -89,6 +94,8 @@ async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp }) {
     model: info.apiModel,
     tools: mcp?.tools,
     onToolCall: mcp?.onToolCall,
+    attachments,
+    webSearch,
   })
   return { result, label: info.label }
 }
@@ -106,6 +113,9 @@ router.post('/', async (req, res, next) => {
       systemPrompt = '',
       videoContext = null,
       auto = false,
+      attachments = [],
+      webSearch = false,
+      connectorIds = null,
     } = req.body || {}
 
     const lastUser = [...history].reverse().find((m) => m.role === 'user')
@@ -113,7 +123,8 @@ router.post('/', async (req, res, next) => {
     const basePrompt = buildPrompt(history, videoContext)
 
     // MCP tools the user has connected + enabled (used by the Claude adapter).
-    const mcp = await buildMcpToolset(req.user.id)
+    const mcp = await buildMcpToolset(req.user.id, connectorIds)
+    const extra = { attachments, webSearch }
 
     // ---------- AUTO (intent router) MODE ----------
     if (auto) {
@@ -172,7 +183,7 @@ router.post('/', async (req, res, next) => {
             const prompt = priorOutput
               ? `${basePrompt}\n\n[Analysis from the previous step]\n${priorOutput}`
               : basePrompt
-            const r = await runChatModel(meta.model, req.user.id, { prompt, systemPrompt, mcp })
+            const r = await runChatModel(meta.model, req.user.id, { prompt, systemPrompt, mcp, ...extra })
             result = r.result
             priorOutput = result.content
           }
@@ -203,6 +214,7 @@ router.post('/', async (req, res, next) => {
           prompt: `${basePrompt}\n\n(Act as an analyst: break down the request and prepare concise notes for an executor model.)`,
           systemPrompt,
           mcp,
+          ...extra,
         })
         analysis = a.result.content
         messages.push(toMessage(a.result, { modelLabel: a.label, stage: 'analyst' }))
@@ -229,7 +241,7 @@ router.post('/', async (req, res, next) => {
 
     // Single model.
     try {
-      const r = await runChatModel(modelA, req.user.id, { prompt: basePrompt, systemPrompt, mcp })
+      const r = await runChatModel(modelA, req.user.id, { prompt: basePrompt, systemPrompt, mcp, ...extra })
       messages.push(toMessage(r.result, { modelLabel: r.label }))
     } catch (e) {
       const label = getModelById(modelA)?.label || modelA
