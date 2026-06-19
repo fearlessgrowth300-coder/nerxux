@@ -32,3 +32,15 @@ export async function sendChat({
     throw apiError(err, 'Chat request failed')
   }
 }
+
+// Continues a paused turn after the user approves/denies tools.
+// decisions: { [toolUseId]: 'approve' | 'deny' }
+export async function resumeChat(pendingId, decisions) {
+  try {
+    const { data } = await api.post('/api/chat/resume', { pendingId, decisions })
+    return data.messages
+  } catch (err) {
+    throw apiError(err, 'Resume failed')
+  }
+}
+

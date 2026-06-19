@@ -9,40 +9,51 @@ function composeSystem(systemPrompt = '', skills = []) {
   return parts.join('\n\n')
 }
 
-// Builds the first user message content: any image/PDF attachments + the text.
 function buildUserContent(prompt, attachments = []) {
   const content = []
   for (const a of attachments) {
-    if (a.kind === 'image' && a.base64) {
-      content.push({ type: 'image', source: { type: 'base64', media_type: a.mimeType, data: a.base64 } })
-    } else if (a.kind === 'pdf' && a.base64) {
-      content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } })
-    }
+    if (a.kind === 'image' && a.base64) content.push({ type: 'image', source: { type: 'base64', media_type: a.mimeType, data: a.base64 } })
+    else if (a.kind === 'pdf' && a.base64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.base64 } })
   }
   content.push({ type: 'text', text: prompt })
   return content.length === 1 ? prompt : content
 }
 
-// Text generation via the Anthropic Messages API, with optional image/PDF
-// attachments, web search, and MCP tool use.
-// { prompt, systemPrompt, skills, apiKey, model, tools?, onToolCall?, attachments?, webSearch? }
+function finalText(response) {
+  return (response?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+}
+
+// Text generation via Anthropic Messages API, with image/PDF attachments, web
+// search, and MCP tool use that can pause for per-tool approval.
+//
+// { prompt, systemPrompt, skills, apiKey, model, tools?, onToolCall?, attachments?,
+//   webSearch?, permissionFor?, resume? }
+//
+// `permissionFor(name)` -> 'allow' | 'approval'. When a requested tool needs
+// approval, returns { ok, pending:true, pendingTools, resumeState }.
+// `resume` = { messages, results } continues a paused run.
 export async function run({
-  prompt, systemPrompt, skills, apiKey, model, tools, onToolCall, attachments, webSearch,
+  prompt, systemPrompt, skills, apiKey, model, tools, onToolCall, attachments,
+  webSearch, permissionFor, resume,
 }) {
   if (!apiKey) throw new Error('Anthropic API key is not connected')
 
   const client = new Anthropic({ apiKey })
   const system = composeSystem(systemPrompt, skills)
+  const perm = typeof permissionFor === 'function' ? permissionFor : () => 'allow'
 
   const allTools = []
   if (Array.isArray(tools)) allTools.push(...tools)
   if (webSearch) allTools.push({ type: 'web_search_20260209', name: 'web_search' })
   const hasCustomTools = Array.isArray(tools) && tools.length > 0 && typeof onToolCall === 'function'
 
-  const messages = [{ role: 'user', content: buildUserContent(prompt, attachments) }]
+  // Build or restore the message history.
+  const messages = resume ? [...resume.messages] : [{ role: 'user', content: buildUserContent(prompt, attachments) }]
+  if (resume) messages.push({ role: 'user', content: resume.results })
+
   const toolCalls = []
   let response
-  const MAX_TURNS = 8
+  const MAX_TURNS = 10
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     response = await client.messages.create({
@@ -53,48 +64,52 @@ export async function run({
       messages,
     })
 
-    // Server-side tools (web search) may pause; resend to continue.
     if (response.stop_reason === 'pause_turn') {
       messages.push({ role: 'assistant', content: response.content })
       continue
     }
-
     if (response.stop_reason !== 'tool_use') break
 
-    // Custom (MCP) tool calls — execute and feed results back.
     messages.push({ role: 'assistant', content: response.content })
-    const results = []
+
+    const autoResults = []
+    const pendingTools = []
     for (const block of response.content) {
       if (block.type !== 'tool_use') continue
+      if (perm(block.name) === 'approval') {
+        pendingTools.push({ id: block.id, name: block.name, input: block.input })
+        continue
+      }
       toolCalls.push({ name: block.name, input: block.input })
-      let output
-      let isError = false
+      let output, isError = false
       try {
         output = hasCustomTools ? await onToolCall(block.name, block.input) : 'Tool not available'
       } catch (e) {
         output = `Tool error: ${e.message}`
         isError = true
       }
-      results.push({
-        type: 'tool_result',
-        tool_use_id: block.id,
-        content: String(output ?? ''),
-        ...(isError ? { is_error: true } : {}),
-      })
+      autoResults.push({ type: 'tool_result', tool_use_id: block.id, content: String(output ?? ''), ...(isError ? { is_error: true } : {}) })
     }
-    messages.push({ role: 'user', content: results })
-  }
 
-  const content = (response?.content || [])
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('')
+    // Some tools require approval — pause and hand state back to the caller.
+    if (pendingTools.length) {
+      return {
+        ok: true,
+        pending: true,
+        pendingTools,
+        resumeState: { messages, autoResults },
+        provider: 'claude',
+      }
+    }
+
+    messages.push({ role: 'user', content: autoResults })
+  }
 
   return {
     ok: true,
     provider: 'claude',
     type: 'text',
-    content,
+    content: finalText(response),
     model: response?.model,
     usage: response?.usage,
     ...(toolCalls.length ? { toolCalls } : {}),

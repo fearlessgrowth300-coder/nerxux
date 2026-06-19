@@ -6,6 +6,7 @@ import { listConnections } from '../lib/vault.js'
 import { runTool } from '../adapters/index.js'
 import { getEnabledConnectors } from '../lib/mcpStore.js'
 import { callMcpTool } from '../lib/mcp.js'
+import { savePending, takePending } from '../lib/pendingApprovals.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -58,6 +59,7 @@ async function buildMcpToolset(userId, connectorIds) {
   }
   const tools = []
   const routeMap = new Map()
+  const permMap = new Map()
   for (const c of connectors) {
     for (const t of c.tools || []) {
       tools.push({
@@ -66,8 +68,10 @@ async function buildMcpToolset(userId, connectorIds) {
         input_schema: t.inputSchema || { type: 'object', properties: {} },
       })
       routeMap.set(t.name, { url: c.url, token: c.token, authProvider: c.authProvider })
+      permMap.set(t.name, c.toolPerms?.[t.name] || 'allow')
     }
   }
+  const permissionFor = (name) => permMap.get(name) || 'allow'
   const onToolCall = async (name, input) => {
     const target = routeMap.get(name)
     if (!target) return `No MCP connector provides tool "${name}".`
@@ -80,12 +84,12 @@ async function buildMcpToolset(userId, connectorIds) {
     })
     return r.text || JSON.stringify(r.raw || {})
   }
-  return { tools, onToolCall }
+  return { tools, onToolCall, permissionFor }
 }
 
 // Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP
 // tools, attachments (images/PDF), and web search.
-async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp, attachments, webSearch }) {
+async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp, attachments, webSearch, permissionFor, resume }) {
   const info = getModelById(modelId)
   if (!info) throw new Error(`Unknown model: ${modelId}`)
   const result = await runTool(info.provider, userId, {
@@ -96,6 +100,8 @@ async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp, attach
     onToolCall: mcp?.onToolCall,
     attachments,
     webSearch,
+    permissionFor,
+    resume,
   })
   return { result, label: info.label }
 }
@@ -239,15 +245,77 @@ router.post('/', async (req, res, next) => {
       return res.json({ messages })
     }
 
-    // Single model.
+    // Single model (supports per-tool approval pauses).
     try {
-      const r = await runChatModel(modelA, req.user.id, { prompt: basePrompt, systemPrompt, mcp, ...extra })
+      const r = await runChatModel(modelA, req.user.id, {
+        prompt: basePrompt, systemPrompt, mcp, ...extra, permissionFor: mcp.permissionFor,
+      })
+      if (r.result?.pending) {
+        const pendingId = savePending({
+          userId: req.user.id, modelId: modelA, systemPrompt, webSearch, connectorIds,
+          resumeState: r.result.resumeState, pendingTools: r.result.pendingTools,
+        })
+        return res.json({
+          messages: [{ role: 'approval', pendingId, modelLabel: r.label, tools: r.result.pendingTools }],
+        })
+      }
       messages.push(toMessage(r.result, { modelLabel: r.label }))
     } catch (e) {
       const label = getModelById(modelA)?.label || modelA
       messages.push({ role: 'assistant', error: true, modelLabel: label, content: `⚠️ ${label}: ${e.message}` })
     }
     res.json({ messages })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/chat/resume — continue a paused turn after the user decides on
+// approval-required tools. Body: { pendingId, decisions: { toolUseId: 'approve'|'deny' } }
+router.post('/resume', async (req, res, next) => {
+  try {
+    const { pendingId, decisions = {} } = req.body || {}
+    const pend = takePending(pendingId)
+    if (!pend || pend.userId !== req.user.id) {
+      return res.status(400).json({ error: 'This approval expired — please resend your message.' })
+    }
+
+    const mcp = await buildMcpToolset(pend.userId, pend.connectorIds)
+
+    // Combine the already-run auto tools with the user's decisions.
+    const results = [...(pend.resumeState.autoResults || [])]
+    for (const t of pend.pendingTools) {
+      if ((decisions[t.id] || 'deny') === 'approve') {
+        let output, isError = false
+        try {
+          output = await mcp.onToolCall(t.name, t.input)
+        } catch (e) {
+          output = `Tool error: ${e.message}`
+          isError = true
+        }
+        results.push({ type: 'tool_result', tool_use_id: t.id, content: String(output ?? ''), ...(isError ? { is_error: true } : {}) })
+      } else {
+        results.push({ type: 'tool_result', tool_use_id: t.id, content: 'The user denied permission to run this tool.', is_error: true })
+      }
+    }
+
+    const r = await runChatModel(pend.modelId, pend.userId, {
+      systemPrompt: pend.systemPrompt,
+      mcp,
+      webSearch: pend.webSearch,
+      permissionFor: mcp.permissionFor,
+      resume: { messages: pend.resumeState.messages, results },
+    })
+
+    if (r.result?.pending) {
+      const nextId = savePending({
+        userId: pend.userId, modelId: pend.modelId, systemPrompt: pend.systemPrompt,
+        webSearch: pend.webSearch, connectorIds: pend.connectorIds,
+        resumeState: r.result.resumeState, pendingTools: r.result.pendingTools,
+      })
+      return res.json({ messages: [{ role: 'approval', pendingId: nextId, modelLabel: r.label, tools: r.result.pendingTools }] })
+    }
+    res.json({ messages: [toMessage(r.result, { modelLabel: r.label })] })
   } catch (err) {
     next(err)
   }

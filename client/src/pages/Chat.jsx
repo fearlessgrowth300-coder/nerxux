@@ -8,7 +8,7 @@ import {
   ConnectionsIcon, InstructionsIcon, SendIcon, SparkIcon, CloseIcon,
 } from '../components/icons'
 import { useAuth } from '../context/AuthContext'
-import { sendChat } from '../lib/chat'
+import { sendChat, resumeChat } from '../lib/chat'
 import { uploadFile, analysisToContext } from '../lib/upload'
 import { buildSystemPrompt } from '../lib/systemPrompt'
 import { listSkills } from '../lib/skills'
@@ -156,6 +156,21 @@ export default function Chat() {
     }
   }
 
+  // Resolve a tool-approval card: send the user's decisions, append the result,
+  // and mark the card resolved.
+  async function handleApproval(cardId, pendingId, decisions) {
+    setMessages((prev) => prev.map((m) => (m.id === cardId ? { ...m, resolved: true } : m)))
+    setSending(true)
+    try {
+      const replies = await resumeChat(pendingId, decisions)
+      setMessages((prev) => [...prev, ...replies.map((r) => ({ id: uuid(), ...r }))])
+    } catch (e) {
+      setMessages((prev) => [...prev, { id: uuid(), role: 'assistant', content: `⚠️ ${e.message}`, error: true }])
+    } finally {
+      setSending(false)
+    }
+  }
+
   function toggleConnector(id) {
     setActiveConnectors((prev) => {
       const next = new Set(prev)
@@ -232,7 +247,8 @@ export default function Chat() {
               {messages.map((m) =>
                 m.role === 'video' ? <VideoAnalysisCard key={m.id} message={m} />
                   : m.role === 'routing' ? <RoutingCard key={m.id} routing={m.routing} />
-                    : <Message key={m.id} message={m} />
+                    : m.role === 'approval' ? <ApprovalCard key={m.id} message={m} onDecide={handleApproval} />
+                      : <Message key={m.id} message={m} />
               )}
               {sending && (
                 <TypingIndicator label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
@@ -525,6 +541,46 @@ function MediaBlock({ media, type }) {
   if (type === 'video') return <video controls src={src} className="mt-3 w-full rounded-lg" />
   if (type === 'image') return <img src={src} alt="generated" className="mt-3 max-w-full rounded-lg" />
   return null
+}
+
+function ApprovalCard({ message, onDecide }) {
+  const { id, pendingId, tools = [], modelLabel, resolved } = message
+  function decide(decision) {
+    const decisions = {}
+    for (const t of tools) decisions[t.id] = decision
+    onDecide(id, pendingId, decisions)
+  }
+  return (
+    <div className="flex justify-start">
+      <div className="w-full max-w-[85%]">
+        <div className="mb-1 flex items-center gap-2">
+          <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300">Approval needed</span>
+          {modelLabel && <span className="text-[10px] text-gray-500">{modelLabel}</span>}
+        </div>
+        <div className="space-y-2 rounded-2xl border border-amber-500/30 bg-nexus-panel px-4 py-3 text-sm">
+          <p className="text-gray-300">{modelLabel || 'The model'} wants to run {tools.length === 1 ? 'a tool' : 'these tools'}:</p>
+          <ul className="space-y-1">
+            {tools.map((t) => (
+              <li key={t.id} className="rounded-lg bg-nexus-bg px-3 py-2 text-xs">
+                <span className="font-mono text-gray-200">{t.name}</span>
+                {t.input && Object.keys(t.input).length > 0 && (
+                  <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-gray-500">{JSON.stringify(t.input, null, 2)}</pre>
+                )}
+              </li>
+            ))}
+          </ul>
+          {resolved ? (
+            <p className="text-xs text-gray-500">Decision sent.</p>
+          ) : (
+            <div className="flex gap-2 pt-1">
+              <button onClick={() => decide('approve')} className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-emerald-500">Approve</button>
+              <button onClick={() => decide('deny')} className="rounded-lg border border-nexus-border px-4 py-1.5 text-xs text-gray-300 transition hover:bg-white/5">Deny</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function RoutingCard({ routing }) {

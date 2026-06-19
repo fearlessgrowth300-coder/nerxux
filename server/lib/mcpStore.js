@@ -279,6 +279,7 @@ export async function getEnabledConnectors(userId) {
       name: row.name,
       url: row.url,
       tools,
+      toolPerms: perms,
       ...authFor(row),
     }
   })
