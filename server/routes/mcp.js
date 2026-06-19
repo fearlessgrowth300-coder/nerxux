@@ -76,7 +76,12 @@ router.post('/', async (req, res, next) => {
 // open in a popup, or { authorized: true } if tokens already exist.
 router.post('/:id/authorize', async (req, res, next) => {
   try {
-    res.json(await startOAuth(req.user.id, req.params.id))
+    // Derive the public callback from the actual request so it works both
+    // locally and when deployed (behind a proxy). Override via MCP_OAUTH_CALLBACK.
+    const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0]
+    const host = req.headers['x-forwarded-host'] || req.get('host')
+    const redirectUri = process.env.MCP_OAUTH_CALLBACK || `${proto}://${host}/api/mcp/oauth/callback`
+    res.json(await startOAuth(req.user.id, req.params.id, redirectUri))
   } catch (err) {
     next(err)
   }

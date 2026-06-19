@@ -112,4 +112,5 @@ alter table public.mcp_connectors
   add column if not exists oauth_tokens_ciphertext text,
   add column if not exists oauth_tokens_iv text,
   add column if not exists oauth_tokens_tag text,
-  add column if not exists tool_perms jsonb not null default '{}'::jsonb;
+  add column if not exists tool_perms jsonb not null default '{}'::jsonb,
+  add column if not exists oauth_redirect text;

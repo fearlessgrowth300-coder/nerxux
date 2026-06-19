@@ -151,13 +151,47 @@ export async function refreshConnector(userId, id) {
   return publicRow(data)
 }
 
+// Turns low-level OAuth errors into an actionable message.
+function friendlyAuthError(e) {
+  const m = (e?.message || '').toLowerCase()
+  if (
+    m.includes('registration') ||
+    m.includes('not available') ||
+    m.includes('incompatible auth server') ||
+    m.includes('must be saveable')
+  ) {
+    return (
+      "This server doesn't allow automatic app registration. Open the connector's " +
+      'Advanced settings, paste an OAuth Client ID (and Secret) from the provider, then Connect.'
+    )
+  }
+  return e?.message || 'Authorization failed'
+}
+
 // Begins the OAuth flow: returns { authUrl } to open in the browser, or
-// { authorized: true } if valid tokens already exist.
-export async function startOAuth(userId, id) {
+// { authorized: true } if valid tokens already exist. `redirectUri` is the
+// public callback for this deployment (derived from the request).
+export async function startOAuth(userId, id, redirectUri) {
   const row = await getRow(userId, id)
+
+  // Reset transient handshake state; re-register fresh (DCR) when not yet
+  // connected and not using a pre-registered client, so the redirect_uri matches.
+  const reset = { oauth_state: null, oauth_verifier: null, oauth_redirect: redirectUri }
+  if (!row.oauth_client_id && !row.oauth_tokens_ciphertext) reset.oauth_client = null
+  await supabaseAdmin
+    .from('mcp_connectors')
+    .update({ ...reset, updated_at: new Date().toISOString() })
+    .eq('id', id)
+  const fresh = await getRow(userId, id)
+
   let authUrl = null
-  const { provider } = createProvider(row, { onRedirect: (u) => { authUrl = u } })
-  const result = await auth(provider, { serverUrl: row.url })
+  const { provider } = createProvider(fresh, { redirectUri, onRedirect: (u) => { authUrl = u } })
+  let result
+  try {
+    result = await auth(provider, { serverUrl: fresh.url })
+  } catch (e) {
+    throw new Error(friendlyAuthError(e))
+  }
   if (result === 'AUTHORIZED') {
     const connector = await refreshConnector(userId, id)
     return { authorized: true, connector }
@@ -177,7 +211,7 @@ export async function completeOAuth(state, code) {
   if (error) throw error
   if (!row) throw new Error('Invalid or expired authorization state')
 
-  const { provider } = createProvider(row)
+  const { provider } = createProvider(row, { redirectUri: row.oauth_redirect })
   await auth(provider, { serverUrl: row.url, authorizationCode: code }) // saves tokens
 
   // Re-read to pick up saved tokens, then list tools.
@@ -186,7 +220,7 @@ export async function completeOAuth(state, code) {
   let status = 'connected'
   let lastError = null
   try {
-    const { provider: p2 } = createProvider(fresh)
+    const { provider: p2 } = createProvider(fresh, { redirectUri: fresh.oauth_redirect })
     tools = await discoverTools({ url: fresh.url, authProvider: p2 })
   } catch (e) {
     status = 'error'
