@@ -13,6 +13,7 @@ import { uploadFile, analysisToContext } from '../lib/upload'
 import { buildSystemPrompt } from '../lib/systemPrompt'
 import { listSkills } from '../lib/skills'
 import { getConnectors } from '../lib/mcp'
+import { getPrefs } from '../lib/prefs'
 import { getModelById } from '@shared/models'
 
 const CHIPS = [
@@ -82,10 +83,11 @@ export default function Chat() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(messages))
+      if (getPrefs(user?.id).saveHistory === false) localStorage.removeItem(storageKey)
+      else localStorage.setItem(storageKey, JSON.stringify(messages))
     } catch {}
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, sending, storageKey])
+  }, [messages, sending, storageKey, user?.id])
 
   useEffect(() => {
     try {
@@ -225,7 +227,7 @@ export default function Chat() {
           <div className="w-full max-w-2xl">
             <h1 className="mb-8 flex items-center justify-center gap-2 text-center text-3xl font-semibold text-gray-100">
               <SparkIcon className="h-7 w-7 text-nexus-accent2" />
-              Welcome, {firstName(user?.email)}
+              Welcome, {getPrefs(user?.id).callName || firstName(user?.email)}
             </h1>
             {error && <p className="mb-3 text-center text-xs text-red-400">{error}</p>}
             {composer}

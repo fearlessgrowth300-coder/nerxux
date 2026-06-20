@@ -1,5 +1,7 @@
+import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AuthProvider } from './context/AuthContext'
+import { AuthProvider, useAuth } from './context/AuthContext'
+import { applyAppearance, getPrefs } from './lib/prefs'
 import ProtectedRoute from './components/ProtectedRoute'
 import DashboardLayout from './components/DashboardLayout'
 import Login from './pages/Login'
@@ -10,9 +12,19 @@ import Instructions from './pages/Instructions'
 import Connections from './pages/Connections'
 import Settings from './pages/Settings'
 
+// Applies the current user's appearance prefs (accent + font) on load/change.
+function AppearanceSync() {
+  const { user } = useAuth()
+  useEffect(() => {
+    applyAppearance(getPrefs(user?.id))
+  }, [user?.id])
+  return null
+}
+
 export default function App() {
   return (
     <AuthProvider>
+      <AppearanceSync />
       <BrowserRouter>
         <Routes>
           {/* Public */}
