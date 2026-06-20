@@ -16,6 +16,7 @@ import {
   setToolPermission,
   removeConnector,
 } from '../lib/mcp'
+import { getNative, getNativeCallbackUrl, connectNative, disconnectNative } from '../lib/native'
 
 const HINTS = {
   claude: 'console.anthropic.com → API Keys',
@@ -32,8 +33,161 @@ export default function Connections() {
       description="Connect provider API keys and custom MCP servers. Keys are encrypted on the server and never sent back to your browser."
     >
       <ApiKeyVault />
+      <NativeIntegrations />
       <McpConnectors />
     </PageShell>
+  )
+}
+
+/* ----------------------- Native integrations (YouTube, …) ----------------------- */
+
+function NativeIntegrations() {
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(null)
+  const [callbackUrl, setCallbackUrl] = useState('')
+
+  const [modalProvider, setModalProvider] = useState(null) // provider being connected
+  const [form, setForm] = useState({ clientId: '', clientSecret: '' })
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+
+  async function refresh() {
+    setLoading(true)
+    try {
+      setItems(await getNative())
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => {
+    refresh()
+    getNativeCallbackUrl().then((u) => u && setCallbackUrl(u))
+    function onMsg(e) {
+      if (e.data?.type === 'native-oauth') setTimeout(refresh, 600)
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+  }, [])
+
+  async function handleConnect() {
+    if (!form.clientId.trim() || !form.clientSecret.trim()) {
+      setFormError('Client ID and Client Secret are required.')
+      return
+    }
+    setSaving(true)
+    setFormError('')
+    try {
+      const authUrl = await connectNative(modalProvider, form)
+      setModalProvider(null)
+      setForm({ clientId: '', clientSecret: '' })
+      window.open(authUrl, 'native-oauth', 'width=520,height=720')
+    } catch (e) {
+      setFormError(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleDisconnect(provider) {
+    setBusy(provider)
+    try {
+      await disconnectNative(provider)
+      await refresh()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const HELP = {
+    youtube: 'console.cloud.google.com → APIs & Services → Credentials → OAuth client (Web). Enable the "YouTube Data API v3".',
+  }
+
+  return (
+    <section className="mt-10">
+      <h2 className="mb-1 text-sm font-semibold text-gray-300">App integrations</h2>
+      <p className="mb-3 text-xs text-gray-500">
+        Connect apps via their own OAuth so the AI can pull your data in chat (e.g. your YouTube channel + stats).
+      </p>
+      {error && <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>}
+
+      {loading ? (
+        <div className="h-20 animate-pulse rounded-xl bg-white/5" />
+      ) : (
+        <ul className="space-y-3">
+          {items.map((c) => (
+            <li key={c.provider} className="rounded-xl border border-nexus-border bg-nexus-panel p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-medium text-gray-100">{c.label}</h3>
+                    <StatusDot connected={c.connected} on={`${c.toolCount} tools`} off="Not connected" />
+                  </div>
+                  {c.connected && c.meta?.channel && (
+                    <p className="mt-0.5 text-sm text-gray-400">
+                      {c.meta.channel}
+                      {c.meta.subscribers && <span className="text-gray-600"> · {c.meta.subscribers} subscribers</span>}
+                    </p>
+                  )}
+                  {!c.connected && <p className="mt-1 text-xs text-gray-600">Get credentials: {HELP[c.provider]}</p>}
+                </div>
+                {c.connected ? (
+                  <button onClick={() => handleDisconnect(c.provider)} disabled={busy === c.provider}
+                    className="rounded-lg px-3 py-1.5 text-sm text-red-400 transition hover:bg-red-500/10 disabled:opacity-50">
+                    {busy === c.provider ? '…' : 'Disconnect'}
+                  </button>
+                ) : (
+                  <button onClick={() => { setForm({ clientId: '', clientSecret: '' }); setFormError(''); setModalProvider(c.provider) }}
+                    className="shrink-0 rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500">
+                    Connect
+                  </button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <Modal
+        open={modalProvider !== null}
+        onClose={() => !saving && setModalProvider(null)}
+        title={`Connect ${items.find((i) => i.provider === modalProvider)?.label || ''}`}
+        footer={
+          <>
+            <button onClick={() => setModalProvider(null)} disabled={saving}
+              className="rounded-lg border border-nexus-border px-4 py-2 text-sm text-gray-300 transition hover:bg-white/5 disabled:opacity-50">Cancel</button>
+            <button onClick={handleConnect} disabled={saving}
+              className="rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50">
+              {saving ? 'Starting…' : 'Connect'}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-400">
+            Create an OAuth app at the provider, paste its credentials, and register the redirect URI below. Then sign in.
+          </p>
+          {formError && <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{formError}</p>}
+          {callbackUrl && (
+            <div className="rounded-lg bg-nexus-bg p-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Redirect URI to register</p>
+              <div className="mt-1 flex items-center gap-2">
+                <code className="flex-1 truncate text-xs text-nexus-accent2">{callbackUrl}</code>
+                <button type="button" onClick={() => navigator.clipboard?.writeText(callbackUrl)}
+                  className="rounded border border-nexus-border px-2 py-0.5 text-[10px] text-gray-300 hover:bg-white/5">Copy</button>
+              </div>
+            </div>
+          )}
+          <Field label="OAuth Client ID" value={form.clientId} onChange={(v) => setForm((f) => ({ ...f, clientId: v }))} placeholder="xxxx.apps.googleusercontent.com" />
+          <Field label="OAuth Client Secret" type="password" value={form.clientSecret} onChange={(v) => setForm((f) => ({ ...f, clientSecret: v }))} placeholder="GOCSPX-…" />
+        </div>
+      </Modal>
+    </section>
   )
 }
 

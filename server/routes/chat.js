@@ -7,6 +7,7 @@ import { runTool } from '../adapters/index.js'
 import { getEnabledConnectors } from '../lib/mcpStore.js'
 import { callMcpTool } from '../lib/mcp.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
+import { buildNativeToolset } from '../lib/nativeTools.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -71,10 +72,15 @@ async function buildMcpToolset(userId, connectorIds) {
       permMap.set(t.name, c.toolPerms?.[t.name] || 'allow')
     }
   }
+  // Merge native (first-party) tools — e.g. YouTube — for connected providers.
+  const native = await buildNativeToolset(userId)
+  for (const t of native.tools) tools.push(t)
+
   const permissionFor = (name) => permMap.get(name) || 'allow'
   const onToolCall = async (name, input) => {
+    if (native.has(name)) return native.run(name, input)
     const target = routeMap.get(name)
-    if (!target) return `No MCP connector provides tool "${name}".`
+    if (!target) return `No connector provides tool "${name}".`
     const r = await callMcpTool({
       url: target.url,
       token: target.token,

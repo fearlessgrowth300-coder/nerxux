@@ -114,3 +114,33 @@ alter table public.mcp_connectors
   add column if not exists oauth_tokens_tag text,
   add column if not exists tool_perms jsonb not null default '{}'::jsonb,
   add column if not exists oauth_redirect text;
+
+-- ---------------------------------------------------------------------------
+-- Native connectors — first-party service integrations (e.g. YouTube) that use
+-- the provider's own OAuth + REST API rather than MCP. One row per user+provider.
+-- App client_id + secret (provider OAuth app) and tokens are stored encrypted.
+-- ---------------------------------------------------------------------------
+create table if not exists public.native_connections (
+  id                 uuid primary key default gen_random_uuid(),
+  user_id            uuid not null references auth.users (id) on delete cascade,
+  provider           text not null,
+  client_id          text,
+  secret_ciphertext  text,
+  secret_iv          text,
+  secret_tag         text,
+  tokens_ciphertext  text,
+  tokens_iv          text,
+  tokens_tag         text,
+  oauth_state        text,
+  oauth_redirect     text,
+  status             text not null default 'disconnected',
+  meta               jsonb not null default '{}'::jsonb,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now(),
+  unique (user_id, provider)
+);
+
+create index if not exists native_connections_user_idx on public.native_connections (user_id);
+alter table public.native_connections enable row level security;
+-- Server-only (service role); no client policy on purpose.
+drop policy if exists "native_connections_owner_all" on public.native_connections;
