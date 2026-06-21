@@ -104,6 +104,20 @@ function NativeIntegrations() {
     }
   }
 
+  // One-click connect using the owner-configured platform app (no credentials).
+  async function handlePlatformConnect(provider) {
+    setBusy(provider)
+    setError('')
+    try {
+      const authUrl = await connectNative(provider, {})
+      window.open(authUrl, 'native-oauth', 'width=520,height=720')
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const HELP = {
     youtube: 'console.cloud.google.com → APIs & Services → Credentials → OAuth client (Web). Enable the "YouTube Data API v3".',
   }
@@ -134,7 +148,11 @@ function NativeIntegrations() {
                       {c.meta.subscribers && <span className="text-gray-600"> · {c.meta.subscribers} subscribers</span>}
                     </p>
                   )}
-                  {!c.connected && <p className="mt-1 text-xs text-gray-600">Get credentials: {HELP[c.provider]}</p>}
+                  {!c.connected && (
+                    <p className="mt-1 text-xs text-gray-600">
+                      {c.platform ? 'One-click — sign in with your own account.' : `Get credentials: ${HELP[c.provider]}`}
+                    </p>
+                  )}
                 </div>
                 {c.connected ? (
                   <button onClick={() => handleDisconnect(c.provider)} disabled={busy === c.provider}
@@ -142,9 +160,13 @@ function NativeIntegrations() {
                     {busy === c.provider ? '…' : 'Disconnect'}
                   </button>
                 ) : (
-                  <button onClick={() => { setForm({ clientId: '', clientSecret: '' }); setFormError(''); setModalProvider(c.provider) }}
-                    className="shrink-0 rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500">
-                    Connect
+                  <button
+                    onClick={() => c.platform
+                      ? handlePlatformConnect(c.provider)
+                      : (setForm({ clientId: '', clientSecret: '' }), setFormError(''), setModalProvider(c.provider))}
+                    disabled={busy === c.provider}
+                    className="shrink-0 rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50">
+                    {busy === c.provider ? '…' : 'Connect'}
                   </button>
                 )}
               </div>

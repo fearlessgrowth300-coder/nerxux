@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { supabaseAdmin } from './supabase.js'
 import { encrypt, decrypt } from './crypto.js'
 import { buildAuthUrl, exchangeCode, refreshAccessToken, getMyChannel } from './google.js'
+import { platformOAuthForNative } from './platformOAuth.js'
 
 function encField(value) {
   if (!value) return { c: null, i: null, t: null }
@@ -49,17 +50,30 @@ async function getRow(userId, provider) {
 
 // Stores the provider OAuth app credentials and returns the authorization URL.
 export async function startConnect(userId, provider, { clientId, clientSecret, redirectUri }) {
-  if (!clientId?.trim() || !clientSecret?.trim()) {
-    throw new Error('Client ID and Client Secret are required (from your Google Cloud OAuth app)')
+  let cid = clientId?.trim()
+  let csec = clientSecret?.trim()
+  let usingPlatform = false
+
+  // Fall back to the owner-configured platform OAuth app so users connect their
+  // OWN account with no setup (like Claude).
+  if (!cid || !csec) {
+    const plat = platformOAuthForNative(provider)
+    if (plat) { cid = plat.client_id; csec = plat.client_secret; usingPlatform = true }
   }
+  if (!cid || !csec) {
+    throw new Error('This integration isn’t set up yet. Ask the app owner to configure it, or add your own Client ID/Secret.')
+  }
+
   const state = crypto.randomBytes(16).toString('hex')
-  const sec = encField(clientSecret.trim())
+  // Only persist the secret when it's the user's own. The platform secret stays
+  // in the server env and is re-read when exchanging/refreshing tokens.
+  const sec = usingPlatform ? { c: null, i: null, t: null } : encField(csec)
 
   await supabaseAdmin.from('native_connections').upsert(
     {
       user_id: userId,
       provider,
-      client_id: clientId.trim(),
+      client_id: cid,
       secret_ciphertext: sec.c,
       secret_iv: sec.i,
       secret_tag: sec.t,
@@ -75,7 +89,15 @@ export async function startConnect(userId, provider, { clientId, clientSecret, r
     ? ['https://www.googleapis.com/auth/youtube.readonly']
     : ['https://www.googleapis.com/auth/youtube.readonly']
 
-  return buildAuthUrl({ clientId: clientId.trim(), redirectUri, state, scopes: SCOPES })
+  return buildAuthUrl({ clientId: cid, redirectUri, state, scopes: SCOPES })
+}
+
+// Resolves the client secret for a row: the user's stored secret, else the
+// platform secret from env (when the connection uses the platform app).
+function secretFor(row) {
+  return decField(row.secret_ciphertext, row.secret_iv, row.secret_tag)
+    || platformOAuthForNative(row.provider)?.client_secret
+    || null
 }
 
 // Completes the OAuth callback: exchanges the code, stores tokens, fetches meta.
@@ -88,10 +110,9 @@ export async function completeConnect(state, code) {
   if (error) throw error
   if (!row) throw new Error('Invalid or expired authorization state')
 
-  const clientSecret = decField(row.secret_ciphertext, row.secret_iv, row.secret_tag)
   const tokens = await exchangeCode({
     clientId: row.client_id,
-    clientSecret,
+    clientSecret: secretFor(row),
     code,
     redirectUri: row.oauth_redirect,
   })
@@ -135,10 +156,9 @@ export async function getAccessToken(userId, provider) {
   if (Date.now() < tokens.expiry) return tokens.access_token
 
   // Expired — refresh.
-  const clientSecret = decField(row.secret_ciphertext, row.secret_iv, row.secret_tag)
   const refreshed = await refreshAccessToken({
     clientId: row.client_id,
-    clientSecret,
+    clientSecret: secretFor(row),
     refreshToken: tokens.refresh_token,
   })
   const stored = {

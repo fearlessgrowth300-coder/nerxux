@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import { supabaseAdmin } from './supabase.js'
 import { encrypt, decrypt } from './crypto.js'
+import { platformOAuthForUrl } from './platformOAuth.js'
 
 // Default callback if a request-derived one isn't supplied (local dev).
 export const DEFAULT_CALLBACK =
@@ -31,14 +32,17 @@ function decryptSecret(row) {
 export function createProvider(row, { onRedirect, redirectUri } = {}) {
   const callback = redirectUri || row.oauth_redirect || DEFAULT_CALLBACK
 
-  // Pre-registered client (from Advanced settings) takes priority and skips DCR.
-  // If a Client ID is set, the optional secret is the OAuth client_secret.
+  // Client resolution order:
+  //  1. User-provided client (Advanced settings) — power users / own app.
+  //  2. Platform OAuth app (owner-configured) — so every user connects their
+  //     OWN account with no setup, like Claude.
+  //  3. A previously dynamically-registered client (DCR).
   let client
   if (row.oauth_client_id) {
     const sec = decryptSecret(row)
     client = { client_id: row.oauth_client_id, ...(sec ? { client_secret: sec } : {}) }
   } else {
-    client = row.oauth_client || undefined
+    client = platformOAuthForUrl(row.url) || row.oauth_client || undefined
   }
 
   let verifier = row.oauth_verifier || undefined

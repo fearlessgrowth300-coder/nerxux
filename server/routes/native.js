@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { requireAuth } from '../lib/auth.js'
 import { NATIVE_PROVIDERS } from '../lib/nativeTools.js'
 import { listNative, startConnect, completeConnect, disconnectNative } from '../lib/nativeStore.js'
+import { hasPlatformOAuthForNative } from '../lib/platformOAuth.js'
 
 const router = Router()
 
@@ -47,6 +48,7 @@ router.get('/', async (req, res, next) => {
       provider,
       label: def.label,
       toolCount: def.tools.length,
+      platform: hasPlatformOAuthForNative(provider), // owner set up the app → one-click
       ...(byProvider.get(provider) || { connected: false, status: 'disconnected', meta: {} }),
     }))
     res.json({ connectors: list })
