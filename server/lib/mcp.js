@@ -51,6 +51,24 @@ export async function discoverTools({ url, token, authProvider }) {
   })
 }
 
+// Pulls the first image/audio/video out of an MCP tool result, if any.
+function extractMedia(content = []) {
+  for (const c of content) {
+    if (c.type === 'image' && c.data) {
+      return { type: 'image', mimeType: c.mimeType || 'image/png', base64: c.data }
+    }
+    if (c.type === 'audio' && c.data) {
+      return { type: 'audio', mimeType: c.mimeType || 'audio/mpeg', base64: c.data }
+    }
+    if (c.type === 'resource' && c.resource?.uri) {
+      const mime = c.resource.mimeType || ''
+      const t = mime.startsWith('video') ? 'video' : mime.startsWith('audio') ? 'audio' : mime.startsWith('image') ? 'image' : 'file'
+      return { type: t, mimeType: mime || 'application/octet-stream', url: c.resource.uri }
+    }
+  }
+  return null
+}
+
 export async function callMcpTool({ url, token, authProvider, name, args }) {
   return withClient(url, { token, authProvider }, async (client) => {
     const result = await client.callTool({ name, arguments: args || {} })
@@ -58,6 +76,6 @@ export async function callMcpTool({ url, token, authProvider, name, args }) {
       .filter((c) => c.type === 'text')
       .map((c) => c.text)
       .join('\n')
-    return { text, isError: Boolean(result.isError), raw: result }
+    return { text, media: extractMedia(result.content), isError: Boolean(result.isError), raw: result }
   })
 }

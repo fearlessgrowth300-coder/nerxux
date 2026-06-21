@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { v4 as uuid } from 'uuid'
 import { requireAuth } from '../lib/auth.js'
-import { getDecryptedKey } from '../lib/vault.js'
+import { getProviderKey } from '../lib/vault.js'
 import { analyzeVideo, stubAnalysis } from '../lib/gemini.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -60,7 +60,7 @@ router.post('/', requireAuth, (req, res, next) => {
 
       try {
         if (kind === 'video') {
-          const apiKey = await getDecryptedKey(req.user.id, 'gemini')
+          const apiKey = await getProviderKey(req.user.id, 'gemini')
           let analysis
           let source
           if (apiKey) {

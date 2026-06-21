@@ -244,7 +244,10 @@ function ApiKeyVault() {
 
   return (
     <section>
-      <h2 className="mb-3 text-sm font-semibold text-gray-300">Provider API keys</h2>
+      <h2 className="text-sm font-semibold text-gray-300">Provider API keys</h2>
+      <p className="mb-3 text-xs text-gray-500">
+        Optional — the app already works with the platform's keys. Add your own only if you want to use your own quota/billing.
+      </p>
       {error && (
         <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>
       )}
@@ -261,7 +264,11 @@ function ApiKeyVault() {
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <h3 className="font-medium text-gray-100">{c.label}</h3>
-                  <StatusDot connected={c.connected} on="Connected" off="Not connected" />
+                  <StatusDot
+                    connected={c.connected || c.platform}
+                    on={c.connected ? 'Your key' : 'Platform key active'}
+                    off="Not connected"
+                  />
                 </div>
                 {c.connected && (
                   <button
@@ -296,7 +303,9 @@ function ApiKeyVault() {
                   </button>
                 </div>
               )}
-              <p className="mt-2 text-xs text-gray-600">Get a key: {HINTS[c.provider]}</p>
+              <p className="mt-2 text-xs text-gray-600">
+                {!c.connected && c.platform ? 'Already working via the platform key. ' : ''}Get your own key: {HINTS[c.provider]}
+              </p>
             </li>
           ))}
         </ul>

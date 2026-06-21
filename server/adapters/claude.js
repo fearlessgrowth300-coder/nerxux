@@ -52,6 +52,7 @@ export async function run({
   if (resume) messages.push({ role: 'user', content: resume.results })
 
   const toolCalls = []
+  let lastMedia = resume?.media || null
   let response
   const MAX_TURNS = 10
 
@@ -81,9 +82,12 @@ export async function run({
         continue
       }
       toolCalls.push({ name: block.name, input: block.input })
-      let output, isError = false
+      let output = '', isError = false
       try {
-        output = hasCustomTools ? await onToolCall(block.name, block.input) : 'Tool not available'
+        let res = hasCustomTools ? await onToolCall(block.name, block.input) : { content: 'Tool not available' }
+        if (typeof res === 'string') res = { content: res }
+        output = res.content
+        if (res.media) lastMedia = res.media
       } catch (e) {
         output = `Tool error: ${e.message}`
         isError = true
@@ -97,7 +101,7 @@ export async function run({
         ok: true,
         pending: true,
         pendingTools,
-        resumeState: { messages, autoResults },
+        resumeState: { messages, autoResults, media: lastMedia },
         provider: 'claude',
       }
     }
@@ -108,10 +112,11 @@ export async function run({
   return {
     ok: true,
     provider: 'claude',
-    type: 'text',
+    type: lastMedia ? lastMedia.type : 'text',
     content: finalText(response),
     model: response?.model,
     usage: response?.usage,
+    ...(lastMedia ? { media: lastMedia, mediaType: lastMedia.type } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
   }
 }

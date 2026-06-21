@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { requireAuth } from '../lib/auth.js'
 import { getModelById } from '../../shared/models.js'
 import { routeIntent } from '../lib/router.js'
-import { listConnections } from '../lib/vault.js'
+import { listConnections, getProviderKey } from '../lib/vault.js'
 import { runTool } from '../adapters/index.js'
 import { getEnabledConnectors } from '../lib/mcpStore.js'
 import { callMcpTool } from '../lib/mcp.js'
@@ -77,10 +77,12 @@ async function buildMcpToolset(userId, connectorIds) {
   for (const t of native.tools) tools.push(t)
 
   const permissionFor = (name) => permMap.get(name) || 'allow'
+  // Returns { content, media? } — content is text for the model, media (if any)
+  // is a generated image/audio/video to surface in the chat.
   const onToolCall = async (name, input) => {
-    if (native.has(name)) return native.run(name, input)
+    if (native.has(name)) return { content: await native.run(name, input) }
     const target = routeMap.get(name)
-    if (!target) return `No connector provides tool "${name}".`
+    if (!target) return { content: `No connector provides tool "${name}".` }
     const r = await callMcpTool({
       url: target.url,
       token: target.token,
@@ -88,7 +90,8 @@ async function buildMcpToolset(userId, connectorIds) {
       name,
       args: input,
     })
-    return r.text || JSON.stringify(r.raw || {})
+    const content = r.text || (r.media ? 'Generated media (shown below).' : JSON.stringify(r.raw || {}))
+    return { content, media: r.media || null }
   }
   return { tools, onToolCall, permissionFor }
 }
@@ -141,12 +144,15 @@ router.post('/', async (req, res, next) => {
     // ---------- AUTO (intent router) MODE ----------
     if (auto) {
       const connections = await listConnections(req.user.id)
-      const connectedTools = connections.filter((c) => c.connected).map((c) => c.provider)
+      // A tool is available if the user connected it OR the platform key is set.
+      const connectedTools = connections
+        .filter((c) => c.connected || c.platform)
+        .map((c) => c.provider)
 
       const { decision, source, error } = await routeIntent({
         userMessage: userText,
         connectedTools,
-        anthropicKey: null, // routeIntent pulls platform key; per-user handled below
+        anthropicKey: await getProviderKey(req.user.id, 'claude'),
       })
 
       const required = [decision.primary_tool]
@@ -290,16 +296,20 @@ router.post('/resume', async (req, res, next) => {
 
     // Combine the already-run auto tools with the user's decisions.
     const results = [...(pend.resumeState.autoResults || [])]
+    let media = pend.resumeState.media || null
     for (const t of pend.pendingTools) {
       if ((decisions[t.id] || 'deny') === 'approve') {
-        let output, isError = false
+        let content = '', isError = false
         try {
-          output = await mcp.onToolCall(t.name, t.input)
+          let res = await mcp.onToolCall(t.name, t.input)
+          if (typeof res === 'string') res = { content: res }
+          content = res.content
+          if (res.media) media = res.media
         } catch (e) {
-          output = `Tool error: ${e.message}`
+          content = `Tool error: ${e.message}`
           isError = true
         }
-        results.push({ type: 'tool_result', tool_use_id: t.id, content: String(output ?? ''), ...(isError ? { is_error: true } : {}) })
+        results.push({ type: 'tool_result', tool_use_id: t.id, content: String(content ?? ''), ...(isError ? { is_error: true } : {}) })
       } else {
         results.push({ type: 'tool_result', tool_use_id: t.id, content: 'The user denied permission to run this tool.', is_error: true })
       }
@@ -310,7 +320,7 @@ router.post('/resume', async (req, res, next) => {
       mcp,
       webSearch: pend.webSearch,
       permissionFor: mcp.permissionFor,
-      resume: { messages: pend.resumeState.messages, results },
+      resume: { messages: pend.resumeState.messages, results, media },
     })
 
     if (r.result?.pending) {
