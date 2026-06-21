@@ -6,6 +6,7 @@ import ProtectedRoute from './components/ProtectedRoute'
 import DashboardLayout from './components/DashboardLayout'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
+import { PrivacyPolicy, Terms, DataDeletion } from './pages/Legal'
 import Chat from './pages/Chat'
 import Skills from './pages/Skills'
 import Instructions from './pages/Instructions'
@@ -30,6 +31,9 @@ export default function App() {
           {/* Public */}
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/privacy" element={<PrivacyPolicy />} />
+          <Route path="/terms" element={<Terms />} />
+          <Route path="/data-deletion" element={<DataDeletion />} />
 
           {/* Protected dashboard shell with nested routes */}
           <Route
