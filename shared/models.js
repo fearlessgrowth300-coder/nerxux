@@ -54,6 +54,15 @@ export const CHAT_MODELS = [
     apiModel: 'nexus-local',
     vision: false,
   },
+  {
+    // Your FINE-TUNED model — an open base (Qwen2.5) trained on your data,
+    // imported into Ollama as `nexus-mine`. Codes and chats for real.
+    id: 'nexus-mine',
+    label: 'My Coder (fine-tuned)',
+    provider: 'ollama',
+    apiModel: 'nexus-mine',
+    vision: false,
+  },
 ]
 
 export const getModelById = (id) => CHAT_MODELS.find((m) => m.id === id) || null

@@ -4,12 +4,14 @@ import * as gemini from './gemini.js'
 import * as elevenlabs from './elevenlabs.js'
 import * as higgsfield from './higgsfield.js'
 import * as nexus from './nexus.js'
+import * as ollama from './ollama.js'
 import { getProviderKey } from '../lib/vault.js'
 
 // Maps a provider id to its adapter module. Each adapter exposes `run(args)`
 // and returns a normalized response { ok, provider, type, content, media?, ... }.
-// `nexus` is the user's own locally-trained model (no API key needed).
-export const ADAPTERS = { claude, openai, gemini, elevenlabs, higgsfield, nexus }
+// `nexus` is the user's from-scratch model; `ollama` serves the user's
+// fine-tuned model (and any local Ollama model). Neither needs an API key.
+export const ADAPTERS = { claude, openai, gemini, elevenlabs, higgsfield, nexus, ollama }
 
 // Resolves the key for `provider` (the user's own key, else the platform key)
 // and invokes the adapter. Throws if the provider is unknown.
