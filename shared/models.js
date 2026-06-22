@@ -10,6 +10,11 @@ export const PROVIDERS = {
   higgsfield: { id: 'higgsfield', label: 'Higgsfield' },
 }
 
+// The user's own locally-trained model. It needs no API key (the server's nexus
+// adapter calls the local model server), so it is intentionally NOT in PROVIDERS
+// — that keeps it off the Connections/vault page. Routing uses the adapter map.
+export const LOCAL_PROVIDER = 'nexus'
+
 // Chat-capable models surfaced in the Model A / Model B selectors (Step 8).
 export const CHAT_MODELS = [
   {
@@ -39,6 +44,15 @@ export const CHAT_MODELS = [
     provider: 'gemini',
     apiModel: 'gemini-2.0-flash',
     vision: true,
+  },
+  {
+    // Your own model — a from-scratch GPT trained locally by nexus-model/.
+    // No API key; the server's nexus adapter calls the local model server.
+    id: 'nexus-local',
+    label: 'Nexus (your model)',
+    provider: 'nexus',
+    apiModel: 'nexus-local',
+    vision: false,
   },
 ]
 

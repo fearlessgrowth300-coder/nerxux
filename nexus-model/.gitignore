@@ -1,0 +1,9 @@
+# Trained artifacts and data are large / machine-specific — don't commit them.
+data/raw/
+data/uploads/
+data/corpus.txt
+out/
+out_*/
+*.npz
+__pycache__/
+*.pyc

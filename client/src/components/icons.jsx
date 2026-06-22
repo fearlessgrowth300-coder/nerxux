@@ -139,5 +139,12 @@ export const LogoutIcon = (p) => (
   </svg>
 )
 
+export const BrainIcon = (p) => (
+  <svg {...base} {...p}>
+    <path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.5a2.5 2.5 0 0 0-1 4.79A2.5 2.5 0 0 0 7 16v.5A2.5 2.5 0 0 0 9.5 19 2.5 2.5 0 0 0 12 16.5V5.5A2.5 2.5 0 0 0 9.5 3z" />
+    <path d="M14.5 3A2.5 2.5 0 0 1 17 5.5v.5a2.5 2.5 0 0 1 1 4.79A2.5 2.5 0 0 1 17 16v.5a2.5 2.5 0 0 1-2.5 2.5A2.5 2.5 0 0 1 12 16.5" />
+  </svg>
+)
+
 // Legacy alias (some code imports PaperclipIcon).
 export const PaperclipIcon = FileIcon

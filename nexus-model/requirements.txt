@@ -1,0 +1,3 @@
+# Core engine needs only NumPy. pypdf is for reading uploaded PDFs.
+numpy>=1.24
+pypdf>=4.0

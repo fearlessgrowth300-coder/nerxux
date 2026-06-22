@@ -6,6 +6,7 @@ import {
   ConnectionsIcon,
   SettingsIcon,
   CloseIcon,
+  BrainIcon,
 } from './icons'
 
 const NAV = [
@@ -13,6 +14,7 @@ const NAV = [
   { to: '/skills', label: 'Skills', Icon: SkillsIcon },
   { to: '/instructions', label: 'Instructions', Icon: InstructionsIcon },
   { to: '/connections', label: 'Connections', Icon: ConnectionsIcon },
+  { to: '/train', label: 'Train model', Icon: BrainIcon },
   { to: '/settings', label: 'Settings', Icon: SettingsIcon },
 ]
 

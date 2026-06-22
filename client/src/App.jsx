@@ -11,6 +11,7 @@ import Chat from './pages/Chat'
 import Skills from './pages/Skills'
 import Instructions from './pages/Instructions'
 import Connections from './pages/Connections'
+import TrainModel from './pages/TrainModel'
 import Settings from './pages/Settings'
 
 // Applies the current user's appearance prefs (accent + font) on load/change.
@@ -48,6 +49,7 @@ export default function App() {
             <Route path="/skills" element={<Skills />} />
             <Route path="/instructions" element={<Instructions />} />
             <Route path="/connections" element={<Connections />} />
+            <Route path="/train" element={<TrainModel />} />
             <Route path="/settings" element={<Settings />} />
           </Route>
 

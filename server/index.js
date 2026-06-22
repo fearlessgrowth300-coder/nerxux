@@ -7,6 +7,7 @@ import uploadRouter from './routes/upload.js'
 import mcpRouter from './routes/mcp.js'
 import nativeRouter from './routes/native.js'
 import accountRouter from './routes/account.js'
+import trainingRouter from './routes/training.js'
 
 // Never let a stray async error from a third-party transport (e.g. an MCP
 // socket erroring after close) take down the whole server — log and continue.
@@ -75,6 +76,7 @@ app.use('/api/upload', uploadRouter)
 app.use('/api/mcp', mcpRouter)
 app.use('/api/native', nativeRouter)
 app.use('/api/account', accountRouter)
+app.use('/api/training', trainingRouter)
 
 // ---- Central error handler ----
 // Every route added in later steps should `next(err)` so errors land here
