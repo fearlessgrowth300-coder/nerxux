@@ -2,7 +2,9 @@
 // nexus-model engine. It talks to that engine's HTTP server (serve.py), so no
 // external provider or API key is involved: this is YOUR model running on YOUR
 // machine. Start it with:  cd nexus-model && python serve.py
-const MODEL_URL = process.env.NEXUS_MODEL_URL || 'http://localhost:4500'
+// 127.0.0.1, not "localhost": on Windows Node resolves localhost to IPv6 ::1
+// first, which can fail to reach an IPv4-bound local server.
+const MODEL_URL = process.env.NEXUS_MODEL_URL || 'http://127.0.0.1:4500'
 
 function composeSystem(systemPrompt = '', skills = []) {
   const parts = []

@@ -1,7 +1,9 @@
 // Adapter for models served by a local Ollama instance — including the user's
 // OWN fine-tuned model (`nexus-mine`), imported from the Colab fine-tune. Ollama
 // exposes an HTTP API on :11434; no API key is needed (it's local).
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434'
+// Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
+// ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434'
 
 function composeSystem(systemPrompt = '', skills = []) {
   const parts = []
