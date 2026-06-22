@@ -63,6 +63,21 @@ export const CHAT_MODELS = [
     apiModel: 'nexus-mine',
     vision: false,
   },
+  {
+    // Strong local coder models you already have in Ollama (no API key).
+    id: 'qwen-coder-1_5b',
+    label: 'Coder 1.5B (local)',
+    provider: 'ollama',
+    apiModel: 'qwen2.5-coder:1.5b',
+    vision: false,
+  },
+  {
+    id: 'qwen-coder-7b',
+    label: 'Coder 7B (local, best)',
+    provider: 'ollama',
+    apiModel: 'qwen2.5-coder:7b',
+    vision: false,
+  },
 ]
 
 export const getModelById = (id) => CHAT_MODELS.find((m) => m.id === id) || null
