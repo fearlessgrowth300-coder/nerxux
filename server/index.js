@@ -8,6 +8,7 @@ import mcpRouter from './routes/mcp.js'
 import nativeRouter from './routes/native.js'
 import accountRouter from './routes/account.js'
 import trainingRouter from './routes/training.js'
+import { ensureModelServer } from './lib/modelServer.js'
 
 // Never let a stray async error from a third-party transport (e.g. an MCP
 // socket erroring after close) take down the whole server — log and continue.
@@ -89,4 +90,9 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`[nexus-ai] server listening on http://localhost:${PORT}`)
+  // Auto-start the local Python model server so "Nexus (your model)" is online
+  // without a separate terminal. Non-fatal if Python/deps are missing.
+  ensureModelServer().catch((e) =>
+    console.error('[nexus-ai] ensureModelServer error:', e.message)
+  )
 })

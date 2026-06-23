@@ -54,16 +54,26 @@ def main():
                     help="chars sampled to LEARN the tokenizer (encoding uses all)")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--corpus", default=DATA)
+    ap.add_argument("--out", default=OUT, help="where to save the checkpoint")
     ap.add_argument("--eval_every", type=int, default=200)
     args = ap.parse_args()
 
-    os.makedirs(OUT, exist_ok=True)
+    out_dir = args.out
+    os.makedirs(out_dir, exist_ok=True)
     if not os.path.exists(args.corpus):
-        raise SystemExit(
-            f"No corpus at {args.corpus}.\n"
-            "Build one first:  python -m pipeline.build_corpus\n"
-            "or drop a .txt there / upload PDFs in the Nexus app."
-        )
+        # Don't crash on a fresh setup: write a tiny built-in corpus so training
+        # can still run for verification. (Add real text via the Train page.)
+        print(f"No corpus at {args.corpus} — creating a tiny fallback corpus for "
+              "verification. Upload text and Build corpus for a real model.", flush=True)
+        os.makedirs(os.path.dirname(args.corpus), exist_ok=True)
+        sample_text = (
+            "The quick brown fox jumps over the lazy dog. "
+            "To be or not to be, that is the question. "
+            "All that glitters is not gold. Knowledge is power. "
+            "A journey of a thousand miles begins with a single step. "
+        ) * 200
+        with open(args.corpus, "w", encoding="utf-8") as f:
+            f.write(sample_text)
 
     with open(args.corpus, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read()
@@ -75,7 +85,7 @@ def main():
     sample = text if len(text) <= args.tok_chars else text[:args.tok_chars]
     print(f"Training tokenizer (BPE) on {len(sample):,}-char sample...", flush=True)
     tok = BPETokenizer().train(sample, vocab_size=args.vocab)
-    tok.save(os.path.join(OUT, "tokenizer.json"))
+    tok.save(os.path.join(out_dir, "tokenizer.json"))
     print(f"  vocab size: {tok.vocab_size}", flush=True)
 
     print("Encoding full corpus to tokens...", flush=True)
@@ -118,17 +128,17 @@ def main():
         if step % args.eval_every == 0:
             sample = generate(model, tok, "The ", max_new_tokens=60, temperature=0.8)
             print("  sample:", repr(sample[:160]))
-            save(model, tok, cfg)
+            save(model, tok, cfg, out_dir)
 
-    save(model, tok, cfg)
-    print(f"\nDone in {time.time() - t0:.0f}s. Saved to {OUT}/")
+    save(model, tok, cfg, out_dir)
+    print(f"\nDone in {time.time() - t0:.0f}s. Saved to {out_dir}/", flush=True)
     print("Try it:  python chat.py")
 
 
-def save(model, tok, cfg):
-    np.savez(os.path.join(OUT, "weights.npz"), **model.state())
-    tok.save(os.path.join(OUT, "tokenizer.json"))
-    with open(os.path.join(OUT, "config.json"), "w") as f:
+def save(model, tok, cfg, out_dir=OUT):
+    np.savez(os.path.join(out_dir, "weights.npz"), **model.state())
+    tok.save(os.path.join(out_dir, "tokenizer.json"))
+    with open(os.path.join(out_dir, "config.json"), "w") as f:
         json.dump(cfg.to_dict(), f, indent=2)
 
 

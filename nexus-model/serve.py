@@ -1,12 +1,16 @@
 """
 Serve your trained model over HTTP so the Nexus app can chat with it.
 
-Stdlib-only HTTP server (no Flask needed). Exposes:
-  GET  /health           -> { ok, loaded, params }
-  POST /chat  {prompt, system?, max_tokens?, temperature?}  -> { content }
+Stdlib-only HTTP server (no Flask). Endpoints:
+  GET  /health   -> { ok, status, model_loaded, checkpoint, params }
+  POST /reload   -> reloads the latest checkpoint from out/ (call after training)
+  POST /chat     -> generate. Accepts EITHER:
+                      { prompt, system?, max_tokens?, temperature? }
+                    OR (OpenAI-style):
+                      { messages: [{role, content}, ...] }
+                    Returns: { content, reply, model }   (reply == content)
 
-Run:  python serve.py            (defaults to port 4500)
-Then Nexus's "Nexus (your model)" adapter calls http://localhost:4500/chat.
+Run:  python serve.py            (port from NEXUS_MODEL_PORT, default 4500)
 """
 
 import json
@@ -23,21 +27,53 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
 PORT = int(os.environ.get("NEXUS_MODEL_PORT", "4500"))
 
-MODEL = {"gpt": None, "tok": None}
+MODEL = {"gpt": None, "tok": None, "checkpoint": None}
+
+# Generation safety caps (prevent runaway output).
+MAX_NEW_TOKENS_CAP = 400
 
 
 def load():
+    """Load the latest checkpoint from out/. Returns True if a model is loaded."""
     cfg_path = os.path.join(OUT, "config.json")
-    if not os.path.exists(cfg_path):
+    weights = os.path.join(OUT, "weights.npz")
+    tok_path = os.path.join(OUT, "tokenizer.json")
+    if not (os.path.exists(cfg_path) and os.path.exists(weights) and os.path.exists(tok_path)):
+        MODEL["gpt"], MODEL["tok"], MODEL["checkpoint"] = None, None, None
         return False
-    with open(cfg_path) as f:
-        cfg = Config.from_dict(json.load(f))
-    gpt = GPT(cfg)
-    state = np.load(os.path.join(OUT, "weights.npz"))
-    gpt.load_state({k: state[k] for k in state.files})
-    MODEL["gpt"] = gpt
-    MODEL["tok"] = BPETokenizer.load(os.path.join(OUT, "tokenizer.json"))
-    return True
+    try:
+        with open(cfg_path) as f:
+            cfg = Config.from_dict(json.load(f))
+        gpt = GPT(cfg)
+        state = np.load(weights)
+        gpt.load_state({k: state[k] for k in state.files})
+        MODEL["gpt"] = gpt
+        MODEL["tok"] = BPETokenizer.load(tok_path)
+        MODEL["checkpoint"] = weights
+        return True
+    except Exception as e:
+        print(f"[serve] failed to load checkpoint: {e}")
+        MODEL["gpt"], MODEL["tok"], MODEL["checkpoint"] = None, None, None
+        return False
+
+
+def _messages_to_prompt(messages):
+    """Flatten OpenAI-style messages into (system, prompt)."""
+    system = ""
+    lines = []
+    for m in messages or []:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            system = content
+        elif role == "user":
+            lines.append(f"User: {content}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {content}")
+    lines.append("Assistant:")
+    return system, "\n".join(lines)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -51,6 +87,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            return None
+
     def do_OPTIONS(self):
         self._send(204, {})
 
@@ -59,34 +102,58 @@ class Handler(BaseHTTPRequestHandler):
             gpt = MODEL["gpt"]
             self._send(200, {
                 "ok": True,
-                "loaded": gpt is not None,
+                "status": "online",
+                "model_loaded": gpt is not None,
+                "loaded": gpt is not None,          # back-compat
+                "checkpoint": MODEL["checkpoint"],
                 "params": gpt.num_params() if gpt else 0,
             })
         else:
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/chat":
+        if self.path == "/reload":
+            ok = load()
+            return self._send(200, {
+                "ok": True, "model_loaded": ok, "checkpoint": MODEL["checkpoint"],
+                "params": MODEL["gpt"].num_params() if MODEL["gpt"] else 0,
+            })
+
+        if self.path not in ("/chat", "/generate"):
             return self._send(404, {"error": "not found"})
+
         if MODEL["gpt"] is None:
-            return self._send(503, {"error": "model not trained yet -- run train.py"})
-        length = int(self.headers.get("Content-Length", 0))
-        try:
-            data = json.loads(self.rfile.read(length) or b"{}")
-        except Exception:
+            return self._send(503, {
+                "error": "model not trained yet",
+                "reply": "This model hasn't been trained yet. Go to the Train page, "
+                         "build a corpus, and train first.",
+            })
+
+        data = self._read_json()
+        if data is None:
             return self._send(400, {"error": "invalid json"})
 
-        system = (data.get("system") or "").strip()
-        prompt = data.get("prompt", "")
+        # Accept either {messages:[...]} or {prompt, system}.
+        if data.get("messages"):
+            system, prompt = _messages_to_prompt(data["messages"])
+        else:
+            system = (data.get("system") or "").strip()
+            prompt = data.get("prompt", "")
         full = (system + "\n\n" + prompt).strip() if system else prompt
-        out = generate(
-            MODEL["gpt"], MODEL["tok"], full,
-            max_new_tokens=int(data.get("max_tokens", 160)),
-            temperature=float(data.get("temperature", 0.8)),
-            top_k=int(data.get("top_k", 40)),
-        )
+
+        max_new = min(int(data.get("max_tokens", 160)), MAX_NEW_TOKENS_CAP)
+        try:
+            out = generate(
+                MODEL["gpt"], MODEL["tok"], full,
+                max_new_tokens=max_new,
+                temperature=float(data.get("temperature", 0.8)),
+                top_k=int(data.get("top_k", 40)),
+            )
+        except Exception as e:
+            return self._send(500, {"error": f"generation failed: {e}"})
+
         completion = out[len(full):].strip() or out.strip()
-        self._send(200, {"content": completion, "model": "nexus-local"})
+        self._send(200, {"content": completion, "reply": completion, "model": "nexus-local"})
 
     def log_message(self, *args):
         pass  # quiet
@@ -94,8 +161,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     loaded = load()
-    print(f"Nexus model server on http://localhost:{PORT}")
-    print("loaded" if loaded else "NO trained model yet (train.py first) -- serving /health only")
+    print(f"[serve] Nexus model server on http://127.0.0.1:{PORT}", flush=True)
+    print("[serve] checkpoint loaded" if loaded
+          else "[serve] no trained model yet — /health works, /chat returns a clear message",
+          flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

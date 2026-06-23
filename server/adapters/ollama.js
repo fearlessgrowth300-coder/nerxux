@@ -29,8 +29,9 @@ export async function run({ prompt, systemPrompt, skills, model }) {
       body: JSON.stringify({ model: model || 'nexus-mine', messages, stream: false }),
     })
   } catch (e) {
+    const cause = e.cause?.code || e.cause?.message || ''
     throw new Error(
-      `Can't reach Ollama at ${OLLAMA_URL}. Is Ollama running? (${e.message})`
+      `Can't reach Ollama at ${OLLAMA_URL}. Is Ollama running? (${e.message}${cause ? ' / ' + cause : ''})`
     )
   }
   if (!resp.ok) {

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { v4 as uuid } from 'uuid'
 import { requireAuth } from '../lib/auth.js'
 import { health as modelHealth } from '../adapters/nexus.js'
+import { ensureModelServer, reloadModelServer } from '../lib/modelServer.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const MODEL_DIR = path.join(__dirname, '..', '..', 'nexus-model')
@@ -65,10 +66,19 @@ function runPython(args, kind) {
   job.proc = proc
   proc.stdout.on('data', (d) => String(d).split('\n').forEach((l) => l.trim() && pushLog(l.trimEnd())))
   proc.stderr.on('data', (d) => String(d).split('\n').forEach((l) => l.trim() && pushLog(l.trimEnd())))
-  proc.on('close', (code) => {
+  proc.on('close', async (code) => {
     pushLog(`\n[${kind} finished with exit code ${code}]`)
     job.running = false
     job.proc = null
+    // After a successful training run, make sure the model server is up and
+    // tell it to load the freshly-saved checkpoint so chat uses the new model.
+    if (kind === 'train' && code === 0) {
+      pushLog('[reloading model server with the new checkpoint...]')
+      await ensureModelServer()
+      const r = await reloadModelServer()
+      pushLog(r?.model_loaded ? '[model server now serving the new checkpoint]'
+                              : '[reload attempted — check the model server]')
+    }
   })
   proc.on('error', (e) => {
     pushLog(`[failed to launch python: ${e.message}]`)
