@@ -14,6 +14,10 @@ import { buildSystemPrompt } from '../lib/systemPrompt'
 import { listSkills } from '../lib/skills'
 import { getConnectors } from '../lib/mcp'
 import { getPrefs } from '../lib/prefs'
+import {
+  listConversations, createConversation, listMessages, saveMessages,
+  deleteConversation,
+} from '../lib/conversations'
 import { getModelById } from '@shared/models'
 
 const CHIPS = [
@@ -52,6 +56,12 @@ export default function Chat() {
   const [connectors, setConnectors] = useState([])
   const [activeConnectors, setActiveConnectors] = useState(() => new Set())
 
+  // Second brain: persistent conversations.
+  const [conversationId, setConversationId] = useState(null)
+  const [conversations, setConversations] = useState([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const convIdRef = useRef(null) // mirror of conversationId for async closures
+
   const scrollRef = useRef(null)
   const fileInputRef = useRef(null)
   const taRef = useRef(null)
@@ -79,6 +89,18 @@ export default function Chat() {
         setActiveConnectors(new Set(cs.filter((c) => c.status === 'connected').map((c) => c.id)))
       })
       .catch(() => {})
+    // Load persisted conversations; resume the most recent one (the second brain).
+    listConversations()
+      .then(async (convs) => {
+        setConversations(convs)
+        if (convs.length) {
+          const latest = convs[0]
+          const msgs = await listMessages(latest.id)
+          setConversationId(latest.id); convIdRef.current = latest.id
+          setMessages(msgs)
+        }
+      })
+      .catch(() => {}) // not signed in / table missing -> stay on local draft
   }, [storageKey, settingsKey])
 
   useEffect(() => {
@@ -108,6 +130,17 @@ export default function Chat() {
     setInput('')
     setSending(true)
 
+    // Ensure a persistent conversation exists (titled from the first message).
+    let convId = convIdRef.current
+    if (!convId) {
+      try {
+        const conv = await createConversation(text)
+        convId = conv.id; convIdRef.current = conv.id
+        setConversationId(conv.id)
+        setConversations((prev) => [conv, ...prev])
+      } catch { /* offline / not signed in: still works, just unsaved */ }
+    }
+
     // Split attachments: images/pdf go to the model; videos become context text.
     const media = attachments
       .filter((a) => a.kind === 'image' || a.kind === 'pdf')
@@ -131,9 +164,13 @@ export default function Chat() {
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
       setMessages((prev) => [...prev, ...toAdd])
+      // Persist this turn to the second brain.
+      if (convId) saveMessages(convId, [userMsg, ...toAdd]).catch(() => {})
     } catch (e) {
       setError(e.message)
-      setMessages((prev) => [...prev, { id: uuid(), role: 'assistant', content: `⚠️ ${e.message}`, model: modelA, error: true }])
+      const errMsg = { id: uuid(), role: 'assistant', content: `⚠️ ${e.message}`, model: modelA, error: true }
+      setMessages((prev) => [...prev, errMsg])
+      if (convId) saveMessages(convId, [userMsg, errMsg]).catch(() => {})
     } finally {
       setSending(false)
     }
@@ -181,10 +218,35 @@ export default function Chat() {
     })
   }
 
-  function clearChat() {
+  function newChat() {
     setMessages([])
     setError('')
     setAttachments([])
+    setConversationId(null); convIdRef.current = null
+    setHistoryOpen(false)
+  }
+
+  async function openConversation(id) {
+    setHistoryOpen(false)
+    setError('')
+    try {
+      const msgs = await listMessages(id)
+      setConversationId(id); convIdRef.current = id
+      setMessages(msgs)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  async function removeConversation(id, e) {
+    e.stopPropagation()
+    try {
+      await deleteConversation(id)
+      setConversations((prev) => prev.filter((c) => c.id !== id))
+      if (convIdRef.current === id) newChat()
+    } catch (err) {
+      setError(err.message)
+    }
   }
 
   const composer = (
@@ -212,10 +274,51 @@ export default function Chat() {
             />
           )}
         </div>
-        <button onClick={clearChat} disabled={messages.length === 0 || sending}
-          className="rounded-lg px-3 py-1.5 text-sm text-gray-400 transition hover:bg-white/5 hover:text-gray-200 disabled:opacity-40">
-          Clear chat
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={newChat} title="Start a new conversation"
+            className="flex items-center gap-1.5 rounded-lg border border-nexus-border px-3 py-1.5 text-sm text-gray-300 transition hover:bg-white/5">
+            <PlusIcon className="h-4 w-4" /> New chat
+          </button>
+          <div className="relative">
+            <button
+              onClick={async () => {
+                const open = !historyOpen
+                setHistoryOpen(open)
+                if (open) { try { setConversations(await listConversations()) } catch {} }
+              }}
+              title="Conversation history (your second brain)"
+              className="flex items-center gap-1.5 rounded-lg border border-nexus-border px-3 py-1.5 text-sm text-gray-300 transition hover:bg-white/5">
+              <SearchIcon className="h-4 w-4" /> History
+            </button>
+            {historyOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onClick={() => setHistoryOpen(false)} />
+                <div className="absolute right-0 z-40 mt-2 max-h-96 w-80 overflow-y-auto rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
+                  <p className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">
+                    Saved conversations
+                  </p>
+                  {conversations.length === 0 && (
+                    <p className="px-3 py-3 text-xs text-gray-500">No saved chats yet — start chatting and they'll appear here.</p>
+                  )}
+                  {conversations.map((c) => (
+                    <div key={c.id}
+                      onClick={() => openConversation(c.id)}
+                      className={['group flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 transition hover:bg-white/5',
+                        c.id === conversationId ? 'bg-nexus-accent/10' : ''].join(' ')}>
+                      <span className="flex-1 truncate text-sm text-gray-200">{c.title || 'Untitled'}</span>
+                      <span className="text-[10px] text-gray-600">{new Date(c.updated_at).toLocaleDateString()}</span>
+                      <button onClick={(e) => removeConversation(c.id, e)}
+                        className="text-gray-600 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                        title="Delete conversation">
+                        <CloseIcon className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       <input ref={fileInputRef} type="file"

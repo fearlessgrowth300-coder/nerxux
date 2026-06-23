@@ -144,3 +144,43 @@ create index if not exists native_connections_user_idx on public.native_connecti
 alter table public.native_connections enable row level security;
 -- Server-only (service role); no client policy on purpose.
 drop policy if exists "native_connections_owner_all" on public.native_connections;
+
+-- ---------------------------------------------------------------------------
+-- Second brain — persistent conversation history (per user). Replaces the old
+-- browser-localStorage chat so chats survive across devices/sessions and can be
+-- reopened and resumed where you left off.
+-- ---------------------------------------------------------------------------
+create table if not exists public.conversations (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references auth.users (id) on delete cascade,
+  title      text not null default 'New chat',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists conversations_user_idx on public.conversations (user_id, updated_at desc);
+alter table public.conversations enable row level security;
+drop policy if exists "conversations_owner_all" on public.conversations;
+create policy "conversations_owner_all"
+  on public.conversations
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+create table if not exists public.conversation_messages (
+  id              uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references public.conversations (id) on delete cascade,
+  user_id         uuid not null references auth.users (id) on delete cascade,
+  role            text not null,
+  content         text not null default '',
+  model           text,
+  data            jsonb,                 -- full message object (attachments, media, routing…)
+  created_at      timestamptz not null default now()
+);
+create index if not exists conversation_messages_idx on public.conversation_messages (conversation_id, created_at);
+alter table public.conversation_messages enable row level security;
+drop policy if exists "conversation_messages_owner_all" on public.conversation_messages;
+create policy "conversation_messages_owner_all"
+  on public.conversation_messages
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
