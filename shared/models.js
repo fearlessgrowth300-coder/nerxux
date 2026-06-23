@@ -49,16 +49,16 @@ export const CHAT_MODELS = [
     // Your own model — a from-scratch GPT trained locally by nexus-model/.
     // No API key; the server's nexus adapter calls the local model server.
     id: 'nexus-local',
-    label: 'Nexus (your model)',
+    label: 'Nexus (from-scratch) — experimental',
     provider: 'nexus',
     apiModel: 'nexus-local',
     vision: false,
   },
   {
-    // Your FINE-TUNED model — an open base (Qwen2.5) trained on your data,
-    // imported into Ollama as `nexus-mine`. Codes and chats for real.
+    // Your FINE-TUNED model — an open base (Qwen2.5) trained on YOUR data,
+    // imported into Ollama as `nexus-mine`. Coherent — chats/codes for real.
     id: 'nexus-mine',
-    label: 'My Coder (fine-tuned)',
+    label: 'Nexus Pro (fine-tuned) — works',
     provider: 'ollama',
     apiModel: 'nexus-mine',
     vision: false,
