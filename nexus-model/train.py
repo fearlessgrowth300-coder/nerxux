@@ -33,6 +33,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data", "corpus.txt")
 OUT = os.path.join(HERE, "out")
 
+# Model-size presets. Chosen for an 8-core CPU with limited free RAM: bigger
+# context + width than the old 2.6M model, without OOM. "large" only on a
+# roomy machine / GPU.
+SIZES = {
+    "tiny":   dict(n_layer=2, n_head=2, n_embd=64,  block=64,  vocab=1024),
+    "small":  dict(n_layer=4, n_head=8, n_embd=256, block=128, vocab=3072),
+    "medium": dict(n_layer=6, n_head=8, n_embd=320, block=128, vocab=4096),
+    "large":  dict(n_layer=8, n_head=8, n_embd=384, block=256, vocab=8192),
+}
+
 
 def get_batch(data_ids, block, batch_size):
     ix = np.random.randint(0, len(data_ids) - block - 1, size=batch_size)
@@ -55,8 +65,19 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--corpus", default=DATA)
     ap.add_argument("--out", default=OUT, help="where to save the checkpoint")
+    ap.add_argument("--size", choices=list(SIZES.keys()),
+                    help="preset architecture (overrides n_layer/n_head/n_embd/block/vocab)")
+    ap.add_argument("--smoke-test", action="store_true", help="few-step sanity run")
     ap.add_argument("--eval_every", type=int, default=200)
     args = ap.parse_args()
+
+    if args.size:
+        s = SIZES[args.size]
+        args.n_layer, args.n_head, args.n_embd = s["n_layer"], s["n_head"], s["n_embd"]
+        args.block, args.vocab = s["block"], s["vocab"]
+        print(f"Size preset '{args.size}': {s}", flush=True)
+    if args.smoke_test:
+        args.steps = min(args.steps, 60)
 
     out_dir = args.out
     os.makedirs(out_dir, exist_ok=True)
@@ -126,12 +147,15 @@ def main():
                   f"({step / dt:.1f} it/s)")
 
         if step % args.eval_every == 0:
-            sample = generate(model, tok, "The ", max_new_tokens=60, temperature=0.8)
+            sample = generate(model, tok, "The ", max_new_tokens=60)
             print("  sample:", repr(sample[:160]))
             save(model, tok, cfg, out_dir)
+            write_meta(out_dir, step, loss_val, model.num_params())
 
     save(model, tok, cfg, out_dir)
-    print(f"\nDone in {time.time() - t0:.0f}s. Saved to {out_dir}/", flush=True)
+    write_meta(out_dir, args.steps, loss_val, model.num_params())
+    print(f"\nDone in {time.time() - t0:.0f}s. Saved to {out_dir}/ "
+          f"({model.num_params():,} params, final loss {loss_val:.3f})", flush=True)
     print("Try it:  python chat.py")
 
 
@@ -140,6 +164,12 @@ def save(model, tok, cfg, out_dir=OUT):
     tok.save(os.path.join(out_dir, "tokenizer.json"))
     with open(os.path.join(out_dir, "config.json"), "w") as f:
         json.dump(cfg.to_dict(), f, indent=2)
+
+
+def write_meta(out_dir, step, loss, params):
+    with open(os.path.join(out_dir, "meta.json"), "w") as f:
+        json.dump({"step": int(step), "loss": round(float(loss), 4),
+                   "parameter_count": int(params)}, f, indent=2)
 
 
 if __name__ == "__main__":

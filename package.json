@@ -8,6 +8,10 @@
     "dev:client": "npm --prefix client run dev",
     "dev:server": "npm --prefix server run dev",
     "model": "cd nexus-model && python -u serve.py",
+    "train:nexus": "cd nexus-model && python -u train.py --size small --steps 4000 --corpus data/corpus_narrow.txt",
+    "scale:nexus": "cd nexus-model && python scale_train.py",
+    "eval:nexus": "cd nexus-model && python eval_quality.py",
+    "verify:nexus": "bash scripts/verify_nexus_from_scratch_loop.sh",
     "build": "npm --prefix client run build"
   }
 }

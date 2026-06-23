@@ -27,10 +27,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
 PORT = int(os.environ.get("NEXUS_MODEL_PORT", "4500"))
 
-MODEL = {"gpt": None, "tok": None, "checkpoint": None}
+MODEL = {"gpt": None, "tok": None, "checkpoint": None, "meta": {}}
 
 # Generation safety caps (prevent runaway output).
 MAX_NEW_TOKENS_CAP = 400
+
+
+def _quality_status(params, loss):
+    """Honest label — small from-scratch models are experimental, not usable."""
+    if params and params >= 30_000_000 and loss is not None and loss < 3.5:
+        return "usable"
+    return "experimental"
 
 
 def load():
@@ -38,6 +45,15 @@ def load():
     cfg_path = os.path.join(OUT, "config.json")
     weights = os.path.join(OUT, "weights.npz")
     tok_path = os.path.join(OUT, "tokenizer.json")
+    # Optional training metadata (step + loss) written by train.py.
+    meta = {}
+    meta_path = os.path.join(OUT, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            meta = json.load(open(meta_path))
+        except Exception:
+            meta = {}
+    MODEL["meta"] = meta
     if not (os.path.exists(cfg_path) and os.path.exists(weights) and os.path.exists(tok_path)):
         MODEL["gpt"], MODEL["tok"], MODEL["checkpoint"] = None, None, None
         return False
@@ -100,13 +116,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             gpt = MODEL["gpt"]
+            params = gpt.num_params() if gpt else 0
+            meta = MODEL.get("meta", {})
+            loss = meta.get("loss")
             self._send(200, {
                 "ok": True,
+                "service": "nexus-from-scratch",
+                "port": PORT,
                 "status": "online",
                 "model_loaded": gpt is not None,
                 "loaded": gpt is not None,          # back-compat
                 "checkpoint": MODEL["checkpoint"],
-                "params": gpt.num_params() if gpt else 0,
+                "checkpoint_step": meta.get("step"),
+                "loss": loss,
+                "parameter_count": params,
+                "params": params,                   # back-compat
+                "quality_status": _quality_status(params, loss),
             })
         else:
             self._send(404, {"error": "not found"})
@@ -153,7 +178,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": f"generation failed: {e}"})
 
         completion = out[len(full):].strip() or out.strip()
-        self._send(200, {"content": completion, "reply": completion, "model": "nexus-local"})
+        gpt = MODEL["gpt"]
+        self._send(200, {
+            "content": completion,
+            "reply": completion,
+            "model": "nexus-from-scratch",
+            "parameter_count": gpt.num_params() if gpt else 0,
+            "checkpoint": MODEL["checkpoint"],
+        })
 
     def log_message(self, *args):
         pass  # quiet

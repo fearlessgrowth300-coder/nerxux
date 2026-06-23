@@ -7,3 +7,5 @@ out_*/
 *.npz
 __pycache__/
 *.pyc
+data/*.txt
+out_*/
