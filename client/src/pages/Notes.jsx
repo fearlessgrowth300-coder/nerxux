@@ -4,6 +4,7 @@ import { PlusIcon, FileIcon, CloseIcon } from '../components/icons'
 import {
   listNotes, createNote, updateNote, deleteNote, outgoingLinks, backlinks,
 } from '../lib/notes'
+import { extractPdfText } from '../lib/pdf'
 
 // Obsidian-style knowledge base: markdown notes with [[wiki links]] + backlinks.
 // Notes toggled "AI knowledge" are fed to the model in chat (see systemPrompt).
@@ -16,6 +17,8 @@ export default function Notes() {
   const [mode, setMode] = useState('edit') // 'edit' | 'preview'
   const [savedAt, setSavedAt] = useState(null)
   const [error, setError] = useState('')
+  const [importing, setImporting] = useState(false)
+  const pdfRef = useRef(null)
   const savedRef = useRef({ title: '', content: '', inContext: false })
 
   const active = notes.find((n) => n.id === activeId) || null
@@ -64,6 +67,26 @@ export default function Notes() {
     } catch (e) { setError(e.message) }
   }
 
+  // Upload a PDF -> extract its text -> create a note flagged as AI knowledge.
+  async function onUploadPdf(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setError(''); setImporting(true)
+    try {
+      const text = await extractPdfText(file)
+      if (!text.trim()) throw new Error('No text found (is it a scanned image PDF?)')
+      const name = file.name.replace(/\.pdf$/i, '')
+      const n = await createNote({ title: name, content: text })
+      const withCtx = await updateNote(n.id, { in_context: true }) // on by default
+      setNotes((p) => [withCtx, ...p]); select(withCtx)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setImporting(false)
+    }
+  }
+
   // Open a note by title; create it if it doesn't exist yet (Obsidian behavior).
   async function openByTitle(t) {
     await save()
@@ -86,10 +109,19 @@ export default function Notes() {
       <aside className="flex w-64 shrink-0 flex-col border-r border-nexus-border">
         <div className="flex items-center justify-between px-4 py-3">
           <span className="text-sm font-semibold text-gray-200">Notes</span>
-          <button onClick={onNew} title="New note"
-            className="rounded-lg border border-nexus-border p-1.5 text-gray-300 hover:bg-white/5">
-            <PlusIcon className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button onClick={() => pdfRef.current?.click()} disabled={importing} title="Upload a PDF as a knowledge note"
+              className="rounded-lg border border-nexus-border p-1.5 text-gray-300 hover:bg-white/5 disabled:opacity-50">
+              {importing
+                ? <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-gray-600 border-t-nexus-accent2" />
+                : <FileIcon className="h-4 w-4" />}
+            </button>
+            <button onClick={onNew} title="New note"
+              className="rounded-lg border border-nexus-border p-1.5 text-gray-300 hover:bg-white/5">
+              <PlusIcon className="h-4 w-4" />
+            </button>
+          </div>
+          <input ref={pdfRef} type="file" accept=".pdf,application/pdf" onChange={onUploadPdf} className="hidden" />
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-3">
           {notes.length === 0 && <p className="px-2 py-3 text-xs text-gray-500">No notes yet. Create one — link with [[Title]].</p>}
