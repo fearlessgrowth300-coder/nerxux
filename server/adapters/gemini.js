@@ -9,20 +9,42 @@ function composeSystem(systemPrompt = '', skills = []) {
   return parts.join('\n\n')
 }
 
-// Gemini is stricter than JSON Schema — strip keys it rejects.
+// Gemini only accepts a small OpenAPI subset for function parameters and rejects
+// most JSON Schema keywords (const, exclusiveMinimum, additionalProperties, $ref,
+// default, etc.). MCP tool schemas use the full spec, so we sanitize: drop the
+// unsupported keywords, turn `const` into a single-value enum, and recurse into
+// every nested schema (properties / items / anyOf / oneOf / allOf).
+const DROP_KEYS = new Set([
+  '$schema', '$id', '$ref', '$defs', '$comment', '$anchor', 'definitions',
+  'additionalProperties', 'unevaluatedProperties', 'patternProperties', 'propertyNames',
+  'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'uniqueItems',
+  'not', 'if', 'then', 'else', 'dependentSchemas', 'dependentRequired',
+  'default', 'examples', 'readOnly', 'writeOnly', 'deprecated',
+  'contentMediaType', 'contentEncoding',
+])
+
 function cleanSchema(schema) {
-  if (!schema || typeof schema !== 'object') return { type: 'object', properties: {} }
+  if (Array.isArray(schema)) return schema.map(cleanSchema)
+  if (!schema || typeof schema !== 'object') return schema
   const out = {}
   for (const [k, v] of Object.entries(schema)) {
-    if (k === '$schema' || k === 'additionalProperties') continue
+    if (DROP_KEYS.has(k)) continue
+    if (k === 'const') {
+      // Gemini has no `const` — express a string constant as a 1-value enum.
+      if (typeof v === 'string') { out.enum = [v]; if (!out.type) out.type = 'string' }
+      continue
+    }
     if (k === 'properties' && v && typeof v === 'object') {
       out.properties = Object.fromEntries(Object.entries(v).map(([pk, pv]) => [pk, cleanSchema(pv)]))
     } else if (k === 'items') {
       out.items = cleanSchema(v)
+    } else if ((k === 'anyOf' || k === 'oneOf' || k === 'allOf') && Array.isArray(v)) {
+      out[k] = v.map(cleanSchema)
     } else {
       out[k] = v
     }
   }
+  if (!out.type && !out.anyOf && !out.oneOf && !out.allOf && !out.enum) out.type = 'object'
   return out
 }
 
