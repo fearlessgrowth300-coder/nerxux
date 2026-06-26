@@ -1,5 +1,6 @@
 import { getAccessToken, getConnectedProviders } from './nativeStore.js'
 import { getMyChannel, listMyVideos, getVideoStats, searchVideos } from './google.js'
+import { getProfile as fbProfile, getPages as fbPages } from './facebook.js'
 
 // Extracts a video id from an id or a YouTube URL.
 function extractVideoId(s = '') {
@@ -47,9 +48,36 @@ async function runYoutube(userId, name, input) {
   }
 }
 
+const FACEBOOK_TOOLS = [
+  {
+    name: 'facebook_profile',
+    description: 'Get the connected Facebook account profile: name, id, and email.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'facebook_pages',
+    description: 'List Facebook Pages the connected account manages (needs the pages permission, which requires Meta app review).',
+    input_schema: { type: 'object', properties: {} },
+  },
+]
+
+async function runFacebook(userId, name, input) {
+  const token = await getAccessToken(userId, 'facebook')
+  if (!token) return 'Facebook is not connected. Connect it under Connections first.'
+  switch (name) {
+    case 'facebook_profile':
+      return JSON.stringify(await fbProfile(token))
+    case 'facebook_pages':
+      return JSON.stringify(await fbPages(token))
+    default:
+      return `Unknown tool: ${name}`
+  }
+}
+
 // Registry of native providers.
 export const NATIVE_PROVIDERS = {
   youtube: { label: 'YouTube', tools: YOUTUBE_TOOLS, run: runYoutube },
+  facebook: { label: 'Facebook', tools: FACEBOOK_TOOLS, run: runFacebook },
 }
 
 // Builds the native toolset for a user's connected providers:

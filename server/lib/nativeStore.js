@@ -1,8 +1,34 @@
 import crypto from 'crypto'
 import { supabaseAdmin } from './supabase.js'
 import { encrypt, decrypt } from './crypto.js'
-import { buildAuthUrl, exchangeCode, refreshAccessToken, getMyChannel } from './google.js'
+import * as google from './google.js'
+import * as facebook from './facebook.js'
 import { platformOAuthForNative } from './platformOAuth.js'
+
+// Per-provider OAuth config: which module drives the flow, the scopes to request,
+// and how to derive display meta from an access token.
+const OAUTH = {
+  youtube: {
+    mod: google,
+    scopes: ['https://www.googleapis.com/auth/youtube.readonly'],
+    async meta(token) {
+      try {
+        const ch = await google.getMyChannel(token)
+        return ch?.title ? { channel: ch.title, subscribers: ch.stats?.subscriberCount, videos: ch.stats?.videoCount } : {}
+      } catch { return {} }
+    },
+  },
+  facebook: {
+    mod: facebook,
+    scopes: facebook.FACEBOOK_SCOPES,
+    async meta(token) {
+      try {
+        const p = await facebook.getProfile(token)
+        return p?.name ? { name: p.name, email: p.email || null } : {}
+      } catch { return {} }
+    },
+  },
+}
 
 function encField(value) {
   if (!value) return { c: null, i: null, t: null }
@@ -85,11 +111,8 @@ export async function startConnect(userId, provider, { clientId, clientSecret, r
     { onConflict: 'user_id,provider' }
   )
 
-  const SCOPES = provider === 'youtube'
-    ? ['https://www.googleapis.com/auth/youtube.readonly']
-    : ['https://www.googleapis.com/auth/youtube.readonly']
-
-  return buildAuthUrl({ clientId: cid, redirectUri, state, scopes: SCOPES })
+  const cfg = OAUTH[provider]
+  return cfg.mod.buildAuthUrl({ clientId: cid, redirectUri, state, scopes: cfg.scopes })
 }
 
 // Resolves the client secret for a row: the user's stored secret, else the
@@ -110,7 +133,8 @@ export async function completeConnect(state, code) {
   if (error) throw error
   if (!row) throw new Error('Invalid or expired authorization state')
 
-  const tokens = await exchangeCode({
+  const cfg = OAUTH[row.provider]
+  const tokens = await cfg.mod.exchangeCode({
     clientId: row.client_id,
     clientSecret: secretFor(row),
     code,
@@ -124,12 +148,8 @@ export async function completeConnect(state, code) {
   }
   const enc = encField(JSON.stringify(stored))
 
-  // Fetch channel meta for display.
-  let meta = {}
-  try {
-    const ch = await getMyChannel(tokens.access_token)
-    if (ch?.title) meta = { channel: ch.title, subscribers: ch.stats?.subscriberCount, videos: ch.stats?.videoCount }
-  } catch {}
+  // Display meta (channel for YouTube, name for Facebook).
+  const meta = await cfg.meta(tokens.access_token)
 
   await supabaseAdmin
     .from('native_connections')
@@ -144,7 +164,7 @@ export async function completeConnect(state, code) {
     })
     .eq('id', row.id)
 
-  return { provider: row.provider, channel: meta.channel || null }
+  return { provider: row.provider, channel: meta.channel || meta.name || null }
 }
 
 // Returns a valid access token, refreshing if expired. Null if not connected.
@@ -155,8 +175,10 @@ export async function getAccessToken(userId, provider) {
   const tokens = JSON.parse(decField(row.tokens_ciphertext, row.tokens_iv, row.tokens_tag))
   if (Date.now() < tokens.expiry) return tokens.access_token
 
-  // Expired — refresh.
-  const refreshed = await refreshAccessToken({
+  // Expired — refresh (Google). Facebook has no refresh token: reconnect needed.
+  const cfg = OAUTH[row.provider]
+  if (!tokens.refresh_token || !cfg?.mod?.refreshAccessToken) return null
+  const refreshed = await cfg.mod.refreshAccessToken({
     clientId: row.client_id,
     clientSecret: secretFor(row),
     refreshToken: tokens.refresh_token,

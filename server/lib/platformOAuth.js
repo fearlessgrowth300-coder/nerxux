@@ -43,6 +43,7 @@ export function hasPlatformOAuthForUrl(url) {
 // Native providers (own OAuth + REST API), keyed by provider id.
 const NATIVE_APPS = {
   youtube: { idEnv: 'GOOGLE_CLIENT_ID', secretEnv: 'GOOGLE_CLIENT_SECRET' },
+  facebook: { idEnv: 'FACEBOOK_OAUTH_CLIENT_ID', secretEnv: 'FACEBOOK_OAUTH_CLIENT_SECRET' },
 }
 
 export function platformOAuthForNative(provider) {
