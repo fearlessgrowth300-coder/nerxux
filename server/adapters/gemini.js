@@ -48,8 +48,43 @@ function cleanSchema(schema) {
   return out
 }
 
+// Turn Google's verbose SDK errors into a short, actionable message.
+function friendlyError(err) {
+  const raw = String(err?.message || err || '')
+  const is429 = /\b429\b|too many requests|resource_exhausted/i.test(raw)
+  const isQuota = /quota|rate.?limit|exceeded/i.test(raw)
+  if (is429 || isQuota) {
+    // limit: 0 => the key's project has no free-tier allowance at all (geo-locked
+    // or a Cloud-Console key); retrying never helps, billing/new key does.
+    if (/limit:\s*0\b/.test(raw)) {
+      return new Error(
+        'Gemini quota is 0 for this API key — the free tier is not enabled for its project. ' +
+        'Create a new key at aistudio.google.com/apikey ("Create API key in new project"), ' +
+        'or if that still shows 0, enable billing on the project (free tier may be unavailable in your region).'
+      )
+    }
+    const retry = raw.match(/retry in ([\d.]+)s/i)?.[1]
+    return new Error(
+      `Gemini rate limit hit${retry ? ` — retry in ~${Math.ceil(Number(retry))}s` : ''}. ` +
+      'You are sending requests faster than your plan allows; wait a moment or enable billing for higher limits.'
+    )
+  }
+  if (/api.?key|invalid|unauthorized|permission|401|403/i.test(raw)) {
+    return new Error('Gemini rejected the API key (invalid or lacking access). Re-paste a fresh key from aistudio.google.com/apikey.')
+  }
+  return err instanceof Error ? err : new Error(raw)
+}
+
 // Text + vision generation via Google Generative AI, with tool calling.
-export async function run({ prompt, systemPrompt, skills, apiKey, model, media, attachments, tools, onToolCall }) {
+export async function run(opts) {
+  try {
+    return await runInner(opts)
+  } catch (err) {
+    throw friendlyError(err)
+  }
+}
+
+async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, attachments, tools, onToolCall }) {
   if (!apiKey) throw new Error('Gemini API key is not connected')
 
   const genAI = new GoogleGenerativeAI(apiKey)
