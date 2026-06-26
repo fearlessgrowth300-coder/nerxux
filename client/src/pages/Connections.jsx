@@ -484,7 +484,7 @@ function McpConnectors() {
             </span>
           </h2>
           <p className="mt-0.5 text-xs text-gray-500">
-            Connect Claude to your tools via a remote Model Context Protocol server. Enabled tools are available in chat.
+            Connect Nexus to any data or tools via a remote Model Context Protocol (MCP) server. Enabled tools are available in chat.
           </p>
         </div>
         <button
