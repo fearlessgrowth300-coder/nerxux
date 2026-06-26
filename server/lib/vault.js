@@ -8,6 +8,20 @@ export function isValidProvider(provider) {
   return VALID_PROVIDERS.includes(provider)
 }
 
+// Recognize which provider an API key belongs to from its prefix, so the user
+// can just paste a key and we file it under the right provider automatically.
+// Returns a provider id, or null if the format isn't recognized.
+export function detectProvider(apiKey) {
+  const k = String(apiKey || '').trim()
+  if (!k) return null
+  if (k.startsWith('sk-ant-')) return 'claude'       // Anthropic / Claude
+  if (k.startsWith('gsk_')) return 'groq'            // Groq
+  if (k.startsWith('AIza')) return 'gemini'          // Google Gemini
+  if (k.startsWith('sk-')) return 'openai'           // OpenAI (incl. sk-proj-)
+  if (k.startsWith('sk_')) return 'elevenlabs'       // ElevenLabs (underscore)
+  return null                                        // e.g. Higgsfield — pick manually
+}
+
 // Platform-level fallback keys set by the app owner (server env). These let the
 // whole app work out-of-the-box (like Claude.ai) without each user bringing keys.
 const PLATFORM_ENV = {
@@ -63,7 +77,9 @@ export async function listConnections(userId) {
       // everyone even without a personal key.
       platform: hasPlatformKey(provider),
     }
-  })
+    // Only surface providers that are actually usable (a personal key or a
+    // platform key). The UI is an "add what you need" list, not a fixed roster.
+  }).filter((c) => c.connected || c.platform)
 }
 
 // Encrypts and upserts a provider key for a user. Returns display-safe status.

@@ -3,9 +3,10 @@ import PageShell from '../components/PageShell'
 import Modal from '../components/Modal'
 import {
   getConnections,
-  saveConnection,
+  addConnection,
   removeConnection,
 } from '../lib/connections'
+import { PROVIDERS } from '@shared/models'
 import {
   getConnectors,
   getCallbackUrl,
@@ -220,8 +221,15 @@ function ApiKeyVault() {
   const [connections, setConnections] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [inputs, setInputs] = useState({})
   const [busy, setBusy] = useState(null)
+
+  // Add-key modal state.
+  const [adding, setAdding] = useState(false)
+  const [keyInput, setKeyInput] = useState('')
+  const [override, setOverride] = useState('') // manual provider when detection fails
+  const [needsProvider, setNeedsProvider] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [addError, setAddError] = useState('')
 
   async function refresh() {
     setLoading(true)
@@ -238,21 +246,32 @@ function ApiKeyVault() {
     refresh()
   }, [])
 
-  async function handleSave(provider) {
-    const apiKey = (inputs[provider] || '').trim()
+  function openAdd() {
+    setKeyInput('')
+    setOverride('')
+    setNeedsProvider(false)
+    setAddError('')
+    setAdding(true)
+  }
+
+  async function handleAdd() {
+    const apiKey = keyInput.trim()
     if (!apiKey) return
-    setBusy(provider)
-    setError('')
+    setSaving(true)
+    setAddError('')
     try {
-      await saveConnection(provider, apiKey)
-      setInputs((p) => ({ ...p, [provider]: '' }))
+      await addConnection(apiKey, override || undefined)
+      setAdding(false)
       await refresh()
     } catch (e) {
-      setError(e.message)
+      // Key format unrecognized — reveal a manual provider picker and retry.
+      if (e.needsProvider) setNeedsProvider(true)
+      setAddError(e.message)
     } finally {
-      setBusy(null)
+      setSaving(false)
     }
   }
+
   async function handleDisconnect(provider) {
     setBusy(provider)
     try {
@@ -267,72 +286,128 @@ function ApiKeyVault() {
 
   return (
     <section>
-      <h2 className="text-sm font-semibold text-gray-300">Provider API keys</h2>
-      <p className="mb-3 text-xs text-gray-500">
-        Optional — the app already works with the platform's keys. Add your own only if you want to use your own quota/billing.
-      </p>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-300">Provider API keys</h2>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Paste any AI provider key — Nexus detects who it belongs to and unlocks that provider's models in chat.
+          </p>
+        </div>
+        <button
+          onClick={openAdd}
+          className="shrink-0 rounded-lg bg-nexus-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
+        >
+          + Add API key
+        </button>
+      </div>
       {error && (
         <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>
       )}
       {loading ? (
         <div className="space-y-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="h-20 animate-pulse rounded-xl bg-white/5" />
+          {[0, 1].map((i) => (
+            <div key={i} className="h-16 animate-pulse rounded-xl bg-white/5" />
           ))}
+        </div>
+      ) : connections.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-nexus-border bg-nexus-panel/50 p-8 text-center text-sm text-gray-400">
+          No keys connected yet. Click <span className="text-gray-200">+ Add API key</span> and paste a Claude, OpenAI,
+          Gemini, or Groq key — its models appear in the chat dropdown automatically.
         </div>
       ) : (
         <ul className="space-y-3">
           {connections.map((c) => (
             <li key={c.provider} className="rounded-xl border border-nexus-border bg-nexus-panel p-4">
               <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <h3 className="font-medium text-gray-100">{c.label}</h3>
-                  <StatusDot
-                    connected={c.connected || c.platform}
-                    on={c.connected ? 'Your key' : 'Platform key active'}
-                    off="Not connected"
-                  />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-3">
+                    <h3 className="font-medium text-gray-100">{c.label}</h3>
+                    <StatusDot
+                      connected
+                      on={c.connected ? 'Your key' : 'Platform key active'}
+                      off="Not connected"
+                    />
+                  </div>
+                  <p className="mt-1 text-sm text-gray-400">
+                    {c.connected ? (
+                      <>Key saved ending in <span className="font-mono text-gray-200">••••{c.last4}</span></>
+                    ) : (
+                      'Active via the platform key.'
+                    )}
+                  </p>
                 </div>
                 {c.connected && (
                   <button
                     onClick={() => handleDisconnect(c.provider)}
                     disabled={busy === c.provider}
-                    className="rounded-lg px-3 py-1.5 text-sm text-red-400 transition hover:bg-red-500/10 disabled:opacity-50"
+                    className="shrink-0 rounded-lg px-3 py-1.5 text-sm text-red-400 transition hover:bg-red-500/10 disabled:opacity-50"
                   >
-                    {busy === c.provider ? '…' : 'Disconnect'}
+                    {busy === c.provider ? '…' : 'Remove'}
                   </button>
                 )}
               </div>
-              {c.connected ? (
-                <p className="mt-2 text-sm text-gray-400">
-                  Key saved ending in <span className="font-mono text-gray-200">••••{c.last4}</span>
-                </p>
-              ) : (
-                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                  <input
-                    type="password"
-                    value={inputs[c.provider] || ''}
-                    onChange={(e) => setInputs((p) => ({ ...p, [c.provider]: e.target.value }))}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSave(c.provider)}
-                    placeholder={`Paste ${c.label} API key`}
-                    className="flex-1 rounded-lg border border-nexus-border bg-nexus-bg px-3 py-2.5 text-sm text-gray-100 outline-none transition placeholder:text-gray-600 focus:border-nexus-accent"
-                  />
-                  <button
-                    onClick={() => handleSave(c.provider)}
-                    disabled={busy === c.provider || !(inputs[c.provider] || '').trim()}
-                    className="rounded-lg bg-nexus-accent px-4 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {busy === c.provider ? 'Saving…' : 'Connect'}
-                  </button>
-                </div>
-              )}
-              <p className="mt-2 text-xs text-gray-600">
-                {!c.connected && c.platform ? 'Already working via the platform key. ' : ''}Get your own key: {HINTS[c.provider]}
-              </p>
             </li>
           ))}
         </ul>
       )}
+
+      <Modal
+        open={adding}
+        onClose={() => !saving && setAdding(false)}
+        title="Add API key"
+        footer={
+          <>
+            <button
+              onClick={() => setAdding(false)}
+              disabled={saving}
+              className="rounded-lg border border-nexus-border px-4 py-2 text-sm text-gray-300 transition hover:bg-white/5 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleAdd}
+              disabled={saving || !keyInput.trim() || (needsProvider && !override)}
+              className="rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving ? 'Adding…' : 'Add'}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-400">
+            Paste your key from any provider. Nexus recognizes it automatically and files it under the right one.
+          </p>
+          {addError && (
+            <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{addError}</p>
+          )}
+          <Field
+            label="API key"
+            type="password"
+            value={keyInput}
+            onChange={setKeyInput}
+            placeholder="sk-ant-… · sk-… · AIza… · gsk_…"
+          />
+          {needsProvider && (
+            <label className="block">
+              <span className="mb-1 block text-sm text-gray-300">Couldn't auto-detect — pick the provider</span>
+              <select
+                value={override}
+                onChange={(e) => setOverride(e.target.value)}
+                className="w-full rounded-lg border border-nexus-border bg-nexus-bg px-3 py-2.5 text-sm text-gray-100 outline-none focus:border-nexus-accent"
+              >
+                <option value="">Select provider…</option>
+                {Object.values(PROVIDERS).map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <p className="text-xs text-gray-600">
+            Where to get a key — Claude: {HINTS.claude} · OpenAI: {HINTS.openai} · Gemini: {HINTS.gemini} · Groq: {HINTS.groq}
+          </p>
+        </div>
+      </Modal>
     </section>
   )
 }

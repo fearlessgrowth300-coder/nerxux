@@ -5,6 +5,7 @@ import {
   setConnection,
   deleteConnection,
   isValidProvider,
+  detectProvider,
 } from '../lib/vault.js'
 
 const router = Router()
@@ -17,6 +18,31 @@ router.get('/', async (req, res, next) => {
   try {
     const connections = await listConnections(req.user.id)
     res.json({ connections })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/connections — paste any key; we auto-detect the provider from its
+// prefix and file it there. Body: { apiKey, provider? }. `provider` is an
+// optional manual override for keys we can't recognize (e.g. Higgsfield).
+router.post('/', async (req, res, next) => {
+  try {
+    const { apiKey, provider: override } = req.body || {}
+    if (!apiKey || !String(apiKey).trim()) {
+      return res.status(400).json({ error: 'apiKey is required' })
+    }
+    const provider = override && isValidProvider(override) ? override : detectProvider(apiKey)
+    if (!provider) {
+      return res.status(400).json({
+        error:
+          "Couldn't recognize this API key. Supported: Claude (sk-ant-…), OpenAI (sk-…), " +
+          'Gemini (AIza…), Groq (gsk_…), ElevenLabs (sk_…). Choose the provider manually.',
+        needsProvider: true,
+      })
+    }
+    const connection = await setConnection(req.user.id, provider, apiKey)
+    res.json({ connection })
   } catch (err) {
     next(err)
   }

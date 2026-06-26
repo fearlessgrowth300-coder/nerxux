@@ -13,6 +13,22 @@ export async function getConnections() {
   }
 }
 
+// Paste any key — the server detects the provider. Pass `provider` to override
+// when detection fails (the thrown error carries `.needsProvider` in that case).
+export async function addConnection(apiKey, provider) {
+  try {
+    const { data } = await api.post('/api/connections', {
+      apiKey,
+      ...(provider ? { provider } : {}),
+    })
+    return data.connection
+  } catch (err) {
+    const e = apiError(err, 'Failed to add key')
+    e.needsProvider = Boolean(err?.response?.data?.needsProvider)
+    throw e
+  }
+}
+
 export async function saveConnection(provider, apiKey) {
   try {
     const { data } = await api.put(`/api/connections/${provider}`, { apiKey })
