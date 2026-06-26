@@ -22,6 +22,7 @@ const HINTS = {
   claude: 'console.anthropic.com → API Keys',
   openai: 'platform.openai.com → API Keys',
   gemini: 'aistudio.google.com → Get API key',
+  groq: 'console.groq.com → API Keys (free, 30 req/min)',
   elevenlabs: 'elevenlabs.io → Profile → API Key',
   higgsfield: 'higgsfield.ai → account settings',
 }

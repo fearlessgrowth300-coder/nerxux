@@ -14,6 +14,7 @@ const PLATFORM_ENV = {
   claude: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
   gemini: 'GEMINI_API_KEY',
+  groq: 'GROQ_API_KEY',
   elevenlabs: 'ELEVENLABS_API_KEY',
   higgsfield: 'HIGGSFIELD_API_KEY',
 }

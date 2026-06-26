@@ -6,6 +6,7 @@ export const PROVIDERS = {
   claude: { id: 'claude', label: 'Claude (Anthropic)' },
   openai: { id: 'openai', label: 'OpenAI' },
   gemini: { id: 'gemini', label: 'Google Gemini' },
+  groq: { id: 'groq', label: 'Groq (Llama 4 / DeepSeek / Qwen3 — fast)' },
   elevenlabs: { id: 'elevenlabs', label: 'ElevenLabs' },
   higgsfield: { id: 'higgsfield', label: 'Higgsfield' },
 }
@@ -44,6 +45,51 @@ export const CHAT_MODELS = [
     provider: 'gemini',
     apiModel: 'gemini-2.0-flash',
     vision: true,
+  },
+  // ---- Groq: open models on LPU hardware, ~free (30 req/min), very fast ----
+  // Model ids track console.groq.com/docs/models; Groq rotates its lineup, so if
+  // one 404s the adapter says so and you swap it here.
+  {
+    id: 'groq-llama4-scout',
+    label: 'Llama 4 Scout (Groq) — fast, vision',
+    provider: 'groq',
+    apiModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    vision: true,
+  },
+  {
+    id: 'groq-llama-3.3-70b',
+    label: 'Llama 3.3 70B (Groq) — fast',
+    provider: 'groq',
+    apiModel: 'llama-3.3-70b-versatile',
+    vision: false,
+  },
+  {
+    id: 'groq-deepseek-r1',
+    label: 'DeepSeek R1 70B (Groq) — reasoning',
+    provider: 'groq',
+    apiModel: 'deepseek-r1-distill-llama-70b',
+    vision: false,
+  },
+  {
+    id: 'groq-qwen3-32b',
+    label: 'Qwen3 32B (Groq) — fast',
+    provider: 'groq',
+    apiModel: 'qwen/qwen3-32b',
+    vision: false,
+  },
+  {
+    id: 'groq-gemma2-9b',
+    label: 'Gemma 2 9B (Groq) — fast',
+    provider: 'groq',
+    apiModel: 'gemma2-9b-it',
+    vision: false,
+  },
+  {
+    id: 'groq-llama-3.1-8b',
+    label: 'Llama 3.1 8B (Groq) — instant',
+    provider: 'groq',
+    apiModel: 'llama-3.1-8b-instant',
+    vision: false,
   },
   {
     // Your own model — a from-scratch GPT trained locally by nexus-model/.
