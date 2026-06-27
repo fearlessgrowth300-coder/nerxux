@@ -39,9 +39,20 @@ function TeachAI() {
   async function refresh() {
     setLoading(true)
     try {
-      const [instr, notes] = await Promise.all([getInstructions(), listNotes()])
+      const instr = await getInstructions()
       setInstructions(instr || '')
-      setDocs((notes || []).filter((n) => n.in_context))
+      // Notes table is optional — if it hasn't been created in Supabase yet,
+      // keep the instructions half working and surface a clear hint.
+      try {
+        const notes = await listNotes()
+        setDocs((notes || []).filter((n) => n.in_context))
+      } catch (e) {
+        if (/notes/i.test(e.message) && /schema|not find|exist/i.test(e.message)) {
+          setError("Knowledge files need the 'notes' table — run supabase/schema.sql in your Supabase SQL editor (see below). Instructions work without it.")
+        } else {
+          setError(e.message)
+        }
+      }
     } catch (e) {
       setError(e.message)
     } finally {
