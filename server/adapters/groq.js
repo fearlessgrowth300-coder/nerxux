@@ -20,6 +20,46 @@ function stripReasoning(text = '') {
   return text.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim() || text.trim()
 }
 
+// Groq's open models do grammar-constrained tool-call generation that's far
+// pickier than GPT-4o: large/complex MCP schemas (const, $ref, additionalProps,
+// deep nesting, huge descriptions) make it emit invalid JSON -> 400 "Failed to
+// call a function". So we strip unsupported JSON-Schema keywords and trim long
+// descriptions before sending tools, the same idea as the Gemini adapter.
+const DROP_KEYS = new Set([
+  '$schema', '$id', '$ref', '$defs', '$comment', '$anchor', 'definitions',
+  'additionalProperties', 'unevaluatedProperties', 'patternProperties', 'propertyNames',
+  'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'uniqueItems',
+  'not', 'if', 'then', 'else', 'dependentSchemas', 'dependentRequired',
+  'default', 'examples', 'readOnly', 'writeOnly', 'deprecated',
+  'contentMediaType', 'contentEncoding', 'format',
+])
+
+function cleanSchema(schema) {
+  if (Array.isArray(schema)) return schema.map(cleanSchema)
+  if (!schema || typeof schema !== 'object') return schema
+  const out = {}
+  for (const [k, v] of Object.entries(schema)) {
+    if (DROP_KEYS.has(k)) continue
+    if (k === 'const') {
+      if (typeof v === 'string') { out.enum = [v]; if (!out.type) out.type = 'string' }
+      continue
+    }
+    if (k === 'description' && typeof v === 'string') {
+      out.description = v.length > 300 ? v.slice(0, 297) + '…' : v
+    } else if (k === 'properties' && v && typeof v === 'object') {
+      out.properties = Object.fromEntries(Object.entries(v).map(([pk, pv]) => [pk, cleanSchema(pv)]))
+    } else if (k === 'items') {
+      out.items = cleanSchema(v)
+    } else if ((k === 'anyOf' || k === 'oneOf' || k === 'allOf') && Array.isArray(v)) {
+      out[k] = v.map(cleanSchema)
+    } else {
+      out[k] = v
+    }
+  }
+  if (!out.type && !out.anyOf && !out.oneOf && !out.allOf && !out.enum) out.type = 'object'
+  return out
+}
+
 // Turn Groq's verbose errors into short, actionable messages.
 function friendlyError(err) {
   const raw = String(err?.message || err || '')
@@ -38,6 +78,15 @@ function friendlyError(err) {
   }
   if (/tool|function.?call/i.test(raw) && /not support|unsupported/i.test(raw)) {
     return new Error('This Groq model does not support tool calling. Disable MCP tools or switch to Llama 3.3 70B for tools.')
+  }
+  // Groq's constrained tool-call decoder produced invalid arguments. Common with
+  // large multi-tool MCP setups (e.g. Higgsfield) on the smaller open models.
+  if (/failed to call a function|failed_generation/i.test(raw)) {
+    return new Error(
+      "This Groq model couldn't format the tool call (Groq's open models are weaker at " +
+      'complex multi-tool flows like Higgsfield). Switch Model A to Claude or GPT-4o for ' +
+      'agentic / tool-heavy tasks, and keep Groq for fast plain chat.'
+    )
   }
   return err instanceof Error ? err : new Error(raw)
 }
@@ -77,7 +126,11 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
   const oaTools = hasTools
     ? tools.map((t) => ({
         type: 'function',
-        function: { name: t.name, description: t.description || '', parameters: t.input_schema || { type: 'object', properties: {} } },
+        function: {
+          name: t.name,
+          description: (t.description || '').slice(0, 300),
+          parameters: cleanSchema(t.input_schema || { type: 'object', properties: {} }),
+        },
       }))
     : undefined
 
