@@ -10,6 +10,9 @@ import {
   startTraining,
   stopTraining,
 } from '../lib/training'
+import { getInstructions, saveInstructions } from '../lib/instructions'
+import { listNotes, createNote, updateNote } from '../lib/notes'
+import { extractPdfText } from '../lib/pdf'
 
 function fmtBytes(n) {
   if (!n) return '0 B'
@@ -17,6 +20,141 @@ function fmtBytes(n) {
   let i = 0
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
   return `${n.toFixed(i ? 1 : 0)} ${u[i]}`
+}
+
+// "Teach your AI" — the part that actually steers the API models (Claude, GPT-4o,
+// Groq, …). Instructions are saved as the global system prompt; uploaded docs
+// become AI-knowledge notes. Both feed buildSystemPrompt(), so EVERY model you
+// pick in chat obeys these — no model training involved.
+function TeachAI() {
+  const [instructions, setInstructions] = useState('')
+  const [docs, setDocs] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [savingInstr, setSavingInstr] = useState(false)
+  const [savedInstr, setSavedInstr] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [error, setError] = useState('')
+  const docRef = useRef(null)
+
+  async function refresh() {
+    setLoading(true)
+    try {
+      const [instr, notes] = await Promise.all([getInstructions(), listNotes()])
+      setInstructions(instr || '')
+      setDocs((notes || []).filter((n) => n.in_context))
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { refresh() }, [])
+
+  async function onSaveInstructions() {
+    setSavingInstr(true); setError(''); setSavedInstr(false)
+    try {
+      await saveInstructions(instructions)
+      setSavedInstr(true)
+      setTimeout(() => setSavedInstr(false), 2000)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSavingInstr(false)
+    }
+  }
+
+  async function onUploadDocs(e) {
+    const files = [...(e.target.files || [])]
+    if (!files.length) return
+    setImporting(true); setError('')
+    try {
+      for (const file of files) {
+        const isPdf = /\.pdf$/i.test(file.name)
+        const text = isPdf ? await extractPdfText(file) : await file.text()
+        if (!text.trim()) continue
+        const title = file.name.replace(/\.(pdf|txt|md)$/i, '')
+        const n = await createNote({ title, content: text })
+        await updateNote(n.id, { in_context: true }) // used as AI knowledge
+      }
+      await refresh()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setImporting(false)
+      if (docRef.current) docRef.current.value = ''
+    }
+  }
+
+  // Stop steering the AI with this doc (keeps the note itself in Notes).
+  async function onRemoveDoc(id) {
+    try {
+      await updateNote(id, { in_context: false })
+      setDocs((d) => d.filter((x) => x.id !== id))
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  return (
+    <section className="mb-8 rounded-xl border border-nexus-accent/40 bg-nexus-accent/5 p-5">
+      <h2 className="text-base font-semibold text-gray-100">Teach your AI</h2>
+      <p className="mt-1 text-sm text-gray-400">
+        This controls <strong>every API model you connect</strong> — Claude, GPT-4o, Groq, all of them. Your
+        instructions become rules they always follow, and uploaded files become knowledge they always use.
+        No model training — it works instantly with whatever key you pick in chat.
+      </p>
+      {error && <p className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>}
+
+      <div className="mt-4 grid gap-5 lg:grid-cols-2">
+        {/* Instructions */}
+        <div>
+          <label className="mb-1 block text-sm font-medium text-gray-200">Instructions your AI follows</label>
+          <textarea
+            value={instructions}
+            onChange={(e) => setInstructions(e.target.value)}
+            disabled={loading}
+            rows={8}
+            placeholder={'e.g. You are my marketing assistant. Always write in a friendly, punchy tone. When I ask for ads, give 3 variations and a CTA. Never use emojis in ad copy.'}
+            className="w-full resize-y rounded-lg border border-nexus-border bg-nexus-bg px-3 py-2.5 text-sm text-gray-100 outline-none transition placeholder:text-gray-600 focus:border-nexus-accent"
+          />
+          <button
+            onClick={onSaveInstructions}
+            disabled={savingInstr || loading}
+            className="mt-2 rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {savingInstr ? 'Saving…' : savedInstr ? 'Saved ✓' : 'Save instructions'}
+          </button>
+        </div>
+
+        {/* Knowledge docs */}
+        <div>
+          <label className="mb-1 block text-sm font-medium text-gray-200">Knowledge files your AI uses</label>
+          <button
+            onClick={() => docRef.current?.click()}
+            disabled={importing}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-nexus-border py-5 text-sm text-gray-400 transition hover:border-nexus-accent hover:text-gray-200 disabled:opacity-50"
+          >
+            <FileIcon className="h-5 w-5" />
+            {importing ? 'Reading…' : 'Upload PDF / TXT / MD as knowledge'}
+          </button>
+          <input ref={docRef} type="file" multiple accept=".pdf,.txt,.md" onChange={onUploadDocs} className="hidden" />
+
+          <div className="mt-3 max-h-40 space-y-1 overflow-auto">
+            {docs.map((d) => (
+              <div key={d.id} className="flex items-center justify-between rounded-lg bg-white/5 px-3 py-1.5 text-xs">
+                <span className="truncate text-gray-300">{d.title}</span>
+                <button onClick={() => onRemoveDoc(d.id)} title="Stop using as AI knowledge"
+                  className="text-gray-500 hover:text-red-400">✕</button>
+              </div>
+            ))}
+            {!loading && !docs.length && (
+              <p className="px-1 py-2 text-xs text-gray-600">No knowledge files yet. Upload a product sheet, brand guide, FAQ…</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
 }
 
 // Train-your-own-model console: upload source text/PDFs, build the corpus, run
@@ -87,9 +225,20 @@ export default function TrainModel() {
 
   return (
     <PageShell
-      title="Train your model"
-      description="Upload books / PDFs / text, build a clean corpus, then train your own from-scratch model. Pick it in Chat as “Nexus (your model)”."
+      title="Train & teach"
+      description="Teach any AI you connect (Claude / GPT-4o / Groq) with instructions + knowledge files — or, separately, train the tiny experimental model from scratch."
     >
+      <TeachAI />
+
+      <div className="mb-5 border-t border-nexus-border pt-6">
+        <h2 className="text-base font-semibold text-gray-100">Build a from-scratch model (advanced / experimental)</h2>
+        <p className="mt-1 text-sm text-gray-400">
+          This trains a tiny transformer on your machine from zero. It’s a real engine but small by design —
+          it does <strong>not</strong> affect your API models above, and its output is rough. For actually
+          steering your AI, use “Teach your AI” above.
+        </p>
+      </div>
+
       {error && (
         <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>
       )}
