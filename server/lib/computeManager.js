@@ -14,7 +14,7 @@ const execAsync = promisify(exec)
 
 const getApiKey = () => process.env.RUNPOD_API_KEY || ''
 const getPodId = () => process.env.RUNPOD_POD_ID || 'rigdm6buq51pnu'
-let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://127.0.0.1:11434'
+let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://2.25.126.125:11434'
 const SSH_KEY_PATH = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_ed25519')
 
 let currentMode = 'always_on' // 'always_on' | 'turbo'
