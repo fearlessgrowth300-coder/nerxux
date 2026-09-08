@@ -46,6 +46,7 @@ function toMessage(result, { modelLabel, stage } = {}) {
     modelLabel,
     stage,
     ...(result.media ? { media: result.media, mediaType: result.type } : {}),
+    ...(result.toolSteps?.length ? { toolSteps: result.toolSteps } : {}),
   }
 }
 
@@ -98,11 +99,12 @@ async function buildMcpToolset(userId, connectorIds) {
 
 // Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP
 // tools, attachments (images/PDF), and web search.
-async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp, attachments, webSearch, permissionFor, resume }) {
+async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mcp, attachments, webSearch, permissionFor, resume, sessionId, projectPath }) {
   const info = getModelById(modelId)
   if (!info) throw new Error(`Unknown model: ${modelId}`)
   const result = await runTool(info.provider, userId, {
     prompt,
+    history,
     systemPrompt,
     model: info.apiModel,
     tools: mcp?.tools,
@@ -111,6 +113,8 @@ async function runChatModel(modelId, userId, { prompt, systemPrompt, mcp, attach
     webSearch,
     permissionFor,
     resume,
+    sessionId,
+    projectPath,
   })
   return { result, label: info.label }
 }
@@ -131,6 +135,8 @@ router.post('/', async (req, res, next) => {
       attachments = [],
       webSearch = false,
       connectorIds = null,
+      sessionId = null,
+      projectPath = null,
     } = req.body || {}
 
     const lastUser = [...history].reverse().find((m) => m.role === 'user')
@@ -139,7 +145,7 @@ router.post('/', async (req, res, next) => {
 
     // MCP tools the user has connected + enabled (used by the Claude adapter).
     const mcp = await buildMcpToolset(req.user.id, connectorIds)
-    const extra = { attachments, webSearch }
+    const extra = { attachments, webSearch, sessionId, projectPath }
 
     // ---------- AUTO (intent router) MODE ----------
     if (auto) {
@@ -260,7 +266,7 @@ router.post('/', async (req, res, next) => {
     // Single model (supports per-tool approval pauses).
     try {
       const r = await runChatModel(modelA, req.user.id, {
-        prompt: basePrompt, systemPrompt, mcp, ...extra, permissionFor: mcp.permissionFor,
+        prompt: basePrompt, history, systemPrompt, mcp, ...extra, permissionFor: mcp.permissionFor,
       })
       if (r.result?.pending) {
         const pendingId = savePending({

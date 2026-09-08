@@ -118,6 +118,14 @@ export const CHAT_MODELS = [
     vision: false,
   },
   {
+    // Qwen 3.8 27B Uncensored running on your Runpod RTX 3090 GPU via Ollama
+    id: 'qwen3-8-runpod',
+    label: 'Qwen 3.8 27B Uncensored (Runpod GPU)',
+    provider: 'ollama',
+    apiModel: 'orcarouter/Qwen3.8-27B-Uncensored:latest',
+    vision: false,
+  },
+  {
     id: 'qwen-coder-7b',
     label: 'Coder 7B (local, best)',
     provider: 'ollama',

@@ -1,37 +1,27 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import CodeBlock from './CodeBlock'
 
 // Renders assistant messages as GitHub-flavored Markdown with syntax-highlighted
-// fenced code blocks. Inline code and other elements are styled via Tailwind's
-// prose-ish utility classes applied here (we avoid the typography plugin to keep
-// the dependency list to exactly what Step 1 installed).
-export default function Markdown({ children }) {
+// fenced code blocks and interactive OS-isolated sandbox execution.
+export default function Markdown({ children, sessionId }) {
   return (
     <div className="space-y-3 text-sm leading-relaxed text-gray-100">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          // Render fenced code with highlighting; inline code as a chip.
+          // Render fenced code with interactive Sandbox runner; inline code as a chip.
           code({ inline, className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || '')
-            const isBlock = !inline && match
+            const isBlock = !inline && (match || String(children).includes('\n'))
             if (isBlock) {
+              const lang = match ? match[1] : ''
               return (
-                <SyntaxHighlighter
-                  language={match[1]}
-                  style={oneDark}
-                  customStyle={{
-                    margin: 0,
-                    borderRadius: '0.5rem',
-                    background: '#0b0f17',
-                    fontSize: '0.8rem',
-                  }}
-                  PreTag="div"
-                >
-                  {String(children).replace(/\n$/, '')}
-                </SyntaxHighlighter>
+                <CodeBlock
+                  language={lang}
+                  code={String(children)}
+                  sessionId={sessionId}
+                />
               )
             }
             return (
@@ -43,9 +33,9 @@ export default function Markdown({ children }) {
               </code>
             )
           },
-          // react-markdown wraps block code in <pre>; let the highlighter own it.
+          // Let CodeBlock own block wrapping without extra pre overflow wrapping
           pre({ children }) {
-            return <div className="overflow-x-auto">{children}</div>
+            return <div>{children}</div>
           },
           a({ children, ...props }) {
             return (

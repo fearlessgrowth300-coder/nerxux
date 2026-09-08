@@ -13,6 +13,8 @@ export async function sendChat({
   attachments,
   webSearch,
   connectorIds,
+  sessionId,
+  projectPath,
 }) {
   try {
     const { data } = await api.post('/api/chat', {
@@ -26,6 +28,8 @@ export async function sendChat({
       attachments,
       webSearch,
       connectorIds,
+      sessionId,
+      projectPath,
     })
     return { messages: data.messages, routing: data.routing || null }
   } catch (err) {

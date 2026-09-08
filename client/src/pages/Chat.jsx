@@ -159,6 +159,7 @@ export default function Chat() {
         attachments: media,
         webSearch,
         connectorIds: [...activeConnectors],
+        sessionId: convId,
       })
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
@@ -353,7 +354,7 @@ export default function Chat() {
                 m.role === 'video' ? <VideoAnalysisCard key={m.id} message={m} />
                   : m.role === 'routing' ? <RoutingCard key={m.id} routing={m.routing} />
                     : m.role === 'approval' ? <ApprovalCard key={m.id} message={m} onDecide={handleApproval} />
-                      : <Message key={m.id} message={m} />
+                      : <Message key={m.id} message={m} sessionId={conversationId} />
               )}
               {sending && (
                 <TypingIndicator label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
@@ -601,7 +602,69 @@ function StageBadge({ stage }) {
   return <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${map[stage] || ''}`}>{stage}</span>
 }
 
-function Message({ message }) {
+function ToolStepsCard({ steps = [] }) {
+  const [open, setOpen] = useState(false)
+  if (!steps || steps.length === 0) return null
+
+  return (
+    <div className="mb-3 overflow-hidden rounded-xl border border-nexus-border bg-nexus-bg/70 text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-3 py-2 text-left text-gray-300 hover:bg-white/5 transition"
+      >
+        <div className="flex items-center gap-2">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-nexus-accent/20 text-nexus-accent2 font-bold text-[10px]">
+            ⚡
+          </span>
+          <span className="font-semibold text-gray-200">
+            Model Executed {steps.length} Tool {steps.length === 1 ? 'Action' : 'Actions'}
+          </span>
+        </div>
+        <span className="text-[11px] text-gray-500">{open ? '▲ Hide details' : '▼ View logs'}</span>
+      </button>
+
+      {open && (
+        <div className="divide-y divide-nexus-border/50 border-t border-nexus-border/50 p-2 space-y-2">
+          {steps.map((st, i) => (
+            <div key={i} className="pt-2">
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-gray-300">
+                    {st.tool}
+                  </span>
+                  <span className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-[10px] text-nexus-accent2">
+                    {st.target === 'pod' ? '⚡ Runpod Pod' : '🔒 Local Sandbox'}
+                  </span>
+                </div>
+                <span className={`text-[10px] font-mono ${st.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                  exit: {st.exitCode ?? 0} {st.durationMs ? `(${st.durationMs}ms)` : ''}
+                </span>
+              </div>
+              {st.args?.command && (
+                <div className="font-mono text-[11px] text-gray-300 bg-black/40 px-2 py-1 rounded">
+                  $ {st.args.command}
+                </div>
+              )}
+              {st.args?.code && (
+                <pre className="max-h-24 overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] text-gray-300">
+                  {st.args.code}
+                </pre>
+              )}
+              {(st.stdout || st.stderr) && (
+                <pre className="mt-1 max-h-32 overflow-auto rounded bg-black/60 p-2 font-mono text-[11px] text-gray-400 whitespace-pre-wrap">
+                  {st.stdout}{st.stderr ? `\nSTDERR:\n${st.stderr}` : ''}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Message({ message, sessionId }) {
   const isUser = message.role === 'user'
   return (
     <div className={isUser ? 'flex justify-end' : 'flex justify-start'}>
@@ -628,7 +691,8 @@ function Message({ message }) {
             </>
           ) : (
             <>
-              <Markdown>{message.content}</Markdown>
+              {message.toolSteps?.length > 0 && <ToolStepsCard steps={message.toolSteps} />}
+              <Markdown sessionId={sessionId}>{message.content}</Markdown>
               <MediaBlock media={message.media} type={message.mediaType} />
             </>
           )}

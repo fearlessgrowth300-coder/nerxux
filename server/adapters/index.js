@@ -19,6 +19,6 @@ export const ADAPTERS = { claude, openai, gemini, groq, elevenlabs, higgsfield, 
 export async function runTool(provider, userId, args = {}) {
   const adapter = ADAPTERS[provider]
   if (!adapter) throw new Error(`No adapter for provider "${provider}"`)
-  const apiKey = await getProviderKey(userId, provider)
+  const apiKey = (provider === 'ollama' || provider === 'nexus') ? null : await getProviderKey(userId, provider)
   return adapter.run({ ...args, apiKey })
 }
