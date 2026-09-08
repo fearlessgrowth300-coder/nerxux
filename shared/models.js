@@ -118,9 +118,9 @@ export const CHAT_MODELS = [
     vision: false,
   },
   {
-    // Qwen 3.8 27B Uncensored running on your Runpod RTX 3090 GPU via Ollama
+    // Qwen 3.8 27B Uncensored running on Hostinger KVM 8 (Always On) and Runpod GPU (Turbo)
     id: 'qwen3-8-runpod',
-    label: 'Qwen 3.8 27B Uncensored (Runpod GPU)',
+    label: 'Qwen 3.8 27B Uncensored (Always On / Turbo)',
     provider: 'ollama',
     apiModel: 'orcarouter/Qwen3.8-27B-Uncensored:latest',
     vision: false,

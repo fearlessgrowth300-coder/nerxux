@@ -58,36 +58,38 @@ export default function ComputeBar() {
         <button
           type="button"
           onClick={() => handleSwitch('always_on')}
-          disabled={loading || !isTurbo}
+          disabled={loading}
           className={[
             'flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition cursor-pointer',
             !isTurbo
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-500/10'
-              : 'bg-white/5 text-gray-400 hover:bg-white/10 border border-transparent',
+              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-500/10 ring-1 ring-emerald-500/30'
+              : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-gray-200 border border-transparent',
           ].join(' ')}
           title="Hostinger KVM 8: 2–5 tok/s, 24/7 flat $26/mo"
         >
           <span>🐢</span>
           <span>Always On</span>
           <span className="text-[10px] opacity-70 hidden sm:inline">(KVM 8)</span>
+          {!isTurbo && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>}
         </button>
 
         {/* Button 2: Turbo */}
         <button
           type="button"
           onClick={() => handleSwitch('turbo')}
-          disabled={loading || isTurbo}
+          disabled={loading}
           className={[
             'flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition cursor-pointer',
             isTurbo
-              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm shadow-amber-500/10'
-              : 'bg-white/5 text-gray-400 hover:bg-white/10 border border-transparent',
+              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm shadow-amber-500/10 ring-1 ring-amber-500/30'
+              : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-gray-200 border border-transparent',
           ].join(' ')}
           title="RunPod GPU: 30–65 tok/s, $0.50/hr on-demand"
         >
           <span>🚀</span>
           <span>Turbo</span>
           <span className="text-[10px] opacity-70 hidden sm:inline">(RTX 3090)</span>
+          {isTurbo && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>}
         </button>
 
         {/* Stop Turbo / Power Off */}

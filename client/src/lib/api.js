@@ -12,9 +12,17 @@ export const api = axios.create({
 // authenticate the user (see server/lib/auth.js).
 api.interceptors.request.use(async (config) => {
   try {
-    const {
+    let {
       data: { session },
     } = await supabase.auth.getSession()
+
+    // If session is expired or expiring within 60s, refresh it proactively
+    if (session?.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
+      const { data: refreshed } = await supabase.auth.refreshSession()
+      if (refreshed?.session) {
+        session = refreshed.session
+      }
+    }
 
     if (session?.access_token) {
       config.headers.Authorization = `Bearer ${session.access_token}`
@@ -22,6 +30,31 @@ api.interceptors.request.use(async (config) => {
   } catch {}
   return config
 })
+
+// Proactive 401 retry: if a request gets 401 due to expired session, refresh and retry once
+api.interceptors.response.use(
+  (res) => res,
+  async (err) => {
+    const original = err.config
+    if (
+      err.response?.status === 401 &&
+      !original?._retry &&
+      (err.response?.data?.error?.includes('session') ||
+        err.response?.data?.error?.includes('expired') ||
+        err.response?.data?.error?.includes('token'))
+    ) {
+      original._retry = true
+      try {
+        const { data } = await supabase.auth.refreshSession()
+        if (data?.session?.access_token) {
+          original.headers.Authorization = `Bearer ${data.session.access_token}`
+          return api(original)
+        }
+      } catch {}
+    }
+    return Promise.reject(err)
+  }
+)
 
 // Normalize server errors into Error(message) for consistent UI handling.
 export function apiError(err, fallback = 'Request failed') {
