@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { getComputeStatus, switchComputeMode, setHostingerIp } from '../lib/compute'
+import { apiError } from '../lib/api'
 
 export default function ComputeBar() {
   const [status, setStatus] = useState({
@@ -29,7 +30,7 @@ export default function ComputeBar() {
       const updated = await getComputeStatus()
       setStatus(updated)
     } catch (err) {
-      setError(err.message || 'Failed to switch compute mode')
+      setError(apiError(err).message)
     } finally {
       setLoading(false)
     }

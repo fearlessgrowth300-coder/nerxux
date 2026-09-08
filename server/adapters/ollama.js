@@ -27,7 +27,7 @@ function composeSystem(systemPrompt = '', skills = []) {
 // { prompt, history, systemPrompt, skills, model, sessionId, projectPath } -> normalized response with toolSteps
 export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath }) {
   const targetUrl = resolveTargetUrl(model)
-  const isRunpod = targetUrl === RUNPOD_OLLAMA_URL
+  const isRunpod = targetUrl.includes('11435')
   const system = composeSystem(systemPrompt, skills)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
@@ -171,9 +171,11 @@ function dataModel(m) {
 export async function health() {
   const models = []
   let reachable = false
-  for (const url of [OLLAMA_URL, RUNPOD_OLLAMA_URL]) {
+  const status = getComputeStatus()
+  const urls = [status.activeUrl, status.hostingerUrl, 'http://127.0.0.1:11435'].filter(Boolean)
+  for (const url of [...new Set(urls)]) {
     try {
-      const r = await fetch(`${url}/api/tags`)
+      const r = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(2000) })
       if (r.ok) {
         reachable = true
         const j = await r.json()

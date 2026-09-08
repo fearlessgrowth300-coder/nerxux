@@ -14,7 +14,8 @@ export async function requireAuth(req, res, next) {
     // Verifies the JWT against Supabase and returns the user.
     const { data, error } = await supabaseAdmin.auth.getUser(token)
     if (error || !data?.user) {
-      return res.status(401).json({ error: 'Invalid or expired session' })
+      console.warn('[nexus-ai auth] Invalid or expired token:', error?.message)
+      return res.status(401).json({ error: 'Invalid or expired session. Please log in again.' })
     }
 
     req.user = data.user
