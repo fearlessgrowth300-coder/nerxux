@@ -17,13 +17,18 @@ export default function Login() {
     e.preventDefault()
     setError('')
     setSubmitting(true)
-    const { error } = await signIn({ email: email.trim(), password })
-    setSubmitting(false)
-    if (error) {
-      setError(error.message)
-      return
+    try {
+      const { error } = await signIn({ email: email.trim(), password })
+      if (error) {
+        setError(error.message)
+        return
+      }
+      navigate(redirectTo, { replace: true })
+    } catch (err) {
+      setError(err.message || 'Login failed. Please check your network connection.')
+    } finally {
+      setSubmitting(false)
     }
-    navigate(redirectTo, { replace: true })
   }
 
   return (

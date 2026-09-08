@@ -29,20 +29,24 @@ export default function Signup() {
     }
 
     setSubmitting(true)
-    const { data, error } = await signUp({ email: email.trim(), password })
-    setSubmitting(false)
+    try {
+      const { data, error } = await signUp({ email: email.trim(), password })
+      if (error) {
+        setError(error.message)
+        return
+      }
 
-    if (error) {
-      setError(error.message)
-      return
-    }
-
-    // If email confirmation is enabled in Supabase, there's no active session
-    // yet — tell the user to confirm. Otherwise we're logged in immediately.
-    if (data?.session) {
-      navigate('/', { replace: true })
-    } else {
-      setNotice('Account created. Check your email to confirm, then sign in.')
+      // If email confirmation is enabled in Supabase, there's no active session
+      // yet — tell the user to confirm. Otherwise we're logged in immediately.
+      if (data?.session) {
+        navigate('/', { replace: true })
+      } else {
+        setNotice('Account created. Check your email to confirm, then sign in.')
+      }
+    } catch (err) {
+      setError(err.message || 'Signup failed. Please check your network connection.')
+    } finally {
+      setSubmitting(false)
     }
   }
 
