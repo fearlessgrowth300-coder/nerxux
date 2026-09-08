@@ -1,10 +1,14 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
 import https from 'node:https'
 import http from 'node:http'
 import { spawn, exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+dotenv.config({ path: path.join(__dirname, '../.env') })
 
 const execAsync = promisify(exec)
 

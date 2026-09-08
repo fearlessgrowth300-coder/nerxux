@@ -1,4 +1,10 @@
+import dotenv from 'dotenv'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createClient } from '@supabase/supabase-js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+dotenv.config({ path: path.join(__dirname, '../.env') })
 
 // Server-side Supabase client using the SERVICE ROLE key. This bypasses Row
 // Level Security, so it must only ever be used on the backend and queries must
