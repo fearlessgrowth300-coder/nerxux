@@ -9,6 +9,7 @@ import nativeRouter from './routes/native.js'
 import accountRouter from './routes/account.js'
 import trainingRouter from './routes/training.js'
 import sandboxRouter from './routes/sandbox.js'
+import computeRouter from './routes/compute.js'
 import { ensureModelServer } from './lib/modelServer.js'
 
 // Never let a stray async error from a third-party transport (e.g. an MCP
@@ -80,6 +81,7 @@ app.use('/api/native', nativeRouter)
 app.use('/api/account', accountRouter)
 app.use('/api/training', trainingRouter)
 app.use('/api/sandbox', sandboxRouter)
+app.use('/api/compute', computeRouter)
 
 // ---- Central error handler ----
 // Every route added in later steps should `next(err)` so errors land here

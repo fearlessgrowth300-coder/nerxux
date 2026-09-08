@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { v4 as uuid } from 'uuid'
 import Markdown from '../components/Markdown'
 import ModelControls from '../components/ModelControls'
+import ComputeBar from '../components/ComputeBar'
 import {
   PlusIcon, FileIcon, ImageIcon, SearchIcon, MicIcon, SkillsIcon,
   ConnectionsIcon, InstructionsIcon, SendIcon, SparkIcon, CloseIcon,
@@ -263,6 +264,7 @@ export default function Chat() {
 
   return (
     <div className="flex h-full flex-col">
+      <ComputeBar />
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-nexus-border px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
           <AutoToggle auto={auto} setAuto={setAuto} />

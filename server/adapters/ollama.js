@@ -4,15 +4,14 @@
 // Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
-
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434'
-const RUNPOD_OLLAMA_URL = process.env.RUNPOD_OLLAMA_URL || 'http://127.0.0.1:11435'
+import { getComputeStatus } from '../lib/computeManager.js'
 
 function resolveTargetUrl(model) {
-  if (model && (model.includes('Qwen3.8') || model.includes('orcarouter'))) {
-    return RUNPOD_OLLAMA_URL
+  const status = getComputeStatus()
+  if (status.mode === 'turbo') {
+    return status.activeUrl // http://127.0.0.1:11435
   }
-  return OLLAMA_URL
+  return status.hostingerUrl || 'http://127.0.0.1:11434'
 }
 
 function composeSystem(systemPrompt = '', skills = []) {
