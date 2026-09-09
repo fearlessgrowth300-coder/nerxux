@@ -17,6 +17,23 @@ const IS_WINDOWS = process.platform === 'win32'
 // Real project work (npm install, create-next-app, a build) routinely runs
 // well past 30s; killing it there left half-scaffolded projects and made the
 // agent think a step "failed".
+// Installed as GIT_TEMPLATE_DIR's hooks/pre-commit — git copies template
+// files into .git/ on EVERY `git init` and `git clone`, including ones run
+// as part of the same tool call that then commits, so there's no timing gap
+// for the after-the-fact scrub below to miss. Real secrets (the user's own
+// Supabase/DB credentials, pasted to be used) belong in this workspace;
+// this only stops them from being committed.
+const PRE_COMMIT_HOOK = `#!/bin/sh
+staged=$(git diff --cached --name-only | grep -E '(^|/)\\.env(\\..+)?$|\\.(pem|key|p12|pfx)$|(^|/)id_(rsa|ed25519|ecdsa)$')
+if [ -n "$staged" ]; then
+  echo "BLOCKED: refusing to commit secret-shaped file(s):" >&2
+  echo "$staged" >&2
+  echo "These belong in an ignored env file, not a commit. To force anyway: git commit --no-verify" >&2
+  exit 1
+fi
+`
+const PRE_COMMIT_HOOK_B64 = Buffer.from(PRE_COMMIT_HOOK, 'utf8').toString('base64')
+
 const TIMEOUT_MS = 5 * 60 * 1000
 
 export async function executeInSandbox({
@@ -126,6 +143,11 @@ export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
 ${gitToken ? `export GITHUB_TOKEN="${gitToken}"` : ''}
 ${gitConfigSetup}
 
+mkdir -p "$SESSION_DIR/.nexus-git-template/hooks"
+echo "${PRE_COMMIT_HOOK_B64}" | base64 -d > "$SESSION_DIR/.nexus-git-template/hooks/pre-commit"
+chmod +x "$SESSION_DIR/.nexus-git-template/hooks/pre-commit"
+export GIT_TEMPLATE_DIR=/workspace/.nexus-git-template
+
 set +e
 bwrap \\
   --ro-bind /usr /usr \\
@@ -164,6 +186,22 @@ set -e
 # unconditionally, regardless of what the command did or how it exited.
 find "$SESSION_DIR" -path '*/.git/config' -exec \\
   sed -i -E 's#(https://)[^/@[:space:]]+@#\\1#g' {} + 2>/dev/null || true
+
+# Same idea for the files themselves: real credentials belong in this
+# workspace (the user pastes them to be used), but never in a git commit.
+# write_file adds a .gitignore for env-shaped files as it writes them; this
+# is the backstop for whatever gets staged anyway (a hand-written
+# .gitignore, execute_command writing a file directly, an already-tracked
+# file later turned into an env file). Unstage, never delete — the model's
+# work stays on disk either way.
+for gitdir in $(find "$SESSION_DIR" -maxdepth 6 -name .git -type d 2>/dev/null); do
+  repo="$(dirname "$gitdir")"
+  staged=$(cd "$repo" && git diff --cached --name-only 2>/dev/null | grep -E '(^|/)\\.env(\\..+)?$|\\.(pem|key|p12|pfx)$|(^|/)id_(rsa|ed25519|ecdsa)$' || true)
+  if [ -n "$staged" ]; then
+    (cd "$repo" && echo "$staged" | xargs -r git reset -q HEAD --) 2>/dev/null || true
+    echo "[safety] unstaged (never committed): $staged" | tr '\\n' ' '; echo
+  fi
+done
 
 exit $BWRAP_EXIT
 `

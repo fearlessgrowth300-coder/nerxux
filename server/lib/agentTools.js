@@ -115,7 +115,17 @@ export function fileToolCommand(name, args = {}) {
   switch (name) {
     case 'write_file': {
       const p = absPath(args.path)
-      return `mkdir -p "$(dirname ${q(p)})" && printf '%s' ${q(b64(args.content ?? ''))} | base64 -d > ${q(p)} && echo "wrote ${p} ($(wc -c < ${q(p)}) bytes)"`
+      const base = p.split('/').filter(Boolean).pop() || ''
+      // Real credentials (Supabase URLs/keys, DB connection strings) live in
+      // this chat and legitimately belong in project env files — but an env
+      // file with no .gitignore covering it is one `git add -A` away from a
+      // committed secret. Guarantee coverage the moment the file is written,
+      // regardless of what .gitignore (if any) the model wrote itself.
+      const isSecretFile = /^\.env(\..+)?$/i.test(base) || /\.(pem|key|p12|pfx)$/i.test(base) || /^id_(rsa|ed25519|ecdsa)$/.test(base)
+      const guard = isSecretFile
+        ? ` ; D="$(dirname ${q(p)})"; GI="$D/.gitignore"; grep -qxF '.env*' "$GI" 2>/dev/null || printf '%s\n' '.env*' >> "$GI"`
+        : ''
+      return `mkdir -p "$(dirname ${q(p)})" && printf '%s' ${q(b64(args.content ?? ''))} | base64 -d > ${q(p)} && echo "wrote ${p} ($(wc -c < ${q(p)}) bytes)"${guard}`
     }
     case 'read_file': {
       const p = absPath(args.path)
