@@ -11,6 +11,11 @@ export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+  const [sessionNotice] = useState(() => {
+    const notice = window.sessionStorage.getItem('nexus.auth.notice') || ''
+    window.sessionStorage.removeItem('nexus.auth.notice')
+    return notice
+  })
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSubmit(e) {
@@ -34,6 +39,12 @@ export default function Login() {
   return (
     <AuthShell title="Welcome back" subtitle="Sign in to your Nexus AI hub">
       <form onSubmit={handleSubmit} className="space-y-4">
+        {sessionNotice && (
+          <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+            {sessionNotice}
+          </p>
+        )}
+
         <Field
           label="Email"
           type="email"

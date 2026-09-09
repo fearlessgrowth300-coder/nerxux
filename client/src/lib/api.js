@@ -8,6 +8,45 @@ export const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '',
 })
 
+let refreshPromise = null
+let redirectingToLogin = false
+
+async function refreshAccessToken() {
+  if (!refreshPromise) {
+    refreshPromise = supabase.auth
+      .refreshSession()
+      .then(({ data, error }) => {
+        if (error || !data?.session?.access_token) {
+          throw error || new Error('Session refresh returned no access token')
+        }
+        return data.session.access_token
+      })
+      .finally(() => {
+        refreshPromise = null
+      })
+  }
+  return refreshPromise
+}
+
+async function clearInvalidSession() {
+  try {
+    await supabase.auth.signOut({ scope: 'local' })
+  } catch {}
+
+  if (
+    typeof window !== 'undefined' &&
+    !redirectingToLogin &&
+    window.location.pathname !== '/login'
+  ) {
+    redirectingToLogin = true
+    window.sessionStorage.setItem(
+      'nexus.auth.notice',
+      'Your saved session could not be refreshed. Please sign in again.'
+    )
+    window.location.assign('/login')
+  }
+}
+
 // Attach the current Supabase access token to every request so the server can
 // authenticate the user (see server/lib/auth.js).
 api.interceptors.request.use(async (config) => {
@@ -18,9 +57,13 @@ api.interceptors.request.use(async (config) => {
 
     // If session is expired or expiring within 60s, refresh it proactively
     if (session?.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
-      const { data: refreshed } = await supabase.auth.refreshSession()
-      if (refreshed?.session) {
-        session = refreshed.session
+      try {
+        const accessToken = await refreshAccessToken()
+        config.headers.Authorization = `Bearer ${accessToken}`
+        return config
+      } catch {
+        await clearInvalidSession()
+        return config
       }
     }
 
@@ -36,21 +79,21 @@ api.interceptors.response.use(
   (res) => res,
   async (err) => {
     const original = err.config
+    const authMessage = String(err.response?.data?.error || '')
     if (
       err.response?.status === 401 &&
-      !original?._retry &&
-      (err.response?.data?.error?.includes('session') ||
-        err.response?.data?.error?.includes('expired') ||
-        err.response?.data?.error?.includes('token'))
+      original &&
+      !original._retry &&
+      /(session|expired|token|authorization)/i.test(authMessage)
     ) {
       original._retry = true
       try {
-        const { data } = await supabase.auth.refreshSession()
-        if (data?.session?.access_token) {
-          original.headers.Authorization = `Bearer ${data.session.access_token}`
-          return api(original)
-        }
-      } catch {}
+        const accessToken = await refreshAccessToken()
+        original.headers.Authorization = `Bearer ${accessToken}`
+        return api(original)
+      } catch {
+        await clearInvalidSession()
+      }
     }
     return Promise.reject(err)
   }
