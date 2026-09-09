@@ -12,6 +12,13 @@ test('tool defs convert to OpenAI function format and the name set covers them a
   assert.equal(AGENT_TOOL_NAMES.has('web_search'), true)
 })
 
+test('a relative path resolves against the given base — /workspace/project when a local folder is mounted, /workspace otherwise', () => {
+  assert.match(fileToolCommand('write_file', { path: 'a.js', content: 'x' }, { base: '/workspace/project' }), /> '\/workspace\/project\/a\.js'/)
+  assert.match(fileToolCommand('write_file', { path: 'a.js', content: 'x' }), /> '\/workspace\/a\.js'/) // default base, unchanged
+  assert.match(fileToolCommand('list_files', {}, { base: '/workspace/project' }), /cd '\/workspace\/project'/) // empty path -> the base itself
+  assert.match(fileToolCommand('read_file', { path: '/abs/x.js' }, { base: '/workspace/project' }), /'\/abs\/x\.js'/) // absolute path ignores base
+})
+
 test('file tool commands never embed model text as shell syntax', () => {
   const nasty = `it's "quoted" $(rm -rf /) \`x\` \n\t; echo pwned`
   const w = fileToolCommand('write_file', { path: "repo/a b'c.txt", content: nasty })

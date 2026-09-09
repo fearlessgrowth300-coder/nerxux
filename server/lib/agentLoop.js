@@ -36,13 +36,22 @@ LOST, so many small calls always beat one giant one. Long-running commands
 (npm install, builds) are fine on their own; don't combine them with file
 writes.
 
-Paths: every tool call starts in /workspace (persistent for this chat). If
-the project lives in a subfolder (e.g. /workspace/repo after a git clone),
-use absolute paths or "cd /workspace/repo && ..." in EVERY command — files
-written to /workspace/app instead of /workspace/repo/app are in the wrong
-place. Pass code as plain source text in the "code" field, never as a JSON
-object. After writing files, verify with ls / cat before moving on, and
-never repeat a step you have already completed.
+Paths: every tool call starts in /workspace (persistent for this chat, but
+thrown away when the chat ends). If the user gives you an absolute path on
+their own machine to an EXISTING project (this only works when Nexus itself
+is running on their machine, not the hosted version) — set it once via
+projectPath on any tool call, and it stays in effect for every later call
+in this chat automatically; you don't need to repeat it. It replaces
+/workspace as the project root: relative paths resolve there, execute_command
+and run_code start there. When a projectPath is set, work on the files that
+are already there — don't clone or re-scaffold, look at what exists first.
+
+Without a projectPath, if the project lives in a subfolder (e.g.
+/workspace/repo after a git clone), use absolute paths or "cd /workspace/repo
+&& ..." in EVERY command — files written to /workspace/app instead of
+/workspace/repo/app are in the wrong place. Pass code as plain source text in
+the "code" field, never as a JSON object. After writing files, verify with
+ls / cat before moving on, and never repeat a step you have already completed.
 
 Available Tools:
 - write_file(path, content) / edit_file(path, old, new) / read_file(path) / list_files(path) / search_files(pattern, path)
@@ -133,12 +142,26 @@ export function harvestGithubToken(text = '') {
   return matches ? matches[matches.length - 1] : null
 }
 
+// Once a chat mounts a local project folder, every later call in that same
+// chat should keep using it without the model re-stating the path on every
+// single tool call (it will forget, especially deep into a long build).
+// Session-scoped, not global — a different chat working on a different
+// folder is unaffected. Cleared by giving `projectPath: null`/`""` explicitly.
+const lastProjectPath = new Map() // sessionId -> path
+export const _lastProjectPathForTest = lastProjectPath // tests only
+
 // Executes a single tool call against the local sandbox or Runpod pod.
 // `chatText` = the conversation so far, scanned for pasted credentials.
 export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '' }) {
   const args = normalizeToolArgs(name, rawArgs)
   const cleanSession = sessionId || 'default'
-  const targetProj = args.projectPath || projectPath || null
+  // An explicit projectPath (even "" / null, to unmount) updates what this
+  // chat remembers; omitting the field just reuses whatever was set before.
+  if ('projectPath' in args) {
+    if (args.projectPath) lastProjectPath.set(cleanSession, args.projectPath)
+    else lastProjectPath.delete(cleanSession)
+  }
+  const targetProj = args.projectPath || projectPath || lastProjectPath.get(cleanSession) || null
 
   if (name === 'web_search') {
     // Reshaped to match the sandbox result shape ({stdout,...}) that the
@@ -149,8 +172,11 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
   }
 
   // File tools: a fixed bash recipe per tool, with all model-supplied text
-  // delivered base64-encoded — the model never composes shell syntax.
-  const fileCmd = fileToolCommand(name, args)
+  // delivered base64-encoded — the model never composes shell syntax. A
+  // relative path resolves against /workspace/project when a local folder
+  // is bind-mounted for this call, /workspace otherwise — matching where
+  // execute_command/run_code actually start (see sandbox.js's targetDir).
+  const fileCmd = fileToolCommand(name, args, { base: targetProj ? '/workspace/project' : '/workspace' })
   if (fileCmd) {
     const r = await executeInSandbox({
       code: fileCmd, language: 'bash', sessionId: cleanSession, profile: 'none', projectPath: targetProj,

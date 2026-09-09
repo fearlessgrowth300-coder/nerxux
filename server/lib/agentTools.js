@@ -8,32 +8,38 @@
 import { WEB_SEARCH_TOOL } from './webSearch.js'
 
 const str = (description) => ({ type: 'string', description })
+// Set once (on any tool call) to bind-mount a real local folder on the host
+// running the server — e.g. an existing project on the user's own PC when
+// they're running Nexus locally — at the project root instead of the
+// throwaway per-chat sandbox dir. Sticky: it's remembered for every later
+// call in this same chat, so it only needs to be given once.
+const PROJECT_PATH_FIELD = str('Absolute path on the host machine to work in instead of the throwaway sandbox (e.g. an existing local project). Sticky for the rest of this chat once set; pass "" to unmount it.')
 
 export const AGENT_TOOL_DEFS = [
   {
     name: 'write_file',
-    description: 'Create or overwrite a file in the sandbox with the given content (parent folders are created). Use this for every file you write — never heredocs. Paths are relative to /workspace unless absolute.',
-    input_schema: { type: 'object', properties: { path: str('File path, e.g. repo/app/page.tsx'), content: str('Full file content') }, required: ['path', 'content'] },
+    description: 'Create or overwrite a file with the given content (parent folders are created). Use this for every file you write — never heredocs. Paths are relative to the current project (a mounted local folder if one is set, else /workspace) unless absolute.',
+    input_schema: { type: 'object', properties: { path: str('File path, e.g. repo/app/page.tsx'), content: str('Full file content'), projectPath: PROJECT_PATH_FIELD }, required: ['path', 'content'] },
   },
   {
     name: 'read_file',
-    description: 'Read a file from the sandbox. Returns its text (long files are truncated; use start/limit for the rest).',
-    input_schema: { type: 'object', properties: { path: str('File path'), start: { type: 'integer', description: 'First line (1-based)' }, limit: { type: 'integer', description: 'Max lines (default 400)' } }, required: ['path'] },
+    description: 'Read a file. Returns its text (long files are truncated; use start/limit for the rest).',
+    input_schema: { type: 'object', properties: { path: str('File path'), start: { type: 'integer', description: 'First line (1-based)' }, limit: { type: 'integer', description: 'Max lines (default 400)' }, projectPath: PROJECT_PATH_FIELD }, required: ['path'] },
   },
   {
     name: 'edit_file',
     description: 'Replace an exact text snippet in a file with new text (the old text must appear exactly once). Cheaper and safer than rewriting the whole file.',
-    input_schema: { type: 'object', properties: { path: str('File path'), old: str('Exact text to replace'), new: str('Replacement text') }, required: ['path', 'old', 'new'] },
+    input_schema: { type: 'object', properties: { path: str('File path'), old: str('Exact text to replace'), new: str('Replacement text'), projectPath: PROJECT_PATH_FIELD }, required: ['path', 'old', 'new'] },
   },
   {
     name: 'list_files',
-    description: 'List files and folders under a path in the sandbox (recursive, node_modules/.git skipped).',
-    input_schema: { type: 'object', properties: { path: str('Folder (default /workspace)'), depth: { type: 'integer', description: 'Max depth (default 3)' } } },
+    description: 'List files and folders under a path (recursive, node_modules/.git skipped).',
+    input_schema: { type: 'object', properties: { path: str('Folder (default: project root)'), depth: { type: 'integer', description: 'Max depth (default 3)' }, projectPath: PROJECT_PATH_FIELD } },
   },
   {
     name: 'search_files',
     description: 'Search file contents under a path for a regex (grep -rn). Returns matching lines with file:line.',
-    input_schema: { type: 'object', properties: { pattern: str('Regex to search for'), path: str('Folder (default /workspace)') }, required: ['pattern'] },
+    input_schema: { type: 'object', properties: { pattern: str('Regex to search for'), path: str('Folder (default: project root)'), projectPath: PROJECT_PATH_FIELD } },
   },
   {
     name: 'execute_command',
@@ -44,7 +50,7 @@ export const AGENT_TOOL_DEFS = [
         command: str('The shell command line'),
         target: { type: 'string', enum: ['sandbox', 'pod'], description: 'Where to run (default sandbox)' },
         profile: { type: 'string', enum: ['none', 'full'], description: 'Network: "full" (default) or "none"' },
-        projectPath: str('Optional host directory to mount at /workspace/project'),
+        projectPath: PROJECT_PATH_FIELD,
       },
       required: ['command'],
     },
@@ -58,7 +64,7 @@ export const AGENT_TOOL_DEFS = [
         language: { type: 'string', enum: ['python', 'javascript', 'typescript', 'c++', 'bash'] },
         code: str('The complete code to run (plain source text)'),
         profile: { type: 'string', enum: ['none', 'full'], description: 'Network: "none" (default) or "full"' },
-        projectPath: str('Optional host directory to mount at /workspace/project'),
+        projectPath: PROJECT_PATH_FIELD,
       },
       required: ['language', 'code'],
     },
@@ -103,38 +109,43 @@ export function toStep(name, args, result) {
 
 const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64')
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
-const absPath = (p, fallback = '/workspace') => {
+// `base` is /workspace/project when a local folder is bind-mounted for this
+// call (see agentLoop.js), /workspace otherwise — a relative path from the
+// model resolves against whichever one is actually the working project, not
+// always the bare sandbox root.
+const absPath = (p, base) => {
   const s = String(p || '').trim()
-  if (!s) return fallback
-  return s.startsWith('/') ? s : `/workspace/${s.replace(/^\.\//, '')}`
+  if (!s) return base
+  return s.startsWith('/') ? s : `${base}/${s.replace(/^\.\//, '')}`
 }
 
 // Bash for each file tool. Everything model-supplied goes through base64 or
 // single-quote escaping — the model never gets to build shell syntax.
-export function fileToolCommand(name, args = {}) {
+// `base`: the effective project root for a relative path (see absPath above).
+export function fileToolCommand(name, args = {}, { base = '/workspace' } = {}) {
   switch (name) {
     case 'write_file': {
-      const p = absPath(args.path)
-      const base = p.split('/').filter(Boolean).pop() || ''
+      const p = absPath(args.path, base)
+      const fileName = p.split('/').filter(Boolean).pop() || ''
       // Real credentials (Supabase URLs/keys, DB connection strings) live in
       // this chat and legitimately belong in project env files — but an env
       // file with no .gitignore covering it is one `git add -A` away from a
       // committed secret. Guarantee coverage the moment the file is written,
       // regardless of what .gitignore (if any) the model wrote itself.
-      const isSecretFile = /^\.env(\..+)?$/i.test(base) || /\.(pem|key|p12|pfx)$/i.test(base) || /^id_(rsa|ed25519|ecdsa)$/.test(base)
+      const isSecretFile = /^\.env(\..+)?$/i.test(fileName) || /\.(pem|key|p12|pfx)$/i.test(fileName) || /^id_(rsa|ed25519|ecdsa)$/.test(fileName)
       const guard = isSecretFile
         ? ` ; D="$(dirname ${q(p)})"; GI="$D/.gitignore"; grep -qxF '.env*' "$GI" 2>/dev/null || printf '%s\n' '.env*' >> "$GI"`
         : ''
       return `mkdir -p "$(dirname ${q(p)})" && printf '%s' ${q(b64(args.content ?? ''))} | base64 -d > ${q(p)} && echo "wrote ${p} ($(wc -c < ${q(p)}) bytes)"${guard}`
     }
     case 'read_file': {
-      const p = absPath(args.path)
+      const p = absPath(args.path, base)
       const start = Math.max(1, Number(args.start) || 1)
       const limit = Math.min(2000, Math.max(1, Number(args.limit) || 400))
       return `test -f ${q(p)} || { echo "No such file: ${p}" >&2; exit 1; }; total=$(wc -l < ${q(p)}); sed -n '${start},${start + limit - 1}p' ${q(p)} | cut -c1-500 | nl -ba -v ${start}; if [ "$total" -gt ${start + limit - 1} ]; then echo "... (${'$'}total lines total; showing ${start}-${start + limit - 1})"; fi`
     }
     case 'edit_file': {
-      const p = absPath(args.path)
+      const p = absPath(args.path, base)
       const py = [
         'import sys, base64',
         'p = sys.argv[1]',
@@ -151,12 +162,12 @@ export function fileToolCommand(name, args = {}) {
       return `PY=""; for c in python3 python; do "$c" -c pass >/dev/null 2>&1 && PY="$c" && break; done; [ -n "$PY" ] || { echo "python not available" >&2; exit 1; }; printf '%s' ${q(b64(py))} | base64 -d | "$PY" - ${q(p)}`
     }
     case 'list_files': {
-      const p = absPath(args.path)
+      const p = absPath(args.path, base)
       const depth = Math.min(8, Math.max(1, Number(args.depth) || 3))
       return `cd ${q(p)} 2>/dev/null || { echo "No such folder: ${p}" >&2; exit 1; }; find . -maxdepth ${depth} \\( -name node_modules -o -name .git -o -name .next -o -name dist \\) -prune -o -print | sed 's|^\\./||' | sort | head -400`
     }
     case 'search_files': {
-      const p = absPath(args.path)
+      const p = absPath(args.path, base)
       return `grep -rn --include='*' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.next -E ${q(args.pattern ?? '')} ${q(p)} 2>/dev/null | cut -c1-300 | head -200; true`
     }
     default:

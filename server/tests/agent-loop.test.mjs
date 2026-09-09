@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeToolArgs, harvestGithubToken } from '../lib/agentLoop.js'
+import { normalizeToolArgs, harvestGithubToken, executeAgentTool, _lastProjectPathForTest } from '../lib/agentLoop.js'
 
 test('a GitHub token pasted in the chat is picked up (latest wins), nothing else matches', () => {
   const chat = 'here is the token ghp_' + 'A'.repeat(36) + ' and it for free\nlater: github_pat_' + 'B'.repeat(40) + ' use this one'
@@ -31,6 +31,27 @@ test('a wrapped command is unwrapped; real code and commands are untouched', () 
   assert.equal(plain.code, 'x = {"a": 1}\nprint(x)')
   const cmd = normalizeToolArgs('execute_command', { command: 'echo {"not":"json"} | cat' })
   assert.equal(cmd.command, 'echo {"not":"json"} | cat')
+})
+
+test('a projectPath set on one call is remembered for later calls in the same chat, until explicitly cleared', async () => {
+  const session = 'sticky-path-test-' + Date.now()
+  const call = (args) => executeAgentTool({ name: 'not_a_real_tool', args, sessionId: session }).catch(() => {})
+  // Nothing set yet.
+  assert.equal(_lastProjectPathForTest.has(session), false)
+
+  await call({ projectPath: '/home/user/myproject' })
+  assert.equal(_lastProjectPathForTest.get(session), '/home/user/myproject')
+
+  // Omitting the field on a later call must not forget it.
+  await call({})
+  assert.equal(_lastProjectPathForTest.get(session), '/home/user/myproject')
+
+  // A different session is unaffected by this one's memory.
+  assert.equal(_lastProjectPathForTest.has(session + '-other'), false)
+
+  // Explicitly clearing it (empty string) unmounts it.
+  await call({ projectPath: '' })
+  assert.equal(_lastProjectPathForTest.has(session), false)
 })
 
 test('turns that ask permission or announce an unexecuted step count as unfinished', () => {
