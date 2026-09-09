@@ -3,13 +3,19 @@ import { supabase } from './supabase'
 
 // Shared axios instance for talking to the Express backend.
 // In dev, baseURL is empty and Vite proxies /api -> localhost:4000.
-// In prod, set VITE_API_BASE_URL to the deployed API origin.
+// Production uses client/vercel.json to proxy /api to Hostinger. Keep requests
+// on this origin: a legacy VITE_API_BASE_URL can point at a different auth server.
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '',
+  baseURL: '',
 })
 
 let refreshPromise = null
 let redirectingToLogin = false
+
+function isInvalidRefresh(error) {
+  return ['refresh_token_not_found', 'refresh_token_already_used', 'session_not_found'].includes(error?.code) ||
+    error?.name === 'AuthSessionMissingError'
+}
 
 async function refreshAccessToken() {
   if (!refreshPromise) {
@@ -50,27 +56,26 @@ async function clearInvalidSession() {
 // Attach the current Supabase access token to every request so the server can
 // authenticate the user (see server/lib/auth.js).
 api.interceptors.request.use(async (config) => {
-  try {
-    let {
-      data: { session },
-    } = await supabase.auth.getSession()
+  // Preserve the freshly refreshed token on the single retry.
+  if (config._retry) return config
+  const { data: { session }, error } = await supabase.auth.getSession()
+  if (error) throw error
 
-    // If session is expired or expiring within 60s, refresh it proactively
-    if (session?.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
-      try {
-        const accessToken = await refreshAccessToken()
-        config.headers.Authorization = `Bearer ${accessToken}`
-        return config
-      } catch {
-        await clearInvalidSession()
-        return config
-      }
+  // If session is expired or expiring within 60s, refresh it proactively.
+  if (session?.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
+    try {
+      const accessToken = await refreshAccessToken()
+      config.headers.Authorization = `Bearer ${accessToken}`
+      return config
+    } catch (error) {
+      if (isInvalidRefresh(error)) await clearInvalidSession()
+      throw error
     }
+  }
 
-    if (session?.access_token) {
-      config.headers.Authorization = `Bearer ${session.access_token}`
-    }
-  } catch {}
+  if (session?.access_token) {
+    config.headers.Authorization = `Bearer ${session.access_token}`
+  }
   return config
 })
 
@@ -91,20 +96,13 @@ api.interceptors.response.use(
         const accessToken = await refreshAccessToken()
         original.headers.Authorization = `Bearer ${accessToken}`
         return api(original)
-      } catch {
-        await clearInvalidSession()
+      } catch (error) {
+        if (isInvalidRefresh(error)) await clearInvalidSession()
       }
     }
 
-    // A refreshed token that is also rejected cannot be recovered without a
-    // new login. Clear it instead of leaving the app in a permanent 401 loop.
-    if (
-      err.response?.status === 401 &&
-      original?._retry &&
-      /(session|expired|token|authorization)/i.test(authMessage)
-    ) {
-      await clearInvalidSession()
-    }
+    // An API rejection alone does not prove the Supabase session is revoked.
+    // Preserve the login on backend failures; only Auth can invalidate it.
 
     return Promise.reject(err)
   }
