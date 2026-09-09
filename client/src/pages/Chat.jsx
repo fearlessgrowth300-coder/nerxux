@@ -433,7 +433,10 @@ export default function Chat() {
             {historyOpen && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setHistoryOpen(false)} />
-                <div className="absolute right-0 z-40 mt-2 max-h-96 w-80 overflow-y-auto rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
+                {/* w-80 anchored right overflows the left edge of a phone
+                    screen — the clipped-off part is why titles looked cut in
+                    half and short ones looked blank. Cap to the viewport. */}
+                <div className="absolute right-0 z-40 mt-2 max-h-96 w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
                   <p className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">
                     Saved conversations
                   </p>
@@ -445,10 +448,14 @@ export default function Chat() {
                       onClick={() => openConversation(c.id)}
                       className={['group flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 transition hover:bg-white/5',
                         c.id === conversationId ? 'bg-nexus-accent/10' : ''].join(' ')}>
-                      <span className="flex-1 truncate text-sm text-gray-200">{c.title || 'Untitled'}</span>
-                      <span className="text-[10px] text-gray-600">{new Date(c.updated_at).toLocaleDateString()}</span>
+                      {/* min-w-0 so a long title actually truncates instead of
+                          forcing the row wider than the panel. */}
+                      <span className="min-w-0 flex-1 truncate text-sm text-gray-200">{c.title || 'Untitled'}</span>
+                      <span className="shrink-0 text-[10px] text-gray-600">{new Date(c.updated_at).toLocaleDateString()}</span>
+                      {/* Was opacity-0 until hover — on a touch screen there is
+                          no hover, so delete was unreachable on phones. */}
                       <button onClick={(e) => removeConversation(c.id, e)}
-                        className="text-gray-600 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                        className="shrink-0 text-gray-600 transition hover:text-red-400 md:opacity-0 md:group-hover:opacity-100"
                         title="Delete conversation">
                         <CloseIcon className="h-3.5 w-3.5" />
                       </button>
