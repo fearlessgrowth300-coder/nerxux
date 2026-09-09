@@ -12,10 +12,16 @@ import { OllamaTunnel, podSshEndpoint, TURBO_URL } from './ollamaTunnel.js'
 
 // Compute modes:
 // 1. "always_on": Hostinger KVM 8 VPS (2-5 tok/s, 24/7 flat $26/mo)
-// 2. "turbo": Runpod RTX 3090 GPU (30-65 tok/s, on-demand $0.50/hr)
+// 2. "turbo": RunPod GPU pod (30-65+ tok/s, billed per hour while running)
 
 const getApiKey = () => process.env.RUNPOD_API_KEY || ''
-const getPodId = () => process.env.RUNPOD_POD_ID || 'rigdm6buq51pnu'
+// The pod id lives in .env only — pods get replaced (GPU reclaimed, migration)
+// and a stale hardcoded fallback silently points everything at a dead pod.
+const getPodId = () => {
+  const id = (process.env.RUNPOD_POD_ID || '').trim()
+  if (!id) throw new Error('RUNPOD_POD_ID is not set on the server — add the pod id to server/.env to use Turbo.')
+  return id
+}
 let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://2.25.126.125:11434'
 const SSH_KEY_PATH = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_ed25519')
 const STATE_FILE = path.join(__dirname, '../.compute-state.json')
@@ -94,15 +100,15 @@ export function getComputeStatus() {
   return {
     mode: currentMode,
     hostingerUrl: HOSTINGER_OLLAMA_URL,
-    runpodPodId: getPodId(),
+    runpodPodId: process.env.RUNPOD_POD_ID || null,
     runpodActive: tunnel.ready,
     activeUrl: currentMode === 'turbo' ? 'http://127.0.0.1:11435' : HOSTINGER_OLLAMA_URL,
     details:
       currentMode === 'turbo'
         ? {
-            label: 'Turbo: RunPod model (RTX 3090)',
-            speed: '30–65 tok/s',
-            cost: '$0.50/hr',
+            label: 'Turbo: RunPod model (GPU)',
+            speed: '30–65+ tok/s',
+            cost: 'per hour while running',
             status: tunnel.ready ? 'ready' : 'disconnected',
           }
         : {

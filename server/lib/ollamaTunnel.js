@@ -7,12 +7,22 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 export const TURBO_URL = 'http://127.0.0.1:11435'
 export const TURBO_MODEL = 'orcarouter/Qwen3.8-27B-Uncensored:latest'
 
-// Both the executable and models live on the pod's persistent /workspace disk.
+// Preferred layout: executable + models on the pod's persistent /workspace
+// volume, so they survive a stop/start or a migration to another host (the
+// container disk doesn't). Falls back to a system-wide `ollama` with its
+// default model dir when the persistent install isn't there yet.
+// OLLAMA_KEEP_ALIVE=-1: never unload the model between requests — the whole
+// point of the GPU is answering instantly, not re-reading 17GB per question.
 export const START_OLLAMA = [
   'set -eu',
   'if curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then exit 0; fi',
-  'if [ ! -x /workspace/nerxux-ollama/bin/ollama ]; then echo "Persistent Ollama installation is missing on RunPod" >&2; exit 42; fi',
-  'nohup env OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS=/workspace/nerxux-ollama/models /workspace/nerxux-ollama/bin/ollama serve >/workspace/nerxux-ollama/ollama.log 2>&1 </dev/null &',
+  'if [ -x /workspace/nerxux-ollama/bin/ollama ]; then',
+  '  nohup env OLLAMA_HOST=127.0.0.1:11434 OLLAMA_KEEP_ALIVE=-1 OLLAMA_MODELS=/workspace/nerxux-ollama/models /workspace/nerxux-ollama/bin/ollama serve >/workspace/nerxux-ollama/ollama.log 2>&1 </dev/null &',
+  'elif command -v ollama >/dev/null 2>&1; then',
+  '  nohup env OLLAMA_HOST=127.0.0.1:11434 OLLAMA_KEEP_ALIVE=-1 ollama serve >/tmp/ollama.log 2>&1 </dev/null &',
+  'else',
+  '  echo "Ollama is not installed on this RunPod pod (neither /workspace/nerxux-ollama nor a system ollama)" >&2; exit 42',
+  'fi',
 ].join('\n')
 
 export function podSshEndpoint(pod) {

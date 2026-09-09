@@ -85,7 +85,7 @@ export default function ComputeBar() {
               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm shadow-amber-500/10 ring-1 ring-amber-500/30'
               : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-gray-200 border border-transparent',
           ].join(' ')}
-          title="RunPod GPU: 30–65 tok/s, $0.50/hr on-demand"
+          title="RunPod GPU: 30–65+ tok/s, billed per hour while running"
         >
           <span>🚀</span>
           <span>Turbo</span>
