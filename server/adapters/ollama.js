@@ -39,13 +39,17 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const targetUrl = resolveTargetUrl(model)
   const agentTools = webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS
   const isRunpod = targetUrl.includes('11435')
-  // This box is CPU-only at ~5 tok/s (vs. 30-65 tok/s on the RunPod GPU). This
-  // model in particular tends to produce very long hidden "thinking" before
-  // its actual answer — left uncapped it can run 500+ tokens (~100s+) on CPU,
-  // well past any reverse-proxy timeout, and pile up if the client gives up
-  // and retries. num_predict bounds the worst case; Turbo gets a much higher
-  // ceiling since it's fast enough to actually use it.
-  const numPredict = isRunpod ? 900 : 350
+  // Measured: Vercel's proxy to this backend hard-kills external requests at
+  // ~120s (ROUTER_EXTERNAL_TARGET_ERROR, confirmed by direct testing — not a
+  // guess). Leave real margin under that for network/prompt-eval overhead.
+  const WALL_CLOCK_BUDGET_MS = 100000
+  // This box is CPU-only at ~5 tok/s (vs. 30-65 tok/s on the RunPod GPU), and
+  // this model tends to produce long hidden "thinking" before its actual
+  // answer. num_predict bounds a single call so one runaway generation can't
+  // eat the whole budget; Turbo gets a much higher ceiling since it's fast
+  // enough to actually use it. Hitting the cap doesn't mean losing the rest
+  // of the answer — see the continuation loop below.
+  const numPredict = isRunpod ? 1800 : 450
   const system = composeSystem(systemPrompt, skills)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
@@ -63,6 +67,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const toolSteps = []
   const MAX_STEPS = 6
   let finalContent = ''
+  const requestStart = Date.now()
 
   for (let step = 0; step < MAX_STEPS; step++) {
     let resp
@@ -100,7 +105,6 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     const data = await resp.json()
     const msg = data.message || {}
     const rawContent = msg.content || ''
-    finalContent = rawContent
 
     // 1. Check for native tool calls from Ollama
     let detectedCalls = []
@@ -120,12 +124,27 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       detectedCalls = extractToolCallsFromText(rawContent)
     }
 
-    // If no tool calls, the model is done!
     if (detectedCalls.length === 0) {
-      break
+      finalContent += rawContent
+      // num_predict cut the answer off mid-thought rather than the model
+      // choosing to stop. Ask it to keep going instead of showing a
+      // truncated reply — as long as there's still wall-clock budget left
+      // before Vercel's proxy would kill the request anyway.
+      const truncated = data.done_reason === 'length'
+      const elapsed = Date.now() - requestStart
+      const hasBudget = elapsed < WALL_CLOCK_BUDGET_MS - 15000
+      if (truncated && (!hasBudget || step === MAX_STEPS - 1)) {
+        finalContent += '\n\n*(cut short — this answer was taking too long; ask "continue" for the rest)*'
+        break
+      }
+      if (!truncated) break
+      messages.push({ role: 'assistant', content: rawContent })
+      messages.push({ role: 'user', content: 'Continue your previous answer exactly where you left off. Do not repeat or restate anything already said.' })
+      continue
     }
 
     // Execute the tool calls
+    finalContent = rawContent
     messages.push({ role: 'assistant', content: rawContent })
 
     for (const call of detectedCalls) {
