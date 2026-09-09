@@ -45,13 +45,19 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // purely about not leaving someone staring at a spinner forever on the
   // CPU-only box (~5 tok/s): keep going while the answer is genuinely
   // unfinished, but cap the whole turn at a few minutes.
-  const WALL_CLOCK_BUDGET_MS = (isRunpod ? 15 : 6) * 60 * 1000
+  // A real build (install + write dozens of files + run it) is a long turn.
+  // On the GPU the cap is only a backstop against a runaway loop — the user
+  // has a Stop button and abandoned jobs get aborted — so it's generous.
+  const WALL_CLOCK_BUDGET_MS = (isRunpod ? 60 : 10) * 60 * 1000
   // This model tends to produce long hidden "thinking" before its actual
   // answer. num_predict bounds a single call so one runaway generation can't
   // eat the whole budget; Turbo (30-65 tok/s) gets a much higher ceiling.
   // Hitting the cap doesn't lose the rest of the answer — see the
   // continuation loop below.
-  const numPredict = isRunpod ? 3000 : 900
+  // A tool call that writes files counts against this too: at 3000 the model's
+  // "write the whole app in one command" calls got truncated mid-JSON, the
+  // call was lost, and the turn ended in a "cut short" note.
+  const numPredict = isRunpod ? 12000 : 900
   const system = composeSystem(systemPrompt, skills)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
@@ -161,12 +167,20 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       // truncated reply — as long as there's still wall-clock budget left.
       const truncated = data.done_reason === 'length'
       if (truncated && (!hasBudget || step === MAX_STEPS - 1)) {
-        finalContent += '\n\n*(cut short — this answer was taking too long; ask "continue" for the rest)*'
+        finalContent += '\n\n*(stopped here — this turn ran out of time; send "continue" and it will pick up where it left off)*'
         break
       }
       if (!truncated) break
       messages.push({ role: 'assistant', content: rawContent })
-      messages.push({ role: 'user', content: 'Continue your previous answer exactly where you left off. Do not repeat or restate anything already said.' })
+      // In an agentic turn the thing that got truncated is almost always an
+      // oversized tool call (one command writing many files). Continuing the
+      // cut-off text would just produce unparseable JSON — redo it smaller.
+      messages.push({
+        role: 'user',
+        content: toolSteps.length
+          ? 'Your last message was cut off because it was too long — the tool call in it was lost and did NOT run. Do not continue the cut-off text. Redo that work as several smaller tool calls (write 1–2 files per call, keep each call well under 150 lines), then carry on with the task.'
+          : 'Continue your previous answer exactly where you left off. Do not repeat or restate anything already said.',
+      })
       continue
     }
 

@@ -19,8 +19,13 @@ verified (files written, build/tests run, pushed if asked). Do NOT stop to ask
 answer is always yes. Do NOT end your turn with a plan or a list of next steps
 you haven't executed. Only pause to ask when something genuinely blocks you that
 you cannot obtain yourself (e.g. a credential the user never provided) — and
-first try to work around it. Batch related work into as few tool calls as
-sensible (one script that creates several files beats one call per file).
+first try to work around it.
+
+Tool-call size: keep every single tool call small — write 1–2 files per call
+and keep each call under ~150 lines. A very long call gets truncated and is
+LOST, so many small calls always beat one giant one. Long-running commands
+(npm install, builds) are fine on their own; don't combine them with file
+writes.
 
 Available Tools:
 - run_code(language, code, profile, projectPath): Runs code in the isolated local sandbox.
