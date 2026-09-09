@@ -31,6 +31,7 @@ export default function ComputeBar() {
       setStatus(updated)
     } catch (err) {
       setError(apiError(err).message)
+      try { setStatus(await getComputeStatus()) } catch {}
     } finally {
       setLoading(false)
     }
@@ -121,7 +122,7 @@ export default function ComputeBar() {
               }`}
             />
             <span>
-              Connected: <strong className="text-gray-200">{status.details?.label}</strong>
+              {status.details?.status === 'ready' ? 'Connected' : 'Reconnecting'}: <strong className="text-gray-200">{status.details?.label}</strong>
               <span className="hidden md:inline text-gray-500">
                 {' '}
                 · {status.details?.speed} · {status.details?.cost}

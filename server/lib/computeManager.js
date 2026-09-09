@@ -1,9 +1,6 @@
 import dotenv from 'dotenv'
 import fs from 'node:fs'
 import https from 'node:https'
-import http from 'node:http'
-import { spawn, exec } from 'node:child_process'
-import { promisify } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.join(__dirname, '../.env') })
 
-const execAsync = promisify(exec)
+import { OllamaTunnel, podSshEndpoint, TURBO_URL } from './ollamaTunnel.js'
 
 // Compute modes:
 // 1. "always_on": Hostinger KVM 8 VPS (2-5 tok/s, 24/7 flat $26/mo)
@@ -40,8 +37,14 @@ function setCurrentMode(mode) {
 }
 
 let currentMode = readPersistedMode() // 'always_on' | 'turbo'
-let tunnelProcess = null
-let currentPodInfo = null
+const tunnel = new OllamaTunnel(SSH_KEY_PATH)
+let switchPromise = null
+
+function exclusiveSwitch(operation) {
+  if (switchPromise) throw new Error('A compute switch is already in progress. Please wait.')
+  switchPromise = Promise.resolve().then(operation).finally(() => { switchPromise = null })
+  return switchPromise
+}
 
 // Robust RunPod REST v2 API caller using node:https to avoid Node 24 undici TLS issues
 export function runpodRequest(apiPath, { method = 'GET', body = null } = {}) {
@@ -80,6 +83,7 @@ export function runpodRequest(apiPath, { method = 'GET', body = null } = {}) {
         })
       }
     )
+    req.setTimeout(20000, () => req.destroy(new Error('RunPod API timed out')))
     req.on('error', reject)
     if (payload) req.write(payload)
     req.end()
@@ -91,7 +95,7 @@ export function getComputeStatus() {
     mode: currentMode,
     hostingerUrl: HOSTINGER_OLLAMA_URL,
     runpodPodId: getPodId(),
-    runpodActive: Boolean(tunnelProcess),
+    runpodActive: tunnel.ready,
     activeUrl: currentMode === 'turbo' ? 'http://127.0.0.1:11435' : HOSTINGER_OLLAMA_URL,
     details:
       currentMode === 'turbo'
@@ -99,7 +103,7 @@ export function getComputeStatus() {
             label: 'Turbo: RunPod model (RTX 3090)',
             speed: '30–65 tok/s',
             cost: '$0.50/hr',
-            status: tunnelProcess ? 'ready' : 'connecting',
+            status: tunnel.ready ? 'ready' : 'disconnected',
           }
         : {
             label: 'Always On: Hostinger model (KVM 8)',
@@ -113,7 +117,8 @@ export function getComputeStatus() {
 // Include the provider's real pod state so the UI can distinguish the selected
 // route from a RunPod instance that is still running and accruing charges.
 export async function getLiveComputeStatus() {
-  const status = getComputeStatus()
+  await tunnel.health()
+  const status = { ...getComputeStatus(), switching: Boolean(switchPromise) }
   try {
     const pod = await fetchPodDetails()
     return {
@@ -141,7 +146,6 @@ export function setHostingerIp(ipOrUrl) {
 // Fetch live pod status from Runpod REST v2 API
 export async function fetchPodDetails(podId = getPodId()) {
   const data = await runpodRequest(`/pods/${podId}`)
-  currentPodInfo = data
   return data
 }
 
@@ -153,144 +157,57 @@ export async function startRunpodPod(podId = getPodId()) {
   })
 }
 
-// Stop Runpod Pod (halts hourly billing)
-export async function stopRunpodPod(podId = getPodId()) {
-  killTunnel()
+// Stop the pod only after the provider confirms the action.
+async function stopPod(podId = getPodId()) {
   const result = await runpodRequest(`/pods/${podId}/action`, {
-    method: 'POST',
-    body: { action: 'stop' },
+    method: 'POST', body: { action: 'stop' },
   })
+  await tunnel.stop()
   setCurrentMode('always_on')
   return result
 }
 
-// Helper: check if http://127.0.0.1:11435/api/tags responds
-function checkLocalTunnelPort() {
-  return new Promise((resolve) => {
-    const req = http.get('http://127.0.0.1:11435/api/tags', { timeout: 1500 }, (res) => {
-      resolve(res.statusCode < 500)
-    })
-    req.on('error', () => resolve(false))
-    req.on('timeout', () => {
-      req.destroy()
-      resolve(false)
-    })
-  })
+export function stopRunpodPod(podId = getPodId()) {
+  return exclusiveSwitch(() => stopPod(podId))
 }
 
-// Start SSH tunnel to forward remote Ollama :11434 to local :11435
-export async function startTunnel(host = '213.192.2.75', port = 40072) {
-  killTunnel()
-
-  // Ensure remote Ollama is running in background on the pod
-  try {
-    const startOllamaCmd = `ssh -p ${port} -o StrictHostKeyChecking=no -o ConnectTimeout=8 -i "${SSH_KEY_PATH}" root@${host} "pgrep ollama >/dev/null || (nohup ollama serve >/tmp/ollama.log 2>&1 &)"`
-    await execAsync(startOllamaCmd).catch(() => {})
-  } catch {}
-
-  const args = [
-    '-p',
-    String(port),
-    '-N',
-    '-L',
-    '11435:127.0.0.1:11434',
-    '-o',
-    'StrictHostKeyChecking=no',
-    '-o',
-    'ServerAliveInterval=15',
-    '-o',
-    'ServerAliveCountMax=3',
-    '-i',
-    SSH_KEY_PATH,
-    `root@${host}`,
-  ]
-
-  tunnelProcess = spawn('ssh', args, { windowsHide: true })
-
-  tunnelProcess.on('close', () => {
-    tunnelProcess = null
-  })
-
-  tunnelProcess.on('error', () => {
-    tunnelProcess = null
-  })
-
-  // Poll local tunnel port until responsive (up to 30 seconds)
-  const start = Date.now()
-  while (Date.now() - start < 30000) {
-    const ok = await checkLocalTunnelPort()
-    if (ok) return true
-    await new Promise((r) => setTimeout(r, 1500))
-  }
-  return false
+export async function startTunnel(host, port) {
+  return tunnel.start(host, port)
 }
 
-export function killTunnel() {
-  if (tunnelProcess) {
-    try {
-      tunnelProcess.kill('SIGKILL')
-    } catch {}
-    tunnelProcess = null
-  }
+export async function killTunnel() {
+  return tunnel.stop()
 }
 
-// High-level switch to Turbo
-export async function switchToTurbo({ podId = getPodId() } = {}) {
-  // 1. Fetch pod state
-  let pod = await fetchPodDetails(podId)
-
-  // 2. If exited/stopped, start it
-  if (pod.status !== 'RUNNING') {
-    await startRunpodPod(podId)
-    // Wait for pod to become RUNNING with public SSH ports
-    const waitStart = Date.now()
-    while (Date.now() - waitStart < 120000) {
-      await new Promise((r) => setTimeout(r, 4000))
+export function switchToTurbo({ podId = getPodId() } = {}) {
+  return exclusiveSwitch(async () => {
+    let pod = await fetchPodDetails(podId)
+    if (pod.status !== 'RUNNING') await startRunpodPod(podId)
+    const start = Date.now()
+    let endpoint = podSshEndpoint(pod)
+    while (!endpoint && Date.now() - start < 120000) {
+      await new Promise(resolve => setTimeout(resolve, 3000))
       pod = await fetchPodDetails(podId)
-      if (pod.status === 'RUNNING' && pod.runtime?.ports?.some((p) => p.private === 22)) {
-        break
-      }
+      endpoint = podSshEndpoint(pod)
     }
-  }
-
-  // Extract direct SSH host and public port
-  const sshPortEntry = pod.runtime?.ports?.find((p) => p.private === 22)
-  const sshHost = sshPortEntry?.ip || pod.ssh?.direct?.host || '213.192.2.75'
-  const sshPort = sshPortEntry?.public || pod.ssh?.direct?.port || 40072
-
-  // 3. Establish tunnel to port 11435
-  const tunnelOk = await startTunnel(sshHost, sshPort)
-  if (!tunnelOk) {
-    throw new Error('RunPod started, but its Ollama SSH tunnel did not become ready')
-  }
-  setCurrentMode('turbo')
-
-  return {
-    mode: 'turbo',
-    podId,
-    tunnelOk,
-    url: 'http://127.0.0.1:11435',
-    message: tunnelOk
-      ? 'Connected to Runpod GPU (fast, 30–65 tok/s)'
-      : 'Pod is running, establishing Ollama connection...',
-  }
+    if (!endpoint) throw new Error('RunPod has not published a ready SSH endpoint yet. Please retry shortly.')
+    await tunnel.start(endpoint.host, endpoint.port)
+    setCurrentMode('turbo')
+    return { mode: 'turbo', podId, tunnelOk: true, url: TURBO_URL,
+      message: 'Connected to RunPod GPU' }
+  })
 }
 
-// High-level switch to Always On
-export async function switchToAlwaysOn({ stopPod = false } = {}) {
-  if (stopPod) {
-    try {
-      await stopRunpodPod()
-    } catch {}
-  } else {
-    killTunnel()
-  }
-  setCurrentMode('always_on')
-  return {
-    mode: 'always_on',
-    url: HOSTINGER_OLLAMA_URL,
-    message: 'Connected to KVM 8 (2–5 tok/s, 24/7 flat)',
-  }
+export function switchToAlwaysOn({ stopPod: shouldStopPod = false } = {}) {
+  return exclusiveSwitch(async () => {
+    // Route to Hostinger even if the provider refuses to stop the GPU, but
+    // report the stop error so the UI never claims its billing has stopped.
+    await tunnel.stop()
+    setCurrentMode('always_on')
+    if (shouldStopPod) await stopPod()
+    return { mode: 'always_on', url: HOSTINGER_OLLAMA_URL,
+      message: 'Connected to Hostinger model' }
+  })
 }
 
 // PM2 restarts must not silently change which provider the user selected.
