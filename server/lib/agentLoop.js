@@ -136,6 +136,7 @@ export function harvestGithubToken(text = '') {
 export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '' }) {
   const args = normalizeToolArgs(name, rawArgs)
   const cleanSession = sessionId || 'default'
+  const targetProj = args.projectPath || projectPath || null
 
   if (name === 'web_search') {
     // Reshaped to match the sandbox result shape ({stdout,...}) that the
@@ -154,7 +155,6 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
     })
     return { ...r, target: name }
   }
-  const targetProj = args.projectPath || projectPath || null
 
   if (name === 'run_code') {
     return executeInSandbox({

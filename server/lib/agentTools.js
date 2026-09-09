@@ -137,7 +137,8 @@ export function fileToolCommand(name, args = {}) {
         'open(p, "w", encoding="utf-8").write(src.replace(old, new, 1))',
         'print(f"edited {p}")',
       ].join('\n')
-      return `PY="$(command -v python3 || command -v python)" && printf '%s' ${q(b64(py))} | base64 -d | "$PY" - ${q(p)}`
+      // Pick a Python that actually runs (Windows ships a `python3` stub that only prints an install hint).
+      return `PY=""; for c in python3 python; do "$c" -c pass >/dev/null 2>&1 && PY="$c" && break; done; [ -n "$PY" ] || { echo "python not available" >&2; exit 1; }; printf '%s' ${q(b64(py))} | base64 -d | "$PY" - ${q(p)}`
     }
     case 'list_files': {
       const p = absPath(args.path)
