@@ -16,7 +16,7 @@ export function detectProvider(apiKey) {
   if (!k) return null
   if (k.startsWith('sk-ant-')) return 'claude'       // Anthropic / Claude
   if (k.startsWith('gsk_')) return 'groq'            // Groq
-  if (k.startsWith('AIza')) return 'gemini'          // Google Gemini
+  if (k.startsWith('AIza') || k.startsWith('AQ')) return 'gemini'  // Google Gemini — AIza is the classic prefix, AQ a newer one
   if (k.startsWith('sk-')) return 'openai'           // OpenAI (incl. sk-proj-)
   if (k.startsWith('sk_')) return 'elevenlabs'       // ElevenLabs (underscore)
   if (/^gh[pousr]_/.test(k) || k.startsWith('github_pat_')) return 'github' // GitHub PAT (classic or fine-grained)

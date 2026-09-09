@@ -412,7 +412,7 @@ function ApiKeyVault() {
             type="password"
             value={keyInput}
             onChange={setKeyInput}
-            placeholder="sk-ant-… · sk-… · AIza… · gsk_… · ghp_…"
+            placeholder="sk-ant-… · sk-… · AIza…/AQ… · gsk_… · ghp_…"
           />
           {needsProvider && (
             <label className="block">
