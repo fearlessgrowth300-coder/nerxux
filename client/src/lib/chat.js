@@ -15,6 +15,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 // hosting proxy in front of the API drops any single request after ~120s,
 // and slow models (the CPU-hosted local one especially) routinely need
 // longer than that for a real answer. Polling keeps every request short.
+// `signal`: abort to stop generation (the Stop button) — the server job is
+// cancelled, not just the polling. `onProgress(events)`: called with the
+// agent's live activity (tool actions, interim text) on every poll.
 export async function sendChat({
   history,
   modelA,
@@ -28,7 +31,12 @@ export async function sendChat({
   connectorIds,
   sessionId,
   projectPath,
+  signal,
+  onProgress,
 }) {
+  let jobId = null
+  const stop = () => { if (jobId) api.post(`/api/chat/jobs/${jobId}/cancel`).catch(() => {}) }
+  signal?.addEventListener('abort', stop, { once: true })
   try {
     const { data } = await api.post('/api/chat', {
       history,
@@ -47,25 +55,31 @@ export async function sendChat({
     })
     // An older backend answers inline instead of handing back a job.
     if (!data.jobId) return { messages: data.messages, routing: data.routing || null }
+    jobId = data.jobId
+    if (signal?.aborted) { stop(); throw new Error('Stopped.') }
 
     let failures = 0
     for (;;) {
       await sleep(POLL_MS)
+      if (signal?.aborted) throw new Error('Stopped.')
       let job
       try {
-        job = (await api.get(`/api/chat/jobs/${data.jobId}`)).data
+        job = (await api.get(`/api/chat/jobs/${jobId}`)).data
         failures = 0
       } catch (err) {
         // 404 = the server really doesn't have it (restart/expiry) — that's final.
         if (err?.response?.status === 404 || ++failures >= MAX_POLL_FAILURES) throw err
         continue
       }
-      if (job.status === 'running') continue
+      if (job.status === 'running') { if (job.events?.length) onProgress?.(job.events); continue }
+      if (job.status === 'cancelled') throw new Error('Stopped.')
       if (job.status !== 'done') throw new Error(job.error || 'Chat request failed')
       return { messages: job.result.messages, routing: job.result.routing || null }
     }
   } catch (err) {
     throw apiError(err, 'Chat request failed')
+  } finally {
+    signal?.removeEventListener('abort', stop)
   }
 }
 

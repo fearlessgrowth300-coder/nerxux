@@ -22,6 +22,9 @@ export function createJob(userId, controller, now = Date.now()) {
     status: 'running',
     result: null,
     error: null,
+    // Live progress (tool actions, interim text) pushed by the adapter while
+    // the job runs, so the client can show what's happening instead of dots.
+    events: [],
     createdAt: now,
     lastSeen: now,
     finishedAt: null,
@@ -51,6 +54,16 @@ export function touchJob(id, userId, now = Date.now()) {
   if (!job || job.userId !== userId) return null
   job.lastSeen = now
   return job
+}
+
+// User pressed Stop: abort generation now. Returns false if there's no such
+// running job for this user.
+export function cancelJob(id, userId) {
+  const job = touchJob(id, userId)
+  if (!job || job.status !== 'running') return false
+  job.controller.abort()
+  failJob(job, Object.assign(new Error('stopped'), { name: 'AbortError' }))
+  return true
 }
 
 // Abort abandoned jobs and drop expired results. Called on a timer; exported

@@ -73,6 +73,12 @@ export default function Chat() {
   const scrollRef = useRef(null)
   const fileInputRef = useRef(null)
   const taRef = useRef(null)
+  const abortRef = useRef(null) // aborts the in-flight turn (Stop button)
+  const [liveEvents, setLiveEvents] = useState([]) // what the agent is doing right now
+
+  function stopGeneration() {
+    abortRef.current?.abort()
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -192,6 +198,9 @@ export default function Chat() {
       .join('\n\n') || null
     setAttachments([])
 
+    const controller = new AbortController()
+    abortRef.current = controller
+    setLiveEvents([])
     try {
       const systemPrompt = await buildSystemPrompt()
       const { messages: replies, routing } = await sendChat({
@@ -201,6 +210,8 @@ export default function Chat() {
         webSearch,
         connectorIds: [...activeConnectors],
         sessionId: convId,
+        signal: controller.signal,
+        onProgress: setLiveEvents,
       })
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
@@ -212,14 +223,29 @@ export default function Chat() {
         catch { setError('Could not sync the reply. A local copy is saved on this device.') }
       }
     } catch (e) {
-      setError(e.message)
-      const errMsg = { id: uuid(), role: 'assistant', content: `⚠️ ${e.message}`, model: modelA, error: true }
-      setMessages((prev) => [...prev, errMsg])
+      if (controller.signal.aborted) {
+        // The user pressed Stop — keep whatever the agent got done as a note, no error styling.
+        const done = liveEventsRef.current.filter((ev) => ev.type === 'tool')
+        setMessages((prev) => [...prev, {
+          id: uuid(), role: 'assistant', model: modelA,
+          content: `⏹ Stopped.${done.length ? ` ${done.length} tool action${done.length === 1 ? '' : 's'} had already run.` : ''}`,
+          ...(done.length ? { toolSteps: done } : {}),
+        }])
+      } else {
+        setError(e.message)
+        const errMsg = { id: uuid(), role: 'assistant', content: `⚠️ ${e.message}`, model: modelA, error: true }
+        setMessages((prev) => [...prev, errMsg])
+      }
     } finally {
+      abortRef.current = null
+      setLiveEvents([])
       busyRef.current = false
       setSending(false)
     }
   }
+  // Mirror of liveEvents for use inside async closures (the Stop path above).
+  const liveEventsRef = useRef([])
+  liveEventsRef.current = liveEvents
 
   async function handleFile(e) {
     const file = e.target.files?.[0]
@@ -318,6 +344,7 @@ export default function Chat() {
   const composer = (
     <Composer
       input={input} setInput={setInput} onSend={() => handleSend()} sending={sending || !ready || opening}
+      onStop={stopGeneration} canStop={Boolean(sending && abortRef.current)}
       uploading={uploading} onUploadClick={() => fileInputRef.current?.click()}
       skills={skills} taRef={taRef} navigate={navigate}
       connectors={connectors} activeConnectors={activeConnectors} toggleConnector={toggleConnector}
@@ -415,7 +442,7 @@ export default function Chat() {
         </div>
       ) : (
         <>
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6">
             <div className="mx-auto w-full max-w-3xl space-y-5">
               {messages.map((m) =>
                 m.role === 'video' ? <VideoAnalysisCard key={m.id} message={m} />
@@ -424,7 +451,7 @@ export default function Chat() {
                       : <Message key={m.id} message={m} sessionId={conversationId} onEdit={(content) => handleSend({ id: m.id, content })} disabled={sending || opening || !ready || uploading} />
               )}
               {sending && (
-                <TypingIndicator label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
+                <WorkingCard events={liveEvents} label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
               )}
             </div>
           </div>
@@ -450,7 +477,7 @@ export default function Chat() {
 function Composer({
   input, setInput, onSend, sending, uploading, onUploadClick, skills, taRef, navigate,
   connectors, activeConnectors, toggleConnector, webSearch, setWebSearch, voiceReplies, setVoiceReplies,
-  attachments, removeAttachment,
+  attachments, removeAttachment, onStop, canStop,
 }) {
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashQuery, setSlashQuery] = useState('')
@@ -635,10 +662,17 @@ function Composer({
             )}
           </div>
 
-          <button onClick={onSend} disabled={!input.trim() || sending}
-            className="flex items-center gap-1.5 rounded-xl bg-nexus-accent px-5 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50">
-            {sending ? '…' : <><SendIcon className="h-4 w-4" /> Send</>}
-          </button>
+          {canStop ? (
+            <button onClick={onStop} title="Stop generating"
+              className="flex items-center gap-1.5 rounded-xl border border-red-500/60 bg-red-500/15 px-5 py-2 text-sm font-medium text-red-300 transition hover:bg-red-500/25">
+              <span className="inline-block h-3 w-3 rounded-sm bg-current" /> Stop
+            </button>
+          ) : (
+            <button onClick={onSend} disabled={!input.trim() || sending}
+              className="flex items-center gap-1.5 rounded-xl bg-nexus-accent px-5 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50">
+              {sending ? '…' : <><SendIcon className="h-4 w-4" /> Send</>}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -762,8 +796,10 @@ function Message({ message, sessionId, onEdit, disabled }) {
     speak(message.content).finally(() => setSpeaking(false))
   }
   return (
-    <div className={isUser ? 'flex justify-end' : 'flex justify-start'}>
-      <div className={isUser ? 'max-w-[85%]' : 'w-full max-w-[85%]'}>
+    <div className={isUser ? 'flex min-w-0 justify-end' : 'flex min-w-0 justify-start'}>
+      {/* min-w-0 + overflow-wrap: long tokens (URLs, keys, hashes) wrap inside
+          the bubble instead of pushing the whole row off-screen on phones. */}
+      <div className={isUser ? 'min-w-0 max-w-[85%]' : 'w-full min-w-0 max-w-[85%]'}>
         {!isUser && (
           <div className="mb-1 flex items-center gap-2">
             <span className={['rounded-full px-2 py-0.5 text-[10px] font-medium', message.error ? 'bg-red-500/10 text-red-400' : 'bg-nexus-accent/15 text-nexus-accent2'].join(' ')}>
@@ -772,7 +808,7 @@ function Message({ message, sessionId, onEdit, disabled }) {
             <StageBadge stage={message.stage} />
           </div>
         )}
-        <div className={['rounded-2xl px-4 py-3', isUser ? 'bg-nexus-accent text-white' : 'border border-nexus-border bg-nexus-panel'].join(' ')}>
+        <div className={['min-w-0 max-w-full break-words [overflow-wrap:anywhere] rounded-2xl px-4 py-3', isUser ? 'bg-nexus-accent text-white' : 'border border-nexus-border bg-nexus-panel'].join(' ')}>
           {isUser ? (
             <>
               {message.attachments?.length > 0 && (
@@ -913,17 +949,47 @@ function CardField({ label, value }) {
   return (<div><p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{label}</p><p className="text-gray-200">{value || '—'}</p></div>)
 }
 
-function TypingIndicator({ label }) {
+// Live view of the turn in progress: every tool action the agent has run so
+// far and what it said in between — the same trail a terminal agent prints —
+// instead of three dots for minutes.
+function WorkingCard({ label, events = [] }) {
+  const tools = events.filter((e) => e.type === 'tool')
+  const lastText = [...events].reverse().find((e) => e.type === 'text')?.text
+  const recent = events.slice(-8)
   return (
     <div className="flex justify-start">
-      <div className="w-full max-w-[85%]">
+      <div className="w-full min-w-0 max-w-[85%]">
         <div className="mb-1"><span className="rounded-full bg-nexus-accent/15 px-2 py-0.5 text-[10px] font-medium text-nexus-accent2">{label}</span></div>
-        <div className="inline-flex items-center gap-1 rounded-2xl border border-nexus-border bg-nexus-panel px-4 py-3">
-          <Dot delay="0ms" /><Dot delay="150ms" /><Dot delay="300ms" />
+        <div className="min-w-0 rounded-2xl border border-nexus-border bg-nexus-panel px-4 py-3 text-sm">
+          <div className="flex items-center gap-2 text-gray-300">
+            <span className="inline-flex items-center gap-1"><Dot delay="0ms" /><Dot delay="150ms" /><Dot delay="300ms" /></span>
+            <span>{tools.length ? `Working — ${tools.length} tool action${tools.length === 1 ? '' : 's'} so far` : 'Thinking…'}</span>
+          </div>
+          {recent.length > 0 && (
+            <div className="mt-2 space-y-1 border-t border-nexus-border/50 pt-2 font-mono text-[11px]">
+              {recent.map((ev, i) => ev.type === 'tool' ? (
+                <div key={i} className="flex min-w-0 items-start gap-2 text-gray-400">
+                  <span className={ev.ok ? 'text-emerald-400' : 'text-red-400'}>{ev.ok ? '✓' : '✗'}</span>
+                  <span className="shrink-0 text-nexus-accent2">{ev.tool}</span>
+                  <span className="min-w-0 flex-1 truncate">{summarizeArgs(ev.args)}</span>
+                  {ev.durationMs != null && <span className="shrink-0 text-gray-600">{(ev.durationMs / 1000).toFixed(1)}s</span>}
+                </div>
+              ) : (
+                <div key={i} className="whitespace-pre-wrap break-words font-sans text-gray-500">{String(ev.text).slice(0, 300)}</div>
+              ))}
+            </div>
+          )}
+          {lastText && recent[recent.length - 1]?.type !== 'text' && (
+            <p className="mt-2 break-words text-xs text-gray-500">{String(lastText).slice(0, 200)}</p>
+          )}
         </div>
       </div>
     </div>
   )
+}
+function summarizeArgs(args = {}) {
+  const v = args.command || args.query || args.code || ''
+  return String(v).split('\n')[0].slice(0, 120) || JSON.stringify(args).slice(0, 120)
 }
 function Dot({ delay }) {
   return <span className="inline-block h-2 w-2 animate-bounce rounded-full bg-gray-500" style={{ animationDelay: delay }} />

@@ -36,7 +36,7 @@ function composeSystem(systemPrompt = '', skills = []) {
 }
 
 // { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments } -> normalized response with toolSteps
-export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments }) {
+export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments, onProgress = () => {} }) {
   const targetUrl = resolveTargetUrl(model)
   const agentTools = webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS
   const isRunpod = targetUrl.includes('11435')
@@ -45,7 +45,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // purely about not leaving someone staring at a spinner forever on the
   // CPU-only box (~5 tok/s): keep going while the answer is genuinely
   // unfinished, but cap the whole turn at a few minutes.
-  const WALL_CLOCK_BUDGET_MS = 6 * 60 * 1000
+  const WALL_CLOCK_BUDGET_MS = (isRunpod ? 15 : 6) * 60 * 1000
   // This model tends to produce long hidden "thinking" before its actual
   // answer. num_predict bounds a single call so one runaway generation can't
   // eat the whole budget; Turbo (30-65 tok/s) gets a much higher ceiling.
@@ -77,7 +77,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   }
 
   const toolSteps = []
-  const MAX_STEPS = 6
+  // Model round-trips per turn (tool rounds + continuations). Six was enough
+  // for "run this script"; building a project is dozens of tool calls, and
+  // cutting the loop there is exactly what made the agent stop and narrate
+  // "next I'll…" instead of finishing. The wall-clock budget is the real cap.
+  const MAX_STEPS = 60
+  let autoContinues = 0
   let finalContent = ''
   const requestStart = Date.now()
 
@@ -138,13 +143,23 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
 
     if (detectedCalls.length === 0) {
       finalContent += rawContent
-      // num_predict cut the answer off mid-thought rather than the model
-      // choosing to stop. Ask it to keep going instead of showing a
-      // truncated reply — as long as there's still wall-clock budget left
-      // before Vercel's proxy would kill the request anyway.
-      const truncated = data.done_reason === 'length'
       const elapsed = Date.now() - requestStart
       const hasBudget = elapsed < WALL_CLOCK_BUDGET_MS - 15000
+      // The model did real work this turn and then stopped to ask permission
+      // ("Should I build it now?") or announced a next step without doing it.
+      // The user already asked for the task — answer for them and keep going,
+      // a bounded number of times, so the job doesn't stall waiting on a "yes".
+      if (toolSteps.length && hasBudget && autoContinues < 4 && looksUnfinished(rawContent)) {
+        autoContinues++
+        onProgress({ type: 'text', text: rawContent })
+        messages.push({ role: 'assistant', content: rawContent })
+        messages.push({ role: 'user', content: 'Yes. Continue and complete the entire task now without asking again — execute the remaining steps, verify the result, then report what was done.' })
+        continue
+      }
+      // num_predict cut the answer off mid-thought rather than the model
+      // choosing to stop. Ask it to keep going instead of showing a
+      // truncated reply — as long as there's still wall-clock budget left.
+      const truncated = data.done_reason === 'length'
       if (truncated && (!hasBudget || step === MAX_STEPS - 1)) {
         finalContent += '\n\n*(cut short — this answer was taking too long; ask "continue" for the rest)*'
         break
@@ -157,6 +172,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
 
     // Execute the tool calls
     finalContent = rawContent
+    if (rawContent.trim()) onProgress({ type: 'text', text: rawContent })
     messages.push({ role: 'assistant', content: rawContent })
 
     for (const call of detectedCalls) {
@@ -169,7 +185,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           userId,
         })
 
-        toolSteps.push({
+        const step = {
           tool: call.name,
           args: call.args,
           ok: result.ok,
@@ -178,7 +194,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           stdout: result.stdout || '',
           stderr: result.stderr || '',
           target: result.target || 'sandbox',
-        })
+        }
+        toolSteps.push(step)
+        onProgress({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
 
         // Give observation back to the model
         const outputSummary = result.stdout
@@ -190,14 +208,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         const obs = `[Tool Execution: ${call.name} on ${result.target || 'sandbox'}]\nExit Code: ${result.exitCode}\nOutput:\n${outputSummary}`
         messages.push({ role: 'user', content: obs })
       } catch (err) {
-        toolSteps.push({
-          tool: call.name,
-          args: call.args,
-          ok: false,
-          exitCode: 1,
-          stderr: err.message,
-          target: 'error',
-        })
+        const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: err.message, target: 'error' }
+        toolSteps.push(step)
+        onProgress({ type: 'tool', ...step })
         messages.push({
           role: 'user',
           content: `[Tool Execution Failed: ${call.name}]\nError: ${err.message}`,
@@ -218,6 +231,22 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
 
 function dataModel(m) {
   return m || 'nexus-mine'
+}
+
+// A turn that ends by asking the user whether to proceed, or by announcing
+// what it will do next ("Now let me build out the files:") without a tool
+// call, is not a finished task.
+export function looksUnfinished(text = '') {
+  const t = text.trim()
+  if (!t) return false
+  // Ends by asking permission.
+  if (/\b(should|shall|would you like|do you want|want me to|may i|can i|ready for me to|let me know if (you'?d like|you want|i should))\b[^?]{0,120}\?\s*$/i.test(t.slice(-400))) return true
+  // Ends on a colon: "Now let me build out the files:" — announced, not done.
+  if (/:\s*$/.test(t)) return true
+  // Last sentence announces an action it never took ("Let me check what was
+  // created and start building." — but not "Let me know if you need more").
+  const last = t.split(/(?<=[.!])\s+/).pop() || ''
+  return /\b(let me(?! know)|i'?ll|i will|i'?m going to|i am going to|next,? (i|we)|now (let'?s|i'?ll|we'?ll)|let'?s)\b/i.test(last)
 }
 
 // Reachability + list of installed Ollama models (merges local + Runpod GPU).

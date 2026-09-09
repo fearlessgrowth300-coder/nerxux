@@ -8,7 +8,7 @@ import { getEnabledConnectors } from '../lib/mcpStore.js'
 import { callMcpTool } from '../lib/mcp.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
-import { createJob, completeJob, failJob, touchJob } from '../lib/chatJobs.js'
+import { createJob, completeJob, failJob, touchJob, cancelJob } from '../lib/chatJobs.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -100,7 +100,7 @@ async function buildMcpToolset(userId, connectorIds) {
 
 // Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP
 // tools, attachments (images/PDF), and web search.
-async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mcp, attachments, webSearch, permissionFor, resume, sessionId, projectPath, signal }) {
+async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mcp, attachments, webSearch, permissionFor, resume, sessionId, projectPath, signal, onProgress }) {
   const info = getModelById(modelId)
   if (!info) throw new Error(`Unknown model: ${modelId}`)
   const result = await runTool(info.provider, userId, {
@@ -117,6 +117,7 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
     sessionId,
     projectPath,
     signal,
+    onProgress,
   })
   return { result, label: info.label }
 }
@@ -138,7 +139,8 @@ router.post('/', async (req, res, next) => {
   const controller = new AbortController()
   if (req.body?.async) {
     const job = createJob(req.user.id, controller)
-    handleChat(req.user.id, req.body, controller.signal)
+    const onProgress = (event) => { job.events.push({ ...event, at: Date.now() }) }
+    handleChat(req.user.id, req.body, controller.signal, onProgress)
       .then((result) => completeJob(job, result))
       .catch((err) => failJob(job, err))
     return res.json({ jobId: job.id })
@@ -147,24 +149,30 @@ router.post('/', async (req, res, next) => {
   // generating instead of burning CPU on a request nobody's waiting for.
   req.on('close', () => controller.abort())
   try {
-    res.json(await handleChat(req.user.id, req.body, controller.signal))
+    res.json(await handleChat(req.user.id, req.body, controller.signal, () => {}))
   } catch (err) {
     if (err.name === 'AbortError') return // client disconnected — nothing to respond to
     next(err)
   }
 })
 
-// GET /api/chat/jobs/:id — poll an async chat job.
+// GET /api/chat/jobs/:id — poll an async chat job. While it runs, `events`
+// carries everything the agent has done so far (tool actions, interim text).
 router.get('/jobs/:id', (req, res) => {
   const job = touchJob(req.params.id, req.user.id)
   if (!job) {
     return res.status(404).json({ error: 'That request has expired — please resend your message.' })
   }
-  if (job.status === 'running') return res.json({ status: 'running' })
+  if (job.status === 'running') return res.json({ status: 'running', events: job.events })
   res.json({ status: job.status, result: job.result, error: job.error })
 })
 
-async function handleChat(userId, body, signal) {
+// POST /api/chat/jobs/:id/cancel — the Stop button.
+router.post('/jobs/:id/cancel', (req, res) => {
+  res.json({ ok: cancelJob(req.params.id, req.user.id) })
+})
+
+async function handleChat(userId, body, signal, onProgress = () => {}) {
   const {
     history = [],
     modelA = 'claude-sonnet',
@@ -186,7 +194,7 @@ async function handleChat(userId, body, signal) {
 
   // MCP tools the user has connected + enabled (used by the Claude adapter).
   const mcp = await buildMcpToolset(userId, connectorIds)
-  const extra = { attachments, webSearch, sessionId, projectPath, signal }
+  const extra = { attachments, webSearch, sessionId, projectPath, signal, onProgress }
   {
 
     // ---------- AUTO (intent router) MODE ----------

@@ -14,7 +14,10 @@ import { spawn } from 'node:child_process'
 // deployment (bwrap must be installed there: `apt install bubblewrap`).
 const IS_WINDOWS = process.platform === 'win32'
 
-const TIMEOUT_MS = 30000 // 30 second maximum execution timeout
+// Real project work (npm install, create-next-app, a build) routinely runs
+// well past 30s; killing it there left half-scaffolded projects and made the
+// agent think a step "failed".
+const TIMEOUT_MS = 5 * 60 * 1000
 
 export async function executeInSandbox({
   code = '',
