@@ -1045,7 +1045,7 @@ function WorkingCard({ label, events = [] }) {
   )
 }
 function summarizeArgs(args = {}) {
-  const v = args.command || args.query || args.code || ''
+  const v = args.command || args.query || args.path || args.pattern || args.code || ''
   return String(v).split('\n')[0].slice(0, 120) || JSON.stringify(args).slice(0, 120)
 }
 function Dot({ delay }) {

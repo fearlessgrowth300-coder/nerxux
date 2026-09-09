@@ -9,6 +9,9 @@ import { callMcpTool } from '../lib/mcp.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
 import { createJob, completeJob, failJob, touchJob, cancelJob } from '../lib/chatJobs.js'
+import { executeAgentTool, AGENT_GUIDANCE } from '../lib/agentLoop.js'
+import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
+import { WEB_SEARCH_TOOL, hasBraveKey } from '../lib/webSearch.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -51,10 +54,14 @@ function toMessage(result, { modelLabel, stage } = {}) {
   }
 }
 
-// Builds the MCP toolset for a user: Anthropic-format tool defs plus a router
-// that executes a tool call against the right connector. Only the Claude
-// adapter uses these; other adapters ignore the extra args.
-async function buildMcpToolset(userId, connectorIds) {
+// Builds the toolset for a user: Anthropic-format tool defs plus a router that
+// executes a tool call against the right target — MCP connectors, native
+// (YouTube/Facebook) tools, and, when `agent` is given, the agent's own hands
+// (sandbox, files, git, web search) so Claude/GPT-4o/Gemini/Groq can build
+// things exactly like the local models do. Each adapter converts the defs
+// to its own function-calling format.
+// `agent` = { sessionId, projectPath, webSearch, onProgress, chatText }.
+async function buildMcpToolset(userId, connectorIds, agent = null) {
   let connectors = await getEnabledConnectors(userId)
   // Per-chat selection: if the client sent a list, only use those connectors.
   if (Array.isArray(connectorIds)) {
@@ -78,10 +85,28 @@ async function buildMcpToolset(userId, connectorIds) {
   const native = await buildNativeToolset(userId)
   for (const t of native.tools) tools.push(t)
 
+  // The agent's hands. Brave web search is tagged so runChatModel can drop it
+  // for Claude, which brings its own (better) native web search under the
+  // same name.
+  const steps = []
+  if (agent) {
+    tools.push(...AGENT_TOOL_DEFS)
+    if (agent.webSearch && hasBraveKey()) tools.push({ ...WEB_SEARCH_TOOL, braveSearch: true })
+  }
+
   const permissionFor = (name) => permMap.get(name) || 'allow'
   // Returns { content, media? } — content is text for the model, media (if any)
   // is a generated image/audio/video to surface in the chat.
   const onToolCall = async (name, input) => {
+    if (agent && AGENT_TOOL_NAMES.has(name)) {
+      const result = await executeAgentTool({
+        name, args: input, sessionId: agent.sessionId, projectPath: agent.projectPath, userId, chatText: agent.chatText,
+      })
+      const step = toStep(name, input, result)
+      steps.push(step)
+      agent.onProgress?.({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
+      return { content: observationText(name, result) }
+    }
     if (native.has(name)) return { content: await native.run(name, input) }
     const target = routeMap.get(name)
     if (!target) return { content: `No connector provides tool "${name}".` }
@@ -95,7 +120,7 @@ async function buildMcpToolset(userId, connectorIds) {
     const content = r.text || (r.media ? 'Generated media (shown below).' : JSON.stringify(r.raw || {}))
     return { content, media: r.media || null }
   }
-  return { tools, onToolCall, permissionFor }
+  return { tools, onToolCall, permissionFor, steps }
 }
 
 // Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP
@@ -103,12 +128,22 @@ async function buildMcpToolset(userId, connectorIds) {
 async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mcp, attachments, webSearch, permissionFor, resume, sessionId, projectPath, signal, onProgress }) {
   const info = getModelById(modelId)
   if (!info) throw new Error(`Unknown model: ${modelId}`)
+  // The local adapters compose their own agent prompt; the API models get the
+  // same working rules prepended here, and Claude keeps its native web search
+  // instead of the Brave tool.
+  const localAgent = info.provider === 'ollama' || info.provider === 'nexus'
+  const tools = (mcp?.tools || [])
+    .filter((t) => !(t.braveSearch && info.provider === 'claude'))
+    .map(({ braveSearch, ...t }) => t)
+  const hasAgentTools = !localAgent && tools.some((t) => AGENT_TOOL_NAMES.has(t.name))
+  const fullSystem = hasAgentTools ? [AGENT_GUIDANCE, systemPrompt].filter(Boolean).join('\n\n') : systemPrompt
+  if (mcp?.steps) mcp.steps.length = 0
   const result = await runTool(info.provider, userId, {
     prompt,
     history,
-    systemPrompt,
+    systemPrompt: fullSystem,
     model: info.apiModel,
-    tools: mcp?.tools,
+    tools: localAgent ? undefined : tools,
     onToolCall: mcp?.onToolCall,
     attachments,
     webSearch,
@@ -119,6 +154,9 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
     signal,
     onProgress,
   })
+  // Surface the agent's tool actions in the reply card for the API models
+  // (the local adapters report their own toolSteps).
+  if (result && !result.toolSteps?.length && mcp?.steps?.length) result.toolSteps = mcp.steps.slice()
   return { result, label: info.label }
 }
 
@@ -192,8 +230,12 @@ async function handleChat(userId, body, signal, onProgress = () => {}) {
   const userText = lastUser?.content?.trim() || ''
   const basePrompt = buildPrompt(history, videoContext)
 
-  // MCP tools the user has connected + enabled (used by the Claude adapter).
-  const mcp = await buildMcpToolset(userId, connectorIds)
+  // Connected MCP/native tools plus the agent's own hands (sandbox, files,
+  // git, web search) — the same toolset for every model.
+  const mcp = await buildMcpToolset(userId, connectorIds, {
+    sessionId, projectPath, webSearch, onProgress,
+    chatText: history.filter((m) => m.role === 'user').map((m) => m.content).join('\n'),
+  })
   const extra = { attachments, webSearch, sessionId, projectPath, signal, onProgress }
   {
 

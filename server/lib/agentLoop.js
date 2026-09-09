@@ -2,15 +2,24 @@ import { executeInSandbox } from './sandbox.js'
 import { runOnPod } from './pod.js'
 import { getProviderKey } from './vault.js'
 import { runWebSearchTool } from './webSearch.js'
+import { AGENT_TOOL_DEFS, toOpenAITools, fileToolCommand } from './agentTools.js'
 
-// System instructions that inform models how to use their execution "hands"
-export const AGENT_SYSTEM_PROMPT = `
+// How to work — shared by every model that gets the agent tools (Claude,
+// GPT-4o, Gemini, Groq, the local models).
+export const AGENT_GUIDANCE = `
 You are Nexus AI with direct execution capabilities ("hands").
 You have access to:
-1. An isolated OS-level Linux sandbox (with Python, JS, TS, C++, Bash, Git, and persistent /workspace).
-2. Direct terminal execution on the remote Runpod GPU pod (via SSH).
+1. An isolated OS-level Linux sandbox (Python, Node, TypeScript, C++, Bash, Git; a persistent /workspace for this chat).
+2. Direct terminal execution on the remote RunPod GPU pod (via SSH).
 
-When the user asks you to write, test, run, clone, build, inspect, or execute code or terminal commands, DO NOT just describe what to do. ACTUALLY EXECUTE IT by calling a tool or outputting a tool call block.
+When the user asks you to write, test, run, clone, build, inspect, or execute code or terminal commands, DO NOT just describe what to do. ACTUALLY EXECUTE IT by calling a tool.
+
+How to work (this is how good engineers use these tools):
+- Look before you act: list_files / read_file the relevant parts of the project before changing it.
+- Write files with write_file (whole file) or edit_file (small change) — NEVER via shell heredocs or echo.
+- Work in small verified steps: write a file, then build/run/test, read the error, fix it, continue.
+- After a batch of changes, prove it: run the build or tests and read the output. "Done" means it runs.
+- Keep a short plan in your head and finish every item on it.
 
 WORK AUTONOMOUSLY. When given a task, carry it all the way to completion in this
 turn: plan briefly, then execute step after step until it is actually done and
@@ -36,9 +45,10 @@ object. After writing files, verify with ls / cat before moving on, and
 never repeat a step you have already completed.
 
 Available Tools:
-- run_code(language, code, profile, projectPath): Runs code in the isolated local sandbox.
+- write_file(path, content) / edit_file(path, old, new) / read_file(path) / list_files(path) / search_files(pattern, path)
 - execute_command(command, target, profile, projectPath): Runs a shell/git command. target can be "sandbox" (default) or "pod".
-- run_on_pod(command): Runs a shell command directly on the Runpod GPU pod.
+- run_code(language, code, profile, projectPath): Runs a code snippet in the sandbox.
+- run_on_pod(command): Runs a shell command directly on the RunPod GPU pod.
 - web_search(query): Searches the live web and returns real results (only offered when the user has web search turned on).
 
 Git works in the sandbox (clone, commit, branch, diff all work with no setup).
@@ -53,100 +63,27 @@ URLs) are meant to be used: put them in the project's .env / config files
 exactly as given, and use them. Never ask the user to re-send something
 that's already in the conversation.
 
+`.trim()
+
+// Extra note for the local Ollama models only: some of them can't do native
+// function calling and fall back to emitting a JSON block in their text.
+export const OLLAMA_FORMAT_NOTE = `
 Format:
 If your runtime supports function calling, use the function calling schema.
 Otherwise, you can output an execution block:
 {"tool": "execute_command", "command": "git clone https://github.com/user/repo", "target": "sandbox"}
 or
-{"tool": "run_code", "language": "python", "code": "print('hello from sandbox')"}
+{"tool": "write_file", "path": "repo/app/page.tsx", "content": "..."}
 or
 run: git clone https://github.com/user/repo
 
 Once executed, you will receive the actual output, exit code, and files, and you can inspect results and decide the next step.
 `.trim()
 
-// Ollama / OpenAI compatible tool definitions
-export const AGENT_TOOLS = [
-  {
-    type: 'function',
-    function: {
-      name: 'run_code',
-      description: 'Execute code in the local OS-level isolated sandbox (supports python, javascript, typescript, c++, bash) with persistent /workspace.',
-      parameters: {
-        type: 'object',
-        properties: {
-          language: {
-            type: 'string',
-            enum: ['python', 'javascript', 'typescript', 'c++', 'bash'],
-            description: 'Programming language to execute',
-          },
-          code: {
-            type: 'string',
-            description: 'The complete code snippet to execute',
-          },
-          profile: {
-            type: 'string',
-            enum: ['none', 'full'],
-            description: 'Network profile: "none" for airgapped, "full" for internet access (required for network/packages)',
-          },
-          projectPath: {
-            type: 'string',
-            description: 'Optional path on host to bind-mount into /workspace/project',
-          },
-        },
-        required: ['language', 'code'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'execute_command',
-      description: 'Execute a bash or git command (e.g. git clone, git add, git commit, git push, ls, npm install) in the sandbox or on the Runpod GPU pod.',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: {
-            type: 'string',
-            description: 'The shell command line to run',
-          },
-          target: {
-            type: 'string',
-            enum: ['sandbox', 'pod'],
-            description: 'Where to execute: "sandbox" (local isolated environment) or "pod" (remote Runpod GPU pod)',
-          },
-          profile: {
-            type: 'string',
-            enum: ['none', 'full'],
-            description: 'Network profile for sandbox: "none" or "full"',
-          },
-          projectPath: {
-            type: 'string',
-            description: 'Optional host project directory to mount into /workspace/project',
-          },
-        },
-        required: ['command'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_on_pod',
-      description: 'Execute a shell command directly on the remote Runpod GPU pod via SSH.',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: {
-            type: 'string',
-            description: 'Command to run on the Runpod pod',
-          },
-        },
-        required: ['command'],
-      },
-    },
-  },
-]
+export const AGENT_SYSTEM_PROMPT = AGENT_GUIDANCE + '\n\n' + OLLAMA_FORMAT_NOTE
+
+// Ollama / OpenAI compatible tool definitions (derived from the shared defs).
+export const AGENT_TOOLS = toOpenAITools(AGENT_TOOL_DEFS)
 
 // Only added to the request's tool list when the user's Web toggle is on
 // (see ollama.js) — kept separate from AGENT_TOOLS so it's never offered
@@ -206,6 +143,16 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
     const start = Date.now()
     const { content } = await runWebSearchTool({ query: args.query })
     return { ok: true, stdout: content, stderr: '', exitCode: 0, durationMs: Date.now() - start, target: 'web_search' }
+  }
+
+  // File tools: a fixed bash recipe per tool, with all model-supplied text
+  // delivered base64-encoded — the model never composes shell syntax.
+  const fileCmd = fileToolCommand(name, args)
+  if (fileCmd) {
+    const r = await executeInSandbox({
+      code: fileCmd, language: 'bash', sessionId: cleanSession, profile: 'none', projectPath: targetProj,
+    })
+    return { ...r, target: name }
   }
   const targetProj = args.projectPath || projectPath || null
 
@@ -291,6 +238,9 @@ export function extractToolCallsFromText(text) {
           })
         } else if (parsed.tool === 'web_search') {
           calls.push({ name: 'web_search', args: { query: parsed.query || parsed.q || '' } })
+        } else if (['write_file', 'read_file', 'edit_file', 'list_files', 'search_files'].includes(parsed.tool)) {
+          const { tool, ...rest } = parsed
+          calls.push({ name: tool, args: rest })
         }
       }
     } catch {}

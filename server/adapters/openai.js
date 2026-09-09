@@ -14,7 +14,7 @@ function composeSystem(systemPrompt = '', skills = []) {
 // tool calling (so GPT-4o can use connected MCP / native tools, e.g. Higgsfield
 // image/video generation).
 // { prompt, systemPrompt, skills, apiKey, model, attachments, tools?, onToolCall?, webSearch? }
-export async function run({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch }) {
+export async function run({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch, signal }) {
   if (!apiKey) throw new Error('OpenAI API key is not connected')
 
   const client = new OpenAI({ apiKey })
@@ -71,7 +71,7 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
 
   let lastMedia = null
   let completion
-  const MAX_TURNS = 8
+  const MAX_TURNS = 80
 
   for (let i = 0; i < MAX_TURNS; i++) {
     completion = await client.chat.completions.create({
@@ -79,7 +79,7 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
       max_tokens: 4096,
       messages,
       ...(oaTools ? { tools: oaTools } : {}),
-    })
+    }, signal ? { signal } : undefined)
     const msg = completion.choices?.[0]?.message
     if (!msg?.tool_calls?.length) break
 

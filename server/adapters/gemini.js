@@ -134,7 +134,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
   const chat = generativeModel.startChat()
   let lastMedia = null
   let result = await chat.sendMessage(parts)
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 40; i++) {
     const calls = (result.response.functionCalls && result.response.functionCalls()) || []
     if (!calls.length) break
     const responses = []

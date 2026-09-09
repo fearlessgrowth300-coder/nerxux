@@ -34,7 +34,7 @@ function finalText(response) {
 // `resume` = { messages, results } continues a paused run.
 export async function run({
   prompt, systemPrompt, skills, apiKey, model, tools, onToolCall, attachments,
-  webSearch, permissionFor, resume,
+  webSearch, permissionFor, resume, signal,
 }) {
   if (!apiKey) throw new Error('Anthropic API key is not connected')
 
@@ -54,7 +54,9 @@ export async function run({
   const toolCalls = []
   let lastMedia = resume?.media || null
   let response
-  const MAX_TURNS = 10
+  // A real build is dozens of tool rounds; the user's Stop button (signal)
+  // and the job's wall clock are the real limits.
+  const MAX_TURNS = 80
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     response = await client.messages.create({
@@ -63,7 +65,7 @@ export async function run({
       ...(system ? { system } : {}),
       ...(allTools.length ? { tools: allTools } : {}),
       messages,
-    })
+    }, signal ? { signal } : undefined)
 
     if (response.stop_reason === 'pause_turn') {
       messages.push({ role: 'assistant', content: response.content })

@@ -138,7 +138,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
     : []
   // Groq has no search of its own — give it Brave Search as a regular
   // function tool when the user has Web on and a key is configured.
-  const useWebSearch = webSearch && hasBraveKey()
+  const useWebSearch = webSearch && hasBraveKey() && !mappedTools.some((t) => t.function.name === WEB_SEARCH_TOOL.name)
   if (useWebSearch) {
     mappedTools.push({
       type: 'function',
@@ -152,7 +152,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
   messages.push({ role: 'user', content: userContent })
 
   let completion
-  const MAX_TURNS = 8
+  const MAX_TURNS = 40
 
   for (let i = 0; i < MAX_TURNS; i++) {
     completion = await client.chat.completions.create({
