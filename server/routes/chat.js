@@ -8,6 +8,7 @@ import { getEnabledConnectors } from '../lib/mcpStore.js'
 import { callMcpTool } from '../lib/mcp.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
+import { createJob, completeJob, failJob, touchJob } from '../lib/chatJobs.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -123,40 +124,74 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
 // POST /api/chat
 // Manual: { history, modelA, modelB, pipeline, systemPrompt, videoContext }
 // Auto:   { history, auto:true, systemPrompt, videoContext }
+//
+// Two ways to get the answer back:
+// - `async: true` -> responds immediately with { jobId }; the client polls
+//   GET /api/chat/jobs/:id until it's done. This is what the web client uses:
+//   Vercel's proxy to this backend kills any single request at ~120s
+//   (measured), and the CPU-bound local model regularly needs longer than
+//   that for real answers / multi-step tool use. Short poll requests never
+//   get near that limit, no matter how long generation takes.
+// - Otherwise the reply is returned in the same response (kept for API users
+//   and older clients).
 router.post('/', async (req, res, next) => {
+  const controller = new AbortController()
+  if (req.body?.async) {
+    const job = createJob(req.user.id, controller)
+    handleChat(req.user.id, req.body, controller.signal)
+      .then((result) => completeJob(job, result))
+      .catch((err) => failJob(job, err))
+    return res.json({ jobId: job.id })
+  }
+  // If the client gives up (closes the tab, retries, navigates away), stop
+  // generating instead of burning CPU on a request nobody's waiting for.
+  req.on('close', () => controller.abort())
   try {
-    const {
-      history = [],
-      modelA = 'claude-sonnet',
-      modelB = null,
-      pipeline = false,
-      systemPrompt = '',
-      videoContext = null,
-      auto = false,
-      attachments = [],
-      webSearch = false,
-      connectorIds = null,
-      sessionId = null,
-      projectPath = null,
-    } = req.body || {}
+    res.json(await handleChat(req.user.id, req.body, controller.signal))
+  } catch (err) {
+    if (err.name === 'AbortError') return // client disconnected — nothing to respond to
+    next(err)
+  }
+})
 
-    const lastUser = [...history].reverse().find((m) => m.role === 'user')
-    const userText = lastUser?.content?.trim() || ''
-    const basePrompt = buildPrompt(history, videoContext)
+// GET /api/chat/jobs/:id — poll an async chat job.
+router.get('/jobs/:id', (req, res) => {
+  const job = touchJob(req.params.id, req.user.id)
+  if (!job) {
+    return res.status(404).json({ error: 'That request has expired — please resend your message.' })
+  }
+  if (job.status === 'running') return res.json({ status: 'running' })
+  res.json({ status: job.status, result: job.result, error: job.error })
+})
 
-    // MCP tools the user has connected + enabled (used by the Claude adapter).
-    const mcp = await buildMcpToolset(req.user.id, connectorIds)
-    // If the client gives up (closes the tab, retries, navigates away), stop
-    // generating instead of burning CPU on a request nobody's waiting for —
-    // this matters most for the CPU-bound local model, where a pile-up of
-    // abandoned retries is what turns one slow reply into everything timing out.
-    const controller = new AbortController()
-    req.on('close', () => controller.abort())
-    const extra = { attachments, webSearch, sessionId, projectPath, signal: controller.signal }
+async function handleChat(userId, body, signal) {
+  const {
+    history = [],
+    modelA = 'claude-sonnet',
+    modelB = null,
+    pipeline = false,
+    systemPrompt = '',
+    videoContext = null,
+    auto = false,
+    attachments = [],
+    webSearch = false,
+    connectorIds = null,
+    sessionId = null,
+    projectPath = null,
+  } = body || {}
+
+  const lastUser = [...history].reverse().find((m) => m.role === 'user')
+  const userText = lastUser?.content?.trim() || ''
+  const basePrompt = buildPrompt(history, videoContext)
+
+  // MCP tools the user has connected + enabled (used by the Claude adapter).
+  const mcp = await buildMcpToolset(userId, connectorIds)
+  const extra = { attachments, webSearch, sessionId, projectPath, signal }
+  {
 
     // ---------- AUTO (intent router) MODE ----------
     if (auto) {
-      const connections = await listConnections(req.user.id)
+      const connections = await listConnections(userId)
       // A tool is available if the user connected it OR the platform key is set.
       const connectedTools = connections
         .filter((c) => c.connected || c.platform)
@@ -165,7 +200,7 @@ router.post('/', async (req, res, next) => {
       const { decision, source, error } = await routeIntent({
         userMessage: userText,
         connectedTools,
-        anthropicKey: await getProviderKey(req.user.id, 'claude'),
+        anthropicKey: await getProviderKey(userId, 'claude'),
       })
 
       const required = [decision.primary_tool]
@@ -175,7 +210,7 @@ router.post('/', async (req, res, next) => {
 
       if (missing.length > 0) {
         const names = missing.map((t) => TOOL_META[t]?.label || titleCase(t))
-        return res.json({
+        return ({
           routing,
           messages: [
             {
@@ -209,18 +244,18 @@ router.post('/', async (req, res, next) => {
             const genPrompt = priorOutput
               ? `${userText}\n\nUse this as the script/brief:\n${priorOutput}`
               : userText
-            result = await runTool(step.tool, req.user.id, { prompt: genPrompt })
+            result = await runTool(step.tool, userId, { prompt: genPrompt })
           } else {
             const prompt = priorOutput
               ? `${basePrompt}\n\n[Analysis from the previous step]\n${priorOutput}`
               : basePrompt
-            const r = await runChatModel(meta.model, req.user.id, { prompt, systemPrompt, mcp, ...extra })
+            const r = await runChatModel(meta.model, userId, { prompt, systemPrompt, mcp, ...extra })
             result = r.result
             priorOutput = result.content
           }
           messages.push(toMessage(result, { modelLabel: meta.label, stage: step.stage }))
         } catch (e) {
-          if (e.name === 'AbortError') return // client disconnected — nothing to respond to
+          if (e.name === 'AbortError') throw e
           messages.push({
             role: 'assistant',
             error: true,
@@ -231,7 +266,7 @@ router.post('/', async (req, res, next) => {
           break
         }
       }
-      return res.json({ routing, messages })
+      return ({ routing, messages })
     }
 
     // ---------- MANUAL MODE ----------
@@ -242,7 +277,7 @@ router.post('/', async (req, res, next) => {
       // Model A = analyst.
       let analysis = null
       try {
-        const a = await runChatModel(modelA, req.user.id, {
+        const a = await runChatModel(modelA, userId, {
           prompt: `${basePrompt}\n\n(Act as an analyst: break down the request and prepare concise notes for an executor model.)`,
           systemPrompt,
           mcp,
@@ -251,53 +286,51 @@ router.post('/', async (req, res, next) => {
         analysis = a.result.content
         messages.push(toMessage(a.result, { modelLabel: a.label, stage: 'analyst' }))
       } catch (e) {
-        if (e.name === 'AbortError') return
+        if (e.name === 'AbortError') throw e
         const label = getModelById(modelA)?.label || modelA
-        return res.json({
+        return ({
           messages: [{ role: 'assistant', error: true, modelLabel: label, content: `⚠️ ${label}: ${e.message}` }],
         })
       }
       // Model B = executor, using A's analysis.
       try {
-        const b = await runChatModel(modelB, req.user.id, {
+        const b = await runChatModel(modelB, userId, {
           prompt: `${basePrompt}\n\n[Analyst notes]\n${analysis}\n\n(Act as the executor: produce the final answer.)`,
           systemPrompt,
           mcp,
         })
         messages.push(toMessage(b.result, { modelLabel: b.label, stage: 'executor' }))
       } catch (e) {
-        if (e.name === 'AbortError') return
+        if (e.name === 'AbortError') throw e
         const label = getModelById(modelB)?.label || modelB
         messages.push({ role: 'assistant', error: true, modelLabel: label, stage: 'executor', content: `⚠️ ${label}: ${e.message}` })
       }
-      return res.json({ messages })
+      return ({ messages })
     }
 
     // Single model (supports per-tool approval pauses).
     try {
-      const r = await runChatModel(modelA, req.user.id, {
+      const r = await runChatModel(modelA, userId, {
         prompt: basePrompt, history, systemPrompt, mcp, ...extra, permissionFor: mcp.permissionFor,
       })
       if (r.result?.pending) {
         const pendingId = savePending({
-          userId: req.user.id, modelId: modelA, systemPrompt, webSearch, connectorIds,
+          userId: userId, modelId: modelA, systemPrompt, webSearch, connectorIds,
           resumeState: r.result.resumeState, pendingTools: r.result.pendingTools,
         })
-        return res.json({
+        return ({
           messages: [{ role: 'approval', pendingId, modelLabel: r.label, tools: r.result.pendingTools }],
         })
       }
       messages.push(toMessage(r.result, { modelLabel: r.label }))
     } catch (e) {
-      if (e.name === 'AbortError') return
+      if (e.name === 'AbortError') throw e
       const label = getModelById(modelA)?.label || modelA
       messages.push({ role: 'assistant', error: true, modelLabel: label, content: `⚠️ ${label}: ${e.message}` })
     }
-    res.json({ messages })
-  } catch (err) {
-    next(err)
+    return { messages }
   }
-})
+}
 
 // POST /api/chat/resume — continue a paused turn after the user decides on
 // approval-required tools. Body: { pendingId, decisions: { toolUseId: 'approve'|'deny' } }

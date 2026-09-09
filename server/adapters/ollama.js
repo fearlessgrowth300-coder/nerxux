@@ -39,17 +39,18 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const targetUrl = resolveTargetUrl(model)
   const agentTools = webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS
   const isRunpod = targetUrl.includes('11435')
-  // Measured: Vercel's proxy to this backend hard-kills external requests at
-  // ~120s (ROUTER_EXTERNAL_TARGET_ERROR, confirmed by direct testing — not a
-  // guess). Leave real margin under that for network/prompt-eval overhead.
-  const WALL_CLOCK_BUDGET_MS = 100000
-  // This box is CPU-only at ~5 tok/s (vs. 30-65 tok/s on the RunPod GPU), and
-  // this model tends to produce long hidden "thinking" before its actual
+  // Chat requests run as background jobs the client polls (routes/chat.js),
+  // so there's no proxy timeout to squeeze under any more. This budget is
+  // purely about not leaving someone staring at a spinner forever on the
+  // CPU-only box (~5 tok/s): keep going while the answer is genuinely
+  // unfinished, but cap the whole turn at a few minutes.
+  const WALL_CLOCK_BUDGET_MS = 6 * 60 * 1000
+  // This model tends to produce long hidden "thinking" before its actual
   // answer. num_predict bounds a single call so one runaway generation can't
-  // eat the whole budget; Turbo gets a much higher ceiling since it's fast
-  // enough to actually use it. Hitting the cap doesn't mean losing the rest
-  // of the answer — see the continuation loop below.
-  const numPredict = isRunpod ? 1800 : 450
+  // eat the whole budget; Turbo (30-65 tok/s) gets a much higher ceiling.
+  // Hitting the cap doesn't lose the rest of the answer — see the
+  // continuation loop below.
+  const numPredict = isRunpod ? 3000 : 900
   const system = composeSystem(systemPrompt, skills)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
