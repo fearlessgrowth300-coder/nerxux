@@ -202,7 +202,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     messages.push({ role: 'assistant', content: rawContent })
 
     for (const call of detectedCalls) {
-      const callKey = call.name + ' ' + JSON.stringify(call.args)
+      const callKey = call.name + ' ' + JSON.stringify(call.args)
       const times = (seenCalls.get(callKey) || 0) + 1
       seenCalls.set(callKey, times)
       if (times > 2) {
