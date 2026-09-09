@@ -93,9 +93,22 @@ export async function executeInSandbox({
   const netFlag = effectiveProfile === 'full' ? '' : '--unshare-net'
   const targetDir = workingDir || (projectPath ? '/workspace/project' : '/workspace')
 
-  const gitConfigSetup = gitToken
-    ? `git config --global url."https://${gitToken}@github.com/".insteadOf "https://github.com/"`
-    : ''
+  // Git auth must travel as ENVIRONMENT into bwrap: the host's ~/.gitconfig
+  // isn't mounted inside the sandbox, so a `git config --global` set out here
+  // was invisible in there and every push died with "could not read
+  // Username". GIT_CONFIG_* (git >= 2.31) injects the token rewrite directly.
+  // GIT_TERMINAL_PROMPT=0 makes a missing credential fail fast instead of
+  // hanging on a username prompt that nobody can answer.
+  const gitConfigSetup = [
+    'export GIT_TERMINAL_PROMPT=0',
+    ...(gitToken
+      ? [
+          'export GIT_CONFIG_COUNT=1',
+          `export GIT_CONFIG_KEY_0="url.https://x-access-token:${gitToken}@github.com/.insteadOf"`,
+          'export GIT_CONFIG_VALUE_0="https://github.com/"',
+        ]
+      : []),
+  ].join('\n')
 
   const bashScript = `
 set -e
