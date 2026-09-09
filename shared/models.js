@@ -138,7 +138,18 @@ export const CHAT_MODELS = [
   },
 ]
 
-export const getModelById = (id) => CHAT_MODELS.find((m) => m.id === id) || null
+// Live-fetched models (see server/lib/liveModels.js) use a composite id —
+// "provider/apiModel" — instead of a curated slug, so a model neither side
+// hardcoded still routes correctly: parse it directly rather than requiring
+// a static table entry. Plain slugs (no "/") still resolve from CHAT_MODELS.
+export const getModelById = (id) => {
+  if (typeof id === 'string' && id.includes('/')) {
+    const provider = id.slice(0, id.indexOf('/'))
+    const apiModel = id.slice(id.indexOf('/') + 1)
+    if (provider && apiModel) return { id, provider, apiModel, label: apiModel }
+  }
+  return CHAT_MODELS.find((m) => m.id === id) || null
+}
 
 // Model used for the lightweight intent router (Step 10).
 export const ROUTER_MODEL = 'claude-sonnet-4-6'

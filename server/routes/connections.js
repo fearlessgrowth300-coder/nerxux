@@ -7,6 +7,7 @@ import {
   isValidProvider,
   detectProvider,
 } from '../lib/vault.js'
+import { getAvailableModels } from '../lib/liveModels.js'
 
 const router = Router()
 
@@ -18,6 +19,19 @@ router.get('/', async (req, res, next) => {
   try {
     const connections = await listConnections(req.user.id)
     res.json({ connections })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/connections/models — chat models for the dropdown: the actual
+// current lineup from each connected provider's own API (cached 10 min),
+// falling back to a curated list for any provider whose live fetch fails.
+router.get('/models', async (req, res, next) => {
+  try {
+    const connections = await listConnections(req.user.id)
+    const models = await getAvailableModels(req.user.id, connections)
+    res.json({ models })
   } catch (err) {
     next(err)
   }
@@ -37,7 +51,7 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({
         error:
           "Couldn't recognize this API key. Supported: Claude (sk-ant-…), OpenAI (sk-…), " +
-          'Gemini (AIza…), Groq (gsk_…), ElevenLabs (sk_…). Choose the provider manually.',
+          'Gemini (AIza…/AQ…), Groq (gsk_…), ElevenLabs (sk_…). Choose the provider manually.',
         needsProvider: true,
       })
     }

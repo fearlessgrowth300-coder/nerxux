@@ -13,6 +13,18 @@ export async function getConnections() {
   }
 }
 
+// The chat model dropdown's options: whatever each connected provider's own
+// API actually lists right now (cached server-side ~10 min), falling back to
+// a curated list per provider if a live fetch fails.
+export async function getLiveModels() {
+  try {
+    const { data } = await api.get('/api/connections/models')
+    return data.models
+  } catch (err) {
+    throw apiError(err, 'Failed to load models')
+  }
+}
+
 // Paste any key — the server detects the provider. Pass `provider` to override
 // when detection fails (the thrown error carries `.needsProvider` in that case).
 export async function addConnection(apiKey, provider) {
