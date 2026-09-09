@@ -35,8 +35,9 @@ export async function renameConversation(id, title) {
 }
 
 export async function touchConversation(id) {
-  await supabase.from('conversations')
+  const { error } = await supabase.from('conversations')
     .update({ updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
 }
 
 export async function deleteConversation(id) {
@@ -59,16 +60,18 @@ export async function listMessages(conversationId) {
 // (approval prompts, typing) are not saved.
 export async function saveMessages(conversationId, msgs) {
   const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return
+  if (!user) throw new Error('Not authenticated')
+  const now = Date.now()
   const rows = (msgs || [])
     .filter((m) => m && m.role && m.role !== 'approval')
-    .map((m) => ({
+    .map((m, index) => ({
       conversation_id: conversationId,
       user_id: user.id,
       role: m.role,
       content: typeof m.content === 'string' ? m.content : '',
       model: m.model || null,
       data: m,
+      created_at: new Date(now + index).toISOString(),
     }))
   if (!rows.length) return
   const { error } = await supabase.from('conversation_messages').insert(rows)

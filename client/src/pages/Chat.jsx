@@ -20,6 +20,7 @@ import {
   deleteConversation,
 } from '../lib/conversations'
 import { getModelById } from '@shared/models'
+import { readWorkspace, writeWorkspace, editedHistory } from '../lib/chatWorkspace'
 
 const CHIPS = [
   { label: 'Code', Icon: FileIcon, text: 'Help me write code that ' },
@@ -62,18 +63,22 @@ export default function Chat() {
   const [conversations, setConversations] = useState([])
   const [historyOpen, setHistoryOpen] = useState(false)
   const convIdRef = useRef(null) // mirror of conversationId for async closures
+  const [ready, setReady] = useState(false)
+  const busyRef = useRef(false)
+  const [opening, setOpening] = useState(false)
 
   const scrollRef = useRef(null)
   const fileInputRef = useRef(null)
   const taRef = useRef(null)
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(storageKey)
-      setMessages(saved ? JSON.parse(saved) : [])
-    } catch {
-      setMessages([])
-    }
+    let cancelled = false
+    setReady(false)
+    const saved = readWorkspace(localStorage, storageKey)
+    setMessages(saved?.messages || [])
+    setInput(saved?.input || '')
+    setConversationId(saved?.conversationId || null)
+    convIdRef.current = saved?.conversationId || null
     try {
       const s = JSON.parse(localStorage.getItem(settingsKey) || '{}')
       if (s.modelA) setModelA(s.modelA)
@@ -90,27 +95,33 @@ export default function Chat() {
         setActiveConnectors(new Set(cs.filter((c) => c.status === 'connected').map((c) => c.id)))
       })
       .catch(() => {})
-    // Load persisted conversations; resume the most recent one (the second brain).
+    // Resume the explicit selection, including a new empty chat.
     listConversations()
       .then(async (convs) => {
+        if (cancelled) return
         setConversations(convs)
-        if (convs.length) {
-          const latest = convs[0]
-          const msgs = await listMessages(latest.id)
-          setConversationId(latest.id); convIdRef.current = latest.id
-          setMessages(msgs)
+        const selected = saved ? convs.find(c => c.id === saved.conversationId) : convs[0]
+        if (selected) {
+          const msgs = await listMessages(selected.id)
+          if (cancelled) return
+          setConversationId(selected.id); convIdRef.current = selected.id
+          // Keep a locally saved in-flight turn when reloading before the reply.
+          const ids = new Set(msgs.map(m => m.id))
+          setMessages([...msgs, ...(saved?.messages || []).filter(m => !ids.has(m.id))])
+        } else if (saved?.conversationId) {
+          setConversationId(null); convIdRef.current = null
         }
       })
       .catch(() => {}) // not signed in / table missing -> stay on local draft
+      .finally(() => { if (!cancelled) setReady(true) })
+    return () => { cancelled = true }
   }, [storageKey, settingsKey])
 
   useEffect(() => {
-    try {
-      if (getPrefs(user?.id).saveHistory === false) localStorage.removeItem(storageKey)
-      else localStorage.setItem(storageKey, JSON.stringify(messages))
-    } catch {}
+    if (ready) writeWorkspace(localStorage, storageKey,
+      { conversationId, messages, input }, getPrefs(user?.id).saveHistory !== false)
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, sending, storageKey, user?.id])
+  }, [messages, input, conversationId, ready, storageKey, user?.id])
 
   useEffect(() => {
     try {
@@ -121,32 +132,43 @@ export default function Chat() {
   const pipelineActive = Boolean(modelA && modelB && pipeline)
   const isEmpty = messages.length === 0 && !sending
 
-  async function handleSend() {
-    const text = input.trim()
-    if (!text || sending) return
+  async function handleSend(edit = null) {
+    const isEdit = Boolean(edit?.id)
+    const text = (isEdit ? edit.content : input).trim()
+    if (!text || busyRef.current || !ready || uploading) return
+    busyRef.current = true
     setError('')
-    const userMsg = { id: uuid(), role: 'user', content: text, attachments }
-    const history = [...messages, userMsg]
+    const history = isEdit ? editedHistory(messages, edit.id, text) :
+      [...messages, { id: uuid(), role: 'user', content: text, attachments }]
+    const userMsg = history[history.length - 1]
+    const turnAttachments = userMsg.attachments || []
     setMessages(history)
     setInput('')
     setSending(true)
 
     // Ensure a persistent conversation exists (titled from the first message).
-    let convId = convIdRef.current
+    let convId = isEdit ? null : convIdRef.current
+    let created = false
     if (!convId) {
+      setConversationId(null); convIdRef.current = null
       try {
         const conv = await createConversation(text)
+        created = true
         convId = conv.id; convIdRef.current = conv.id
         setConversationId(conv.id)
         setConversations((prev) => [conv, ...prev])
-      } catch { /* offline / not signed in: still works, just unsaved */ }
+      } catch { setError('Chat is saved on this device; cloud history is unavailable.') }
+    }
+    if (convId) {
+      try { await saveMessages(convId, created ? history : [userMsg]) }
+      catch { setError('Could not sync this message. A local copy is saved on this device.') }
     }
 
     // Split attachments: images/pdf go to the model; videos become context text.
-    const media = attachments
+    const media = turnAttachments
       .filter((a) => a.kind === 'image' || a.kind === 'pdf')
       .map((a) => ({ kind: a.kind, mimeType: a.mimeType, base64: a.base64 }))
-    const videoContext = attachments
+    const videoContext = turnAttachments
       .filter((a) => a.kind === 'video')
       .map((a) => analysisToContext(a.analysis))
       .join('\n\n') || null
@@ -167,13 +189,16 @@ export default function Chat() {
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
       setMessages((prev) => [...prev, ...toAdd])
       // Persist this turn to the second brain.
-      if (convId) saveMessages(convId, [userMsg, ...toAdd]).catch(() => {})
+      if (convId) {
+        try { await saveMessages(convId, toAdd) }
+        catch { setError('Could not sync the reply. A local copy is saved on this device.') }
+      }
     } catch (e) {
       setError(e.message)
       const errMsg = { id: uuid(), role: 'assistant', content: `⚠️ ${e.message}`, model: modelA, error: true }
       setMessages((prev) => [...prev, errMsg])
-      if (convId) saveMessages(convId, [userMsg, errMsg]).catch(() => {})
     } finally {
+      busyRef.current = false
       setSending(false)
     }
   }
@@ -200,14 +225,19 @@ export default function Chat() {
   // Resolve a tool-approval card: send the user's decisions, append the result,
   // and mark the card resolved.
   async function handleApproval(cardId, pendingId, decisions) {
+    if (busyRef.current || !ready) return
+    busyRef.current = true
     setMessages((prev) => prev.map((m) => (m.id === cardId ? { ...m, resolved: true } : m)))
     setSending(true)
     try {
       const replies = await resumeChat(pendingId, decisions)
-      setMessages((prev) => [...prev, ...replies.map((r) => ({ id: uuid(), ...r }))])
+      const toAdd = replies.map((r) => ({ id: uuid(), ...r }))
+      setMessages((prev) => [...prev, ...toAdd])
+      if (convIdRef.current) await saveMessages(convIdRef.current, toAdd)
     } catch (e) {
       setMessages((prev) => [...prev, { id: uuid(), role: 'assistant', content: `⚠️ ${e.message}`, error: true }])
     } finally {
+      busyRef.current = false
       setSending(false)
     }
   }
@@ -221,7 +251,9 @@ export default function Chat() {
   }
 
   function newChat() {
+    if (busyRef.current || !ready || uploading) return
     setMessages([])
+    setInput('')
     setError('')
     setAttachments([])
     setConversationId(null); convIdRef.current = null
@@ -229,19 +261,28 @@ export default function Chat() {
   }
 
   async function openConversation(id) {
+    if (busyRef.current || !ready || uploading) return
+    busyRef.current = true
+    setOpening(true)
     setHistoryOpen(false)
     setError('')
     try {
       const msgs = await listMessages(id)
       setConversationId(id); convIdRef.current = id
       setMessages(msgs)
+      setInput('')
+      setAttachments([])
     } catch (e) {
       setError(e.message)
+    } finally {
+      busyRef.current = false
+      setOpening(false)
     }
   }
 
   async function removeConversation(id, e) {
     e.stopPropagation()
+    if (busyRef.current || !ready || uploading) return
     try {
       await deleteConversation(id)
       setConversations((prev) => prev.filter((c) => c.id !== id))
@@ -253,7 +294,7 @@ export default function Chat() {
 
   const composer = (
     <Composer
-      input={input} setInput={setInput} onSend={handleSend} sending={sending}
+      input={input} setInput={setInput} onSend={() => handleSend()} sending={sending || !ready || opening}
       uploading={uploading} onUploadClick={() => fileInputRef.current?.click()}
       skills={skills} taRef={taRef} navigate={navigate}
       connectors={connectors} activeConnectors={activeConnectors} toggleConnector={toggleConnector}
@@ -278,7 +319,7 @@ export default function Chat() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={newChat} title="Start a new conversation"
+          <button onClick={newChat} disabled={sending || opening || !ready || uploading} title="Start a new conversation"
             className="flex items-center gap-1.5 rounded-lg border border-nexus-border px-3 py-1.5 text-sm text-gray-300 transition hover:bg-white/5">
             <PlusIcon className="h-4 w-4" /> New chat
           </button>
@@ -356,7 +397,7 @@ export default function Chat() {
                 m.role === 'video' ? <VideoAnalysisCard key={m.id} message={m} />
                   : m.role === 'routing' ? <RoutingCard key={m.id} routing={m.routing} />
                     : m.role === 'approval' ? <ApprovalCard key={m.id} message={m} onDecide={handleApproval} />
-                      : <Message key={m.id} message={m} sessionId={conversationId} />
+                      : <Message key={m.id} message={m} sessionId={conversationId} onEdit={(content) => handleSend({ id: m.id, content })} disabled={sending || opening || !ready || uploading} />
               )}
               {sending && (
                 <TypingIndicator label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
@@ -666,8 +707,10 @@ function ToolStepsCard({ steps = [] }) {
   )
 }
 
-function Message({ message, sessionId }) {
+function Message({ message, sessionId, onEdit, disabled }) {
   const isUser = message.role === 'user'
+  const [editing, setEditing] = useState(false)
+  const [editedText, setEditedText] = useState(message.content || '')
   return (
     <div className={isUser ? 'flex justify-end' : 'flex justify-start'}>
       <div className={isUser ? 'max-w-[85%]' : 'w-full max-w-[85%]'}>
@@ -689,7 +732,18 @@ function Message({ message, sessionId }) {
                     : <span key={a.id} className="rounded bg-white/15 px-2 py-1 text-xs">{a.filename}</span>)}
                 </div>
               )}
-              <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+              {editing ? (
+                <div className="space-y-2">
+                  <textarea aria-label="Edit message" autoFocus value={editedText} onChange={e => setEditedText(e.target.value)} rows={4}
+                    className="w-full min-w-[240px] rounded-lg bg-black/20 p-2 text-sm text-white outline-none" />
+                  <p className="text-xs text-white/80">Continues in a new chat. Your original stays in History.</p>
+                  <div className="flex justify-end gap-2">
+                    <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-xs">Cancel</button>
+                    <button type="button" disabled={disabled || !editedText.trim()} onClick={() => { setEditing(false); onEdit(editedText) }}
+                      className="rounded bg-white/20 px-2 py-1 text-xs disabled:opacity-40">Save &amp; resend</button>
+                  </div>
+                </div>
+              ) : <p className="whitespace-pre-wrap text-sm">{message.content}</p>}
             </>
           ) : (
             <>
@@ -699,6 +753,11 @@ function Message({ message, sessionId }) {
             </>
           )}
         </div>
+        {isUser && !editing && <div className="mt-1 flex justify-end gap-2 text-xs text-gray-400">
+          {message.edited && <span>Edited</span>}
+          <button type="button" disabled={disabled} onClick={() => { setEditedText(message.content); setEditing(true) }}
+            className="rounded px-2 py-1 hover:bg-white/10 hover:text-white disabled:opacity-40">Edit</button>
+        </div>}
       </div>
     </div>
   )
