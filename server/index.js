@@ -16,6 +16,7 @@ import trainingRouter from './routes/training.js'
 import sandboxRouter from './routes/sandbox.js'
 import computeRouter from './routes/compute.js'
 import { ensureModelServer } from './lib/modelServer.js'
+import { restoreComputeMode } from './lib/computeManager.js'
 
 // Never let a stray async error from a third-party transport (e.g. an MCP
 // socket erroring after close) take down the whole server — log and continue.
@@ -103,5 +104,8 @@ app.listen(PORT, () => {
   // without a separate terminal. Non-fatal if Python/deps are missing.
   ensureModelServer().catch((e) =>
     console.error('[nexus-ai] ensureModelServer error:', e.message)
+  )
+  restoreComputeMode().catch((e) =>
+    console.error('[nexus-ai] restoreComputeMode error:', e.message)
   )
 })

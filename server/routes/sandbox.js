@@ -1,8 +1,12 @@
 import { Router } from 'express'
+import { requireAuth } from '../lib/auth.js'
 import { executeInSandbox } from '../lib/sandbox.js'
 import { runOnPod } from '../lib/pod.js'
 
 const router = Router()
+
+// These routes execute commands locally or on the GPU pod.
+router.use(requireAuth)
 
 // POST /api/sandbox/run
 // Body: { code, language, sessionId, profile, stdin, projectPath, workingDir, gitToken, gitUser, gitEmail }

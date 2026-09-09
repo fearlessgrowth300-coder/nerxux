@@ -22,3 +22,6 @@ server/uploads/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# Runtime compute selection (persisted across backend restarts)
+server/.compute-state.json

@@ -1,6 +1,7 @@
 import { Router } from 'express'
+import { requireAuth } from '../lib/auth.js'
 import {
-  getComputeStatus,
+  getLiveComputeStatus,
   setHostingerIp,
   switchToAlwaysOn,
   switchToTurbo,
@@ -11,10 +12,14 @@ import {
 
 const router = Router()
 
+// Compute controls can start billable infrastructure and expose operational
+// details, so every route in this router requires an authenticated user.
+router.use(requireAuth)
+
 // GET /api/compute/status
 router.get('/status', async (req, res) => {
   try {
-    const status = getComputeStatus()
+    const status = await getLiveComputeStatus()
     res.json(status)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -75,7 +80,16 @@ router.post('/pod/stop', async (req, res) => {
 router.get('/pod', async (req, res) => {
   try {
     const details = await fetchPodDetails()
-    res.json(details)
+    res.json({
+      id: details.id,
+      name: details.name,
+      status: details.status,
+      cost: details.cost,
+      gpu: details.gpu
+        ? { id: details.gpu.id, count: details.gpu.count }
+        : null,
+      createdAt: details.createdAt,
+    })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

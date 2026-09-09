@@ -1,4 +1,5 @@
 import dotenv from 'dotenv'
+import fs from 'node:fs'
 import https from 'node:https'
 import http from 'node:http'
 import { spawn, exec } from 'node:child_process'
@@ -20,8 +21,25 @@ const getApiKey = () => process.env.RUNPOD_API_KEY || ''
 const getPodId = () => process.env.RUNPOD_POD_ID || 'rigdm6buq51pnu'
 let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://2.25.126.125:11434'
 const SSH_KEY_PATH = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_ed25519')
+const STATE_FILE = path.join(__dirname, '../.compute-state.json')
 
-let currentMode = 'always_on' // 'always_on' | 'turbo'
+function readPersistedMode() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
+    return saved.mode === 'turbo' ? 'turbo' : 'always_on'
+  } catch {
+    return 'always_on'
+  }
+}
+
+function setCurrentMode(mode) {
+  currentMode = mode === 'turbo' ? 'turbo' : 'always_on'
+  const temporary = `${STATE_FILE}.tmp`
+  fs.writeFileSync(temporary, JSON.stringify({ mode: currentMode }))
+  fs.renameSync(temporary, STATE_FILE)
+}
+
+let currentMode = readPersistedMode() // 'always_on' | 'turbo'
 let tunnelProcess = null
 let currentPodInfo = null
 
@@ -78,17 +96,38 @@ export function getComputeStatus() {
     details:
       currentMode === 'turbo'
         ? {
-            label: 'Turbo (Runpod RTX 3090)',
+            label: 'Turbo: RunPod model (RTX 3090)',
             speed: '30–65 tok/s',
             cost: '$0.50/hr',
             status: tunnelProcess ? 'ready' : 'connecting',
           }
         : {
-            label: 'Always On (KVM 8)',
+            label: 'Always On: Hostinger model (KVM 8)',
             speed: '2–5 tok/s',
             cost: '$26/mo flat',
             status: 'ready',
           },
+  }
+}
+
+// Include the provider's real pod state so the UI can distinguish the selected
+// route from a RunPod instance that is still running and accruing charges.
+export async function getLiveComputeStatus() {
+  const status = getComputeStatus()
+  try {
+    const pod = await fetchPodDetails()
+    return {
+      ...status,
+      runpodStatus: pod.status || 'UNKNOWN',
+      runpodRunning: pod.status === 'RUNNING',
+    }
+  } catch (err) {
+    return {
+      ...status,
+      runpodStatus: 'UNKNOWN',
+      runpodRunning: false,
+      runpodStatusError: err.message,
+    }
   }
 }
 
@@ -121,7 +160,7 @@ export async function stopRunpodPod(podId = getPodId()) {
     method: 'POST',
     body: { action: 'stop' },
   })
-  currentMode = 'always_on'
+  setCurrentMode('always_on')
   return result
 }
 
@@ -183,7 +222,7 @@ export async function startTunnel(host = '213.192.2.75', port = 40072) {
     if (ok) return true
     await new Promise((r) => setTimeout(r, 1500))
   }
-  return true // tunnel launched
+  return false
 }
 
 export function killTunnel() {
@@ -221,7 +260,10 @@ export async function switchToTurbo({ podId = getPodId() } = {}) {
 
   // 3. Establish tunnel to port 11435
   const tunnelOk = await startTunnel(sshHost, sshPort)
-  currentMode = 'turbo'
+  if (!tunnelOk) {
+    throw new Error('RunPod started, but its Ollama SSH tunnel did not become ready')
+  }
+  setCurrentMode('turbo')
 
   return {
     mode: 'turbo',
@@ -243,10 +285,23 @@ export async function switchToAlwaysOn({ stopPod = false } = {}) {
   } else {
     killTunnel()
   }
-  currentMode = 'always_on'
+  setCurrentMode('always_on')
   return {
     mode: 'always_on',
     url: HOSTINGER_OLLAMA_URL,
     message: 'Connected to KVM 8 (2–5 tok/s, 24/7 flat)',
   }
+}
+
+// PM2 restarts must not silently change which provider the user selected.
+// Rebuild the RunPod tunnel when Turbo was the persisted mode.
+export async function restoreComputeMode() {
+  if (currentMode !== 'turbo') return getComputeStatus()
+  try {
+    await switchToTurbo()
+  } catch (err) {
+    console.error('[nexus-ai] Could not restore Turbo mode:', err.message)
+    setCurrentMode('always_on')
+  }
+  return getComputeStatus()
 }

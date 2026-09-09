@@ -5,7 +5,7 @@ import { apiError } from '../lib/api'
 export default function ComputeBar() {
   const [status, setStatus] = useState({
     mode: 'always_on',
-    details: { label: 'Always On (KVM 8)', speed: '2–5 tok/s', cost: '$26/mo flat', status: 'ready' },
+    details: { label: 'Always On: Hostinger model (KVM 8)', speed: '2–5 tok/s', cost: '$26/mo flat', status: 'ready' },
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -69,7 +69,7 @@ export default function ComputeBar() {
         >
           <span>🐢</span>
           <span>Always On</span>
-          <span className="text-[10px] opacity-70 hidden sm:inline">(KVM 8)</span>
+          <span className="text-[10px] opacity-70 hidden sm:inline">(Hostinger model)</span>
           {!isTurbo && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>}
         </button>
 
@@ -88,7 +88,7 @@ export default function ComputeBar() {
         >
           <span>🚀</span>
           <span>Turbo</span>
-          <span className="text-[10px] opacity-70 hidden sm:inline">(RTX 3090)</span>
+          <span className="text-[10px] opacity-70 hidden sm:inline">(RunPod model)</span>
           {isTurbo && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>}
         </button>
 
@@ -127,6 +127,12 @@ export default function ComputeBar() {
                 · {status.details?.speed} · {status.details?.cost}
               </span>
             </span>
+
+            {!isTurbo && status.runpodRunning && (
+              <span className="text-amber-300">
+                RunPod is still running. Click Always On to stop its billing.
+              </span>
+            )}
 
             <button
               type="button"
