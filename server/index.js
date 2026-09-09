@@ -17,6 +17,7 @@ import sandboxRouter from './routes/sandbox.js'
 import computeRouter from './routes/compute.js'
 import { ensureModelServer } from './lib/modelServer.js'
 import { restoreComputeMode } from './lib/computeManager.js'
+import { saveGraveyard } from './lib/chatJobs.js'
 
 // Never let a stray async error from a third-party transport (e.g. an MCP
 // socket erroring after close) take down the whole server — log and continue.
@@ -26,6 +27,17 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (err) => {
   console.error('[nexus-ai] uncaughtException:', err)
 })
+
+// A deploy (pm2 restart) sends this, not a crash — but it still drops any
+// chat job mid-generation. Can't resume it, but can leave a note so the next
+// poll from that client gets an honest reason instead of a bare 404.
+function shutdown(signal) {
+  console.log(`[nexus-ai] ${signal} received, saving in-flight job state before exit`)
+  saveGraveyard()
+  process.exit(0)
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 const app = express()
 const PORT = process.env.PORT || 4000

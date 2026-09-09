@@ -1,4 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const GRAVEYARD_FILE = path.join(__dirname, '../.chat-jobs-graveyard.json')
 
 // In-memory store for async chat jobs (see POST /api/chat with `async: true`).
 // One PM2 process serves the app, so a Map is enough; jobs are short-lived.
@@ -16,6 +22,32 @@ export const STALE_MS = 30 * 60_000
 export const RESULT_TTL_MS = 10 * 60_000
 
 const jobs = new Map()
+
+// A deploy restarts the process; that wipes this whole in-memory Map, no
+// matter how gracefully we shut down — there's no way to actually resume a
+// generation across it. What we CAN fix: right now a client polling for a
+// job the old process was still running gets a bare "not found", which the
+// route turns into a generic "expired" — indistinguishable from a bogus id
+// or genuine staleness, and it looks like a bug in whatever the job was
+// doing (nothing to do with git/Supabase/etc). Record still-running jobs to
+// disk on shutdown and read them once on startup, so the very next poll
+// gets an honest, specific answer instead.
+const graveyard = new Map() // id -> userId
+// Exported for tests — production just calls it once at import time, below.
+export function loadGraveyard() {
+  try {
+    for (const { id, userId } of JSON.parse(fs.readFileSync(GRAVEYARD_FILE, 'utf8'))) graveyard.set(id, userId)
+    fs.unlinkSync(GRAVEYARD_FILE) // one-shot — only the immediately-next poll needs this
+  } catch {}
+}
+loadGraveyard()
+
+// Called on SIGTERM/SIGINT (see index.js) just before the process exits.
+export function saveGraveyard() {
+  const running = [...jobs.values()].filter((j) => j.status === 'running').map((j) => ({ id: j.id, userId: j.userId }))
+  if (!running.length) return
+  try { fs.writeFileSync(GRAVEYARD_FILE, JSON.stringify(running)) } catch {}
+}
 
 export function createJob(userId, controller, now = Date.now()) {
   const job = {
@@ -54,9 +86,19 @@ export function failJob(job, err, now = Date.now()) {
 // Never returns another user's job.
 export function touchJob(id, userId, now = Date.now()) {
   const job = jobs.get(id)
-  if (!job || job.userId !== userId) return null
-  job.lastSeen = now
-  return job
+  if (job) {
+    if (job.userId !== userId) return null
+    job.lastSeen = now
+    return job
+  }
+  if (graveyard.get(id) === userId) {
+    return {
+      status: 'error',
+      error: 'The server restarted while this was still working (a deploy). ' +
+        'Resend the same message in this chat to pick up where it left off — any files or commits it already made are still there.',
+    }
+  }
+  return null
 }
 
 // User pressed Stop: abort generation now. Returns false if there's no such
