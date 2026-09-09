@@ -126,6 +126,7 @@ export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
 ${gitToken ? `export GITHUB_TOKEN="${gitToken}"` : ''}
 ${gitConfigSetup}
 
+set +e
 bwrap \\
   --ro-bind /usr /usr \\
   --ro-bind /lib /lib \\
@@ -153,6 +154,18 @@ bwrap \\
   ${netFlag} \\
   --die-with-parent \\
   bash -c "${runCommand}"
+BWRAP_EXIT=$?
+set -e
+
+# Defense in depth: auth is meant to travel only as GIT_CONFIG_* env (applied
+# fresh on every call, so nothing needs to be written to disk to keep working)
+# — but a model can still run e.g. "git remote set-url ...TOKEN@..." on its
+# own, which git happily writes into .git/config. Scrub any such userinfo
+# unconditionally, regardless of what the command did or how it exited.
+find "$SESSION_DIR" -path '*/.git/config' -exec \\
+  sed -i -E 's#(https://)[^/@[:space:]]+@#\\1#g' {} + 2>/dev/null || true
+
+exit $BWRAP_EXIT
 `
 
   return new Promise((resolve) => {

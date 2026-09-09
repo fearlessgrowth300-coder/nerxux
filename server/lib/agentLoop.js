@@ -54,9 +54,11 @@ Available Tools:
 Git works in the sandbox (clone, commit, branch, diff all work with no setup).
 git push/pull against a PRIVATE repo is authenticated automatically when the
 user has pasted a GitHub token (ghp_... / github_pat_...) anywhere in this chat,
-or connected one under Connections — just use the normal https://github.com/...
-URL; never paste the token into the URL yourself. If a push still fails with
-an auth error, ask the user for a GitHub token — don't invent one.
+or connected one under Connections — this works transparently on EVERY git
+command, so never embed the token yourself: don't put it in a clone URL, don't
+run "git remote set-url" with it, don't write it to .netrc or any file. If a plain
+"https://github.com/..." URL fails to authenticate, that means no token is
+available — ask the user for one, don't work around it by embedding it.
 
 Credentials the user pastes in the chat (Supabase URL/keys, API keys, DB
 URLs) are meant to be used: put them in the project's .env / config files
