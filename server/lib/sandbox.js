@@ -5,6 +5,14 @@ import { spawn } from 'node:child_process'
 // - Network isolation: configurable profiles ('none' airgapped vs 'full' internet access).
 // - Session persistence: /workspace maps to /tmp/nexus_sandbox/<sessionId> across runs.
 // - Multi-language: Python, JavaScript, TypeScript, C++, Bash.
+//
+// The bash script below (which invokes `bwrap` directly) is the same on every
+// platform. Only the process that runs it differs: on the Windows dev machine
+// there's no native bwrap, so it's piped through WSL's Ubuntu; in production
+// (Linux) bash + bwrap run directly on the host. Don't reintroduce a bare
+// `spawn('wsl', ...)` here — it silently fails with ENOENT on every Linux
+// deployment (bwrap must be installed there: `apt install bubblewrap`).
+const IS_WINDOWS = process.platform === 'win32'
 
 const TIMEOUT_MS = 30000 // 30 second maximum execution timeout
 
@@ -136,9 +144,9 @@ bwrap \\
     let stderr = ''
     let timedOut = false
 
-    const proc = spawn('wsl', ['bash', '-s'], {
-      windowsHide: true,
-    })
+    const proc = IS_WINDOWS
+      ? spawn('wsl', ['bash', '-s'], { windowsHide: true })
+      : spawn('bash', ['-s'], { windowsHide: true })
 
     proc.stdin.write(bashScript)
     proc.stdin.end()
@@ -192,10 +200,15 @@ bwrap \\
 
     proc.on('error', (err) => {
       clearTimeout(timer)
+      const hint = err.code === 'ENOENT'
+        ? IS_WINDOWS
+          ? ' Install WSL (wsl --install) for the sandbox to run.'
+          : ' Install bubblewrap on this host: apt install bubblewrap (or apk/dnf equivalent).'
+        : ''
       resolve({
         ok: false,
         stdout,
-        stderr: err.message,
+        stderr: err.message + hint,
         exitCode: 1,
         durationMs: Date.now() - startTime,
         isolation: 'OS-level (Landlock/Bubblewrap namespaces)',

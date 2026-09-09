@@ -1,5 +1,6 @@
 import { executeInSandbox } from './sandbox.js'
 import { runOnPod } from './pod.js'
+import { getProviderKey } from './vault.js'
 
 // System instructions that inform models how to use their execution "hands"
 export const AGENT_SYSTEM_PROMPT = `
@@ -14,6 +15,12 @@ Available Tools:
 - run_code(language, code, profile, projectPath): Runs code in the isolated local sandbox.
 - execute_command(command, target, profile, projectPath): Runs a shell/git command. target can be "sandbox" (default) or "pod".
 - run_on_pod(command): Runs a shell command directly on the Runpod GPU pod.
+
+Git works in the sandbox (clone, commit, branch, diff all work with no setup).
+git push/pull against a PRIVATE repo needs the user's GitHub token connected
+under Connections (paste a personal access token, ghp_... or github_pat_...).
+If a push fails with an auth error, tell the user to connect GitHub there —
+don't guess at credentials or invent a token.
 
 Format:
 If your runtime supports function calling, use the function calling schema.
@@ -111,7 +118,7 @@ export const AGENT_TOOLS = [
 ]
 
 // Executes a single tool call against the local sandbox or Runpod pod
-export async function executeAgentTool({ name, args = {}, sessionId = 'default', projectPath = null }) {
+export async function executeAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null }) {
   const cleanSession = sessionId || 'default'
   const targetProj = args.projectPath || projectPath || null
 
@@ -122,6 +129,7 @@ export async function executeAgentTool({ name, args = {}, sessionId = 'default',
       sessionId: cleanSession,
       profile: args.profile || 'none',
       projectPath: targetProj,
+      ...(await gitCreds(userId)),
     })
   }
 
@@ -137,10 +145,26 @@ export async function executeAgentTool({ name, args = {}, sessionId = 'default',
       sessionId: cleanSession,
       profile: args.profile || 'full',
       projectPath: targetProj,
+      ...(await gitCreds(userId)),
     })
   }
 
   throw new Error(`Unknown agent tool: "${name}"`)
+}
+
+// Looks up the user's own GitHub token (paste one under Connections — it's
+// auto-detected by prefix, same vault as the model API keys) so `git clone`/
+// `git push` in the sandbox can authenticate. No token connected -> git still
+// works for anything that doesn't need auth (clone of a public repo, local
+// commits), it just can't push/pull anything private.
+async function gitCreds(userId) {
+  if (!userId) return {}
+  try {
+    const token = await getProviderKey(userId, 'github')
+    return token ? { gitToken: token } : {}
+  } catch {
+    return {}
+  }
 }
 
 // Parses freeform model text for JSON tool calls or "run: <command>" patterns

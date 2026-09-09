@@ -19,6 +19,7 @@ export function detectProvider(apiKey) {
   if (k.startsWith('AIza')) return 'gemini'          // Google Gemini
   if (k.startsWith('sk-')) return 'openai'           // OpenAI (incl. sk-proj-)
   if (k.startsWith('sk_')) return 'elevenlabs'       // ElevenLabs (underscore)
+  if (/^gh[pousr]_/.test(k) || k.startsWith('github_pat_')) return 'github' // GitHub PAT (classic or fine-grained)
   return null                                        // e.g. Higgsfield — pick manually
 }
 
@@ -31,6 +32,7 @@ const PLATFORM_ENV = {
   groq: 'GROQ_API_KEY',
   elevenlabs: 'ELEVENLABS_API_KEY',
   higgsfield: 'HIGGSFIELD_API_KEY',
+  github: 'GITHUB_TOKEN',
 }
 
 export function platformKey(provider) {

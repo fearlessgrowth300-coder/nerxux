@@ -33,8 +33,8 @@ function composeSystem(systemPrompt = '', skills = []) {
   return parts.join('\n\n')
 }
 
-// { prompt, history, systemPrompt, skills, model, sessionId, projectPath } -> normalized response with toolSteps
-export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath }) {
+// { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId } -> normalized response with toolSteps
+export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId }) {
   const targetUrl = resolveTargetUrl(model)
   const isRunpod = targetUrl.includes('11435')
   const system = composeSystem(systemPrompt, skills)
@@ -123,6 +123,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           args: call.args,
           sessionId,
           projectPath,
+          userId,
         })
 
         toolSteps.push({

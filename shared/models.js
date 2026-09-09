@@ -9,6 +9,10 @@ export const PROVIDERS = {
   groq: { id: 'groq', label: 'Groq (Llama 4 / DeepSeek / Qwen3 — fast)' },
   elevenlabs: { id: 'elevenlabs', label: 'ElevenLabs' },
   higgsfield: { id: 'higgsfield', label: 'Higgsfield' },
+  // Not a chat model — a credential the agent's sandbox tool uses to
+  // authenticate `git clone`/`git push`. Lives in the same encrypted vault
+  // and Connections UI as the model API keys for consistency.
+  github: { id: 'github', label: 'GitHub' },
 }
 
 // The user's own locally-trained model. It needs no API key (the server's nexus

@@ -26,6 +26,7 @@ const HINTS = {
   groq: 'console.groq.com → API Keys (free, 30 req/min)',
   elevenlabs: 'elevenlabs.io → Profile → API Key',
   higgsfield: 'higgsfield.ai → account settings',
+  github: 'github.com → Settings → Developer settings → Personal access tokens',
 }
 
 export default function Connections() {
@@ -386,7 +387,7 @@ function ApiKeyVault() {
             type="password"
             value={keyInput}
             onChange={setKeyInput}
-            placeholder="sk-ant-… · sk-… · AIza… · gsk_…"
+            placeholder="sk-ant-… · sk-… · AIza… · gsk_… · ghp_…"
           />
           {needsProvider && (
             <label className="block">
@@ -404,7 +405,7 @@ function ApiKeyVault() {
             </label>
           )}
           <p className="text-xs text-gray-600">
-            Where to get a key — Claude: {HINTS.claude} · OpenAI: {HINTS.openai} · Gemini: {HINTS.gemini} · Groq: {HINTS.groq}
+            Where to get a key — Claude: {HINTS.claude} · OpenAI: {HINTS.openai} · Gemini: {HINTS.gemini} · Groq: {HINTS.groq} · GitHub: {HINTS.github}
           </p>
         </div>
       </Modal>
