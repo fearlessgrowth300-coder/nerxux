@@ -95,6 +95,17 @@ api.interceptors.response.use(
         await clearInvalidSession()
       }
     }
+
+    // A refreshed token that is also rejected cannot be recovered without a
+    // new login. Clear it instead of leaving the app in a permanent 401 loop.
+    if (
+      err.response?.status === 401 &&
+      original?._retry &&
+      /(session|expired|token|authorization)/i.test(authMessage)
+    ) {
+      await clearInvalidSession()
+    }
+
     return Promise.reject(err)
   }
 )
