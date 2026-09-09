@@ -12,12 +12,35 @@ function composeSystem(systemPrompt = '', skills = []) {
 // Text generation via OpenAI Chat Completions, with image attachments and
 // tool calling (so GPT-4o can use connected MCP / native tools, e.g. Higgsfield
 // image/video generation).
-// { prompt, systemPrompt, skills, apiKey, model, attachments, tools?, onToolCall? }
-export async function run({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall }) {
+// { prompt, systemPrompt, skills, apiKey, model, attachments, tools?, onToolCall?, webSearch? }
+export async function run({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch }) {
   if (!apiKey) throw new Error('OpenAI API key is not connected')
 
   const client = new OpenAI({ apiKey })
   const system = composeSystem(systemPrompt, skills)
+  const hasCustomTools = Array.isArray(tools) && tools.length > 0 && typeof onToolCall === 'function'
+
+  // Native web search (Responses API — OpenAI runs the search itself, real
+  // pages with citations, no scraping needed). Only for the plain-chat case:
+  // the Responses API's tool-calling shape differs from Chat Completions, so
+  // this doesn't try to also drive the MCP tool loop below in the same call.
+  if (webSearch && !hasCustomTools && !(attachments || []).some((a) => a.kind === 'image')) {
+    const resp = await client.responses.create({
+      model: model || 'gpt-4o',
+      tools: [{ type: 'web_search_preview' }],
+      input: system ? `${system}\n\n${prompt}` : prompt,
+    })
+    const citations = (resp.output || [])
+      .flatMap((o) => o.content || [])
+      .flatMap((c) => c.annotations || [])
+      .filter((a) => a.type === 'url_citation' && a.url)
+    const unique = [...new Map(citations.map((c) => [c.url, c])).values()]
+    let content = resp.output_text || ''
+    if (unique.length) {
+      content += '\n\n**Sources:**\n' + unique.map((c) => `- [${c.title || c.url}](${c.url})`).join('\n')
+    }
+    return { ok: true, provider: 'openai', type: 'text', content, model: resp.model || model, usage: resp.usage }
+  }
 
   const images = (attachments || []).filter((a) => a.kind === 'image' && a.base64)
   const pdfs = (attachments || []).filter((a) => a.kind === 'pdf')
@@ -32,8 +55,7 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
   }
 
   // Convert Anthropic-style tool defs to OpenAI function tools.
-  const hasTools = Array.isArray(tools) && tools.length > 0 && typeof onToolCall === 'function'
-  const oaTools = hasTools
+  const oaTools = hasCustomTools
     ? tools.map((t) => ({
         type: 'function',
         function: { name: t.name, description: t.description || '', parameters: t.input_schema || { type: 'object', properties: {} } },

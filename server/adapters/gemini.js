@@ -84,19 +84,29 @@ export async function run(opts) {
   }
 }
 
-async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, attachments, tools, onToolCall }) {
+async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, attachments, tools, onToolCall, webSearch }) {
   if (!apiKey) throw new Error('Gemini API key is not connected')
 
   const genAI = new GoogleGenerativeAI(apiKey)
   const system = composeSystem(systemPrompt, skills)
   const hasTools = Array.isArray(tools) && tools.length > 0 && typeof onToolCall === 'function'
+  const modelName = model || 'gemini-1.5-pro'
+  // Native "grounding" — Gemini itself runs the search and cites real sources,
+  // no scraping/API key of ours needed. Skipped when MCP/native tools are also
+  // active: Gemini rejects mixing its built-in search tool with custom
+  // function-calling tools in the same request.
+  const searchTool = webSearch && !hasTools
+    ? (/^gemini-(2|3)/.test(modelName) ? { googleSearch: {} } : { googleSearchRetrieval: { dynamicRetrievalConfig: { mode: 'MODE_DYNAMIC', dynamicThreshold: 0.3 } } })
+    : null
 
   const generativeModel = genAI.getGenerativeModel({
-    model: model || 'gemini-1.5-pro',
+    model: modelName,
     ...(system ? { systemInstruction: system } : {}),
     ...(hasTools
       ? { tools: [{ functionDeclarations: tools.map((t) => ({ name: t.name, description: t.description || '', parameters: cleanSchema(t.input_schema) })) }] }
-      : {}),
+      : searchTool
+        ? { tools: [searchTool] }
+        : {}),
   })
 
   const parts = [{ text: prompt }]
@@ -109,7 +119,15 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
 
   if (!hasTools) {
     const result = await generativeModel.generateContent(parts)
-    return { ok: true, provider: 'gemini', type: 'text', content: result.response.text(), model: model || 'gemini-1.5-pro', usage: result.response.usageMetadata }
+    let content = result.response.text()
+    // Surface the real pages Gemini grounded on, so search answers are
+    // checkable instead of a bare claim.
+    const chunks = result.response.candidates?.[0]?.groundingMetadata?.groundingChunks || []
+    const sources = chunks.map((c) => c.web).filter((w) => w?.uri)
+    if (sources.length) {
+      content += '\n\n**Sources:**\n' + sources.map((s) => `- [${s.title || s.uri}](${s.uri})`).join('\n')
+    }
+    return { ok: true, provider: 'gemini', type: 'text', content, model: modelName, usage: result.response.usageMetadata }
   }
 
   // Tool-calling loop.

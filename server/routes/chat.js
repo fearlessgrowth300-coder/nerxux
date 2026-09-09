@@ -99,7 +99,7 @@ async function buildMcpToolset(userId, connectorIds) {
 
 // Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP
 // tools, attachments (images/PDF), and web search.
-async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mcp, attachments, webSearch, permissionFor, resume, sessionId, projectPath }) {
+async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mcp, attachments, webSearch, permissionFor, resume, sessionId, projectPath, signal }) {
   const info = getModelById(modelId)
   if (!info) throw new Error(`Unknown model: ${modelId}`)
   const result = await runTool(info.provider, userId, {
@@ -115,6 +115,7 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
     resume,
     sessionId,
     projectPath,
+    signal,
   })
   return { result, label: info.label }
 }
@@ -145,7 +146,13 @@ router.post('/', async (req, res, next) => {
 
     // MCP tools the user has connected + enabled (used by the Claude adapter).
     const mcp = await buildMcpToolset(req.user.id, connectorIds)
-    const extra = { attachments, webSearch, sessionId, projectPath }
+    // If the client gives up (closes the tab, retries, navigates away), stop
+    // generating instead of burning CPU on a request nobody's waiting for —
+    // this matters most for the CPU-bound local model, where a pile-up of
+    // abandoned retries is what turns one slow reply into everything timing out.
+    const controller = new AbortController()
+    req.on('close', () => controller.abort())
+    const extra = { attachments, webSearch, sessionId, projectPath, signal: controller.signal }
 
     // ---------- AUTO (intent router) MODE ----------
     if (auto) {
@@ -213,6 +220,7 @@ router.post('/', async (req, res, next) => {
           }
           messages.push(toMessage(result, { modelLabel: meta.label, stage: step.stage }))
         } catch (e) {
+          if (e.name === 'AbortError') return // client disconnected — nothing to respond to
           messages.push({
             role: 'assistant',
             error: true,
@@ -243,6 +251,7 @@ router.post('/', async (req, res, next) => {
         analysis = a.result.content
         messages.push(toMessage(a.result, { modelLabel: a.label, stage: 'analyst' }))
       } catch (e) {
+        if (e.name === 'AbortError') return
         const label = getModelById(modelA)?.label || modelA
         return res.json({
           messages: [{ role: 'assistant', error: true, modelLabel: label, content: `⚠️ ${label}: ${e.message}` }],
@@ -257,6 +266,7 @@ router.post('/', async (req, res, next) => {
         })
         messages.push(toMessage(b.result, { modelLabel: b.label, stage: 'executor' }))
       } catch (e) {
+        if (e.name === 'AbortError') return
         const label = getModelById(modelB)?.label || modelB
         messages.push({ role: 'assistant', error: true, modelLabel: label, stage: 'executor', content: `⚠️ ${label}: ${e.message}` })
       }
@@ -279,6 +289,7 @@ router.post('/', async (req, res, next) => {
       }
       messages.push(toMessage(r.result, { modelLabel: r.label }))
     } catch (e) {
+      if (e.name === 'AbortError') return
       const label = getModelById(modelA)?.label || modelA
       messages.push({ role: 'assistant', error: true, modelLabel: label, content: `⚠️ ${label}: ${e.message}` })
     }

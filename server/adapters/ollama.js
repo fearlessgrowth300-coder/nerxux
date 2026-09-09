@@ -33,10 +33,17 @@ function composeSystem(systemPrompt = '', skills = []) {
   return parts.join('\n\n')
 }
 
-// { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId } -> normalized response with toolSteps
-export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId }) {
+// { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal } -> normalized response with toolSteps
+export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal }) {
   const targetUrl = resolveTargetUrl(model)
   const isRunpod = targetUrl.includes('11435')
+  // This box is CPU-only at ~5 tok/s (vs. 30-65 tok/s on the RunPod GPU). This
+  // model in particular tends to produce very long hidden "thinking" before
+  // its actual answer — left uncapped it can run 500+ tokens (~100s+) on CPU,
+  // well past any reverse-proxy timeout, and pile up if the client gives up
+  // and retries. num_predict bounds the worst case; Turbo gets a much higher
+  // ceiling since it's fast enough to actually use it.
+  const numPredict = isRunpod ? 900 : 350
   const system = composeSystem(systemPrompt, skills)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
@@ -66,9 +73,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           messages,
           tools: AGENT_TOOLS,
           stream: false,
+          options: { num_predict: numPredict },
         }),
+        signal,
       })
     } catch (e) {
+      if (e.name === 'AbortError') throw e // client disconnected — stop, don't burn CPU on a dead request
       const cause = e.cause?.code || e.cause?.message || ''
       const targetDesc = isRunpod ? `Runpod GPU Ollama tunnel at ${targetUrl}` : `local Ollama at ${targetUrl}`
       throw new Error(
