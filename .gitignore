@@ -25,3 +25,7 @@ Thumbs.db
 
 # Runtime compute selection (persisted across backend restarts)
 server/.compute-state.json
+
+# Hostinger deploy scripts (contain live secrets — never commit)
+scripts/.env.deploy
+__pycache__/
