@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import { withDocuments } from '../lib/attachments.js'
 
 function composeSystem(systemPrompt = '', skills = []) {
   const parts = []
@@ -28,7 +29,7 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
     const resp = await client.responses.create({
       model: model || 'gpt-4o',
       tools: [{ type: 'web_search_preview' }],
-      input: system ? `${system}\n\n${prompt}` : prompt,
+      input: system ? `${system}\n\n${withDocuments(prompt, attachments)}` : withDocuments(prompt, attachments),
     })
     const citations = (resp.output || [])
       .flatMap((o) => o.content || [])
@@ -43,15 +44,17 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
   }
 
   const images = (attachments || []).filter((a) => a.kind === 'image' && a.base64)
-  const pdfs = (attachments || []).filter((a) => a.kind === 'pdf')
+  // PDFs: the client extracts their text, so the model reads the document
+  // rather than being told it can't.
+  const promptWithDocs = withDocuments(prompt, attachments)
   let userContent
   if (images.length) {
     userContent = [
-      { type: 'text', text: prompt + (pdfs.length ? `\n(Note: ${pdfs.length} PDF attachment(s) can't be read by this model.)` : '') },
+      { type: 'text', text: promptWithDocs },
       ...images.map((a) => ({ type: 'image_url', image_url: { url: `data:${a.mimeType};base64,${a.base64}` } })),
     ]
   } else {
-    userContent = prompt + (pdfs.length ? `\n(Note: PDF attachments aren't supported by this model.)` : '')
+    userContent = promptWithDocs
   }
 
   // Convert Anthropic-style tool defs to OpenAI function tools.

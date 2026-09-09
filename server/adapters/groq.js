@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import { WEB_SEARCH_TOOL, hasBraveKey, runWebSearchTool } from '../lib/webSearch.js'
+import { withDocuments } from '../lib/attachments.js'
 
 // Groq serves open models (Llama 4 Scout, Llama 3.3, DeepSeek R1 distill, Gemma2,
 // Qwen3, …) on its LPU hardware with very high-speed inference. Its API is
@@ -111,15 +112,16 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
   const apiModel = model || 'llama-3.3-70b-versatile'
 
   const images = (attachments || []).filter((a) => a.kind === 'image' && a.base64)
-  const pdfs = (attachments || []).filter((a) => a.kind === 'pdf')
+  // PDFs arrive with their text already extracted by the client.
+  const promptWithDocs = withDocuments(prompt, attachments)
   let userContent
   if (images.length) {
     userContent = [
-      { type: 'text', text: prompt + (pdfs.length ? `\n(Note: ${pdfs.length} PDF attachment(s) can't be read by this model.)` : '') },
+      { type: 'text', text: promptWithDocs },
       ...images.map((a) => ({ type: 'image_url', image_url: { url: `data:${a.mimeType};base64,${a.base64}` } })),
     ]
   } else {
-    userContent = prompt + (pdfs.length ? `\n(Note: PDF attachments aren't supported by this model.)` : '')
+    userContent = promptWithDocs
   }
 
   // Convert Anthropic-style tool defs to OpenAI/Groq function tools.

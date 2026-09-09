@@ -6,6 +6,7 @@
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
 import { getComputeStatus } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
+import { withDocuments, imageAttachments } from '../lib/attachments.js'
 
 // Some Ollama-fronting proxies return `error` as an object ({message, type})
 // instead of a plain string. `new Error(object)` stringifies it to the
@@ -34,8 +35,8 @@ function composeSystem(systemPrompt = '', skills = []) {
   return parts.join('\n\n')
 }
 
-// { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch } -> normalized response with toolSteps
-export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch }) {
+// { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments } -> normalized response with toolSteps
+export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments }) {
   const targetUrl = resolveTargetUrl(model)
   const agentTools = webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS
   const isRunpod = targetUrl.includes('11435')
@@ -63,6 +64,16 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     }
   } else if (prompt) {
     messages.push({ role: 'user', content: prompt })
+  }
+
+  // Attachments belong to the latest user turn: images ride along as Ollama
+  // `images` (the Qwen/vision models read them directly), PDFs as extracted
+  // text in the message body.
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+  if (lastUser && attachments?.length) {
+    lastUser.content = withDocuments(lastUser.content, attachments)
+    const images = imageAttachments(attachments).map((a) => a.base64)
+    if (images.length) lastUser.images = images
   }
 
   const toolSteps = []

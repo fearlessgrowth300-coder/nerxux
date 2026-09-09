@@ -9,6 +9,7 @@ import {
 } from '../components/icons'
 import { CHAT_MODELS } from '@shared/models'
 import Modal from '../components/Modal'
+import InstallApp from '../components/InstallApp'
 
 const SECTIONS = [
   { id: 'general', label: 'General', Icon: SettingsIcon },
@@ -61,7 +62,12 @@ export default function Settings() {
 
       {/* Panel */}
       <div className="min-w-0 flex-1 overflow-y-auto">
-        {active === 'general' && <General prefs={prefs} update={update} />}
+        {active === 'general' && (
+          <div className="space-y-8">
+            <General prefs={prefs} update={update} />
+            <Section title="Mobile & desktop app"><InstallApp /></Section>
+          </div>
+        )}
         {active === 'appearance' && <Appearance prefs={prefs} update={update} />}
         {active === 'account' && <Account />}
         {active === 'privacy' && <Privacy />}

@@ -11,6 +11,8 @@ import {
 import { useAuth } from '../context/AuthContext'
 import { sendChat, resumeChat } from '../lib/chat'
 import { uploadFile, analysisToContext } from '../lib/upload'
+import { extractPdfText } from '../lib/pdf'
+import { speak, stopSpeaking, speechOutputSupported } from '../lib/speech'
 import { buildSystemPrompt } from '../lib/systemPrompt'
 import { listSkills } from '../lib/skills'
 import { getConnectors } from '../lib/mcp'
@@ -50,6 +52,7 @@ export default function Chat() {
   const [pipeline, setPipeline] = useState(false)
   const [auto, setAuto] = useState(false)
   const [webSearch, setWebSearch] = useState(false)
+  const [voiceReplies, setVoiceReplies] = useState(false) // read replies aloud (hands-free)
 
   const [uploading, setUploading] = useState(false)
   const [attachments, setAttachments] = useState([]) // {id,kind,filename,mimeType,base64?,analysis?}
@@ -86,6 +89,7 @@ export default function Chat() {
       setPipeline(Boolean(s.pipeline))
       setAuto(Boolean(s.auto))
       setWebSearch(Boolean(s.webSearch))
+      setVoiceReplies(Boolean(s.voiceReplies))
     } catch {}
     listSkills().then(setSkills).catch(() => {})
     getConnectors()
@@ -125,9 +129,21 @@ export default function Chat() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(settingsKey, JSON.stringify({ modelA, modelB, pipeline, auto, webSearch }))
+      localStorage.setItem(settingsKey, JSON.stringify({ modelA, modelB, pipeline, auto, webSearch, voiceReplies }))
     } catch {}
-  }, [modelA, modelB, pipeline, auto, webSearch, settingsKey])
+  }, [modelA, modelB, pipeline, auto, webSearch, voiceReplies, settingsKey])
+
+  // Hands-free: read each new reply aloud, then hand the mic back so the user
+  // can answer without touching anything.
+  useEffect(() => {
+    if (!voiceReplies) { stopSpeaking(); return }
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== 'assistant' || last.error || last.spoken) return
+    last.spoken = true // mark in place so a re-render doesn't re-read it
+    speak(last.content).then((finished) => {
+      if (finished && voiceReplies) window.dispatchEvent(new Event('nexus:listen'))
+    })
+  }, [messages, voiceReplies])
 
   const pipelineActive = Boolean(modelA && modelB && pipeline)
   const isEmpty = messages.length === 0 && !sending
@@ -165,9 +181,11 @@ export default function Chat() {
     }
 
     // Split attachments: images/pdf go to the model; videos become context text.
+    // PDFs carry both the raw file (Claude/Gemini read it natively) and the
+    // extracted text (for every model that can't).
     const media = turnAttachments
       .filter((a) => a.kind === 'image' || a.kind === 'pdf')
-      .map((a) => ({ kind: a.kind, mimeType: a.mimeType, base64: a.base64 }))
+      .map((a) => ({ kind: a.kind, filename: a.filename, mimeType: a.mimeType, base64: a.base64, text: a.text }))
     const videoContext = turnAttachments
       .filter((a) => a.kind === 'video')
       .map((a) => analysisToContext(a.analysis))
@@ -211,6 +229,11 @@ export default function Chat() {
     setUploading(true)
     try {
       const a = await uploadFile(file)
+      // Pull the PDF's text out in the browser too, so models without native
+      // PDF reading (GPT-4o, Groq, the local models) still get its contents.
+      if (a.kind === 'pdf') {
+        try { a.text = await extractPdfText(file) } catch { a.text = '' }
+      }
       setAttachments((prev) => [...prev, { id: uuid(), ...a }])
       if (a.kind === 'video') {
         setMessages((prev) => [...prev, { id: uuid(), role: 'video', filename: a.filename, source: a.source, analysis: a.analysis }])
@@ -299,6 +322,7 @@ export default function Chat() {
       skills={skills} taRef={taRef} navigate={navigate}
       connectors={connectors} activeConnectors={activeConnectors} toggleConnector={toggleConnector}
       webSearch={webSearch} setWebSearch={setWebSearch}
+      voiceReplies={voiceReplies} setVoiceReplies={setVoiceReplies}
       attachments={attachments} removeAttachment={(id) => setAttachments((p) => p.filter((a) => a.id !== id))}
     />
   )
@@ -425,7 +449,8 @@ export default function Chat() {
 
 function Composer({
   input, setInput, onSend, sending, uploading, onUploadClick, skills, taRef, navigate,
-  connectors, activeConnectors, toggleConnector, webSearch, setWebSearch, attachments, removeAttachment,
+  connectors, activeConnectors, toggleConnector, webSearch, setWebSearch, voiceReplies, setVoiceReplies,
+  attachments, removeAttachment,
 }) {
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashQuery, setSlashQuery] = useState('')
@@ -446,6 +471,13 @@ function Composer({
     return () => document.removeEventListener('mousedown', onDoc)
   }, [])
 
+  // Hands-free loop: after a spoken reply finishes, Chat asks us to listen again.
+  useEffect(() => {
+    const onListen = () => { if (!recRef.current && !sending) toggleVoice({ autoSend: true }) }
+    window.addEventListener('nexus:listen', onListen)
+    return () => window.removeEventListener('nexus:listen', onListen)
+  })
+
   function onChange(e) {
     const v = e.target.value
     setInput(v)
@@ -461,7 +493,7 @@ function Composer({
     if (e.key === 'Enter' && !e.shiftKey && !slashOpen) { e.preventDefault(); onSend() }
   }
 
-  function toggleVoice() {
+  function toggleVoice({ autoSend = false } = {}) {
     if (!speechSupported) return
     if (listening) { recRef.current?.stop(); return }
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
@@ -476,7 +508,11 @@ function Composer({
       }
       setInput((prev) => (prev ? prev.replace(/\s*\[voice\].*$/, '') : '') + (finalText || interim ? ` ${finalText}${interim}`.trimStart() : ''))
     }
-    rec.onend = () => { setListening(false); recRef.current = null }
+    rec.onend = () => {
+      setListening(false); recRef.current = null
+      // In hands-free mode a finished utterance is the message — send it.
+      if (autoSend && finalText.trim()) setTimeout(onSend, 0)
+    }
     rec.onerror = () => { setListening(false); recRef.current = null }
     recRef.current = rec
     setListening(true)
@@ -537,6 +573,9 @@ function Composer({
                       <MenuRow Icon={ConnectionsIcon} label="Connectors" chevron onClick={() => setSubmenu('connectors')} />
                       <div className="my-1 border-t border-nexus-border" />
                       <MenuRow Icon={SearchIcon} label="Web search" toggle={webSearch} onClick={() => setWebSearch((v) => !v)} />
+                      {speechOutputSupported && (
+                        <MenuRow Icon={MicIcon} label="Voice replies (hands-free)" hint="reads answers aloud" toggle={voiceReplies} onClick={() => setVoiceReplies((v) => !v)} />
+                      )}
                     </>
                   )}
                   {submenu === 'skills' && (
@@ -587,6 +626,11 @@ function Composer({
             {webSearch && (
               <span className="flex items-center gap-1 rounded-full bg-nexus-accent/15 px-2 py-1 text-[11px] text-nexus-accent2">
                 <SearchIcon className="h-3 w-3" /> Web
+              </span>
+            )}
+            {voiceReplies && (
+              <span className="flex items-center gap-1 rounded-full bg-nexus-accent/15 px-2 py-1 text-[11px] text-nexus-accent2">
+                <MicIcon className="h-3 w-3" /> Voice
               </span>
             )}
           </div>
@@ -711,6 +755,12 @@ function Message({ message, sessionId, onEdit, disabled }) {
   const isUser = message.role === 'user'
   const [editing, setEditing] = useState(false)
   const [editedText, setEditedText] = useState(message.content || '')
+  const [speaking, setSpeaking] = useState(false)
+  function toggleSpeak() {
+    if (speaking) { stopSpeaking(); setSpeaking(false); return }
+    setSpeaking(true)
+    speak(message.content).finally(() => setSpeaking(false))
+  }
   return (
     <div className={isUser ? 'flex justify-end' : 'flex justify-start'}>
       <div className={isUser ? 'max-w-[85%]' : 'w-full max-w-[85%]'}>
@@ -753,6 +803,14 @@ function Message({ message, sessionId, onEdit, disabled }) {
             </>
           )}
         </div>
+        {!isUser && !message.error && speechOutputSupported && message.content && (
+          <div className="mt-1 flex gap-2 text-xs text-gray-400">
+            <button type="button" onClick={toggleSpeak} title={speaking ? 'Stop reading' : 'Read aloud'}
+              className={['rounded px-2 py-1 hover:bg-white/10 hover:text-white', speaking ? 'text-nexus-accent2' : ''].join(' ')}>
+              {speaking ? '■ Stop' : '🔊 Read aloud'}
+            </button>
+          </div>
+        )}
         {isUser && !editing && <div className="mt-1 flex justify-end gap-2 text-xs text-gray-400">
           {message.edited && <span>Edited</span>}
           <button type="button" disabled={disabled} onClick={() => { setEditedText(message.content); setEditing(true) }}

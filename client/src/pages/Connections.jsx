@@ -255,6 +255,13 @@ function ApiKeyVault() {
     setAdding(true)
   }
 
+  // Rotate a key: same modal, provider pinned, new key overwrites the old one
+  // in the vault (the old key is never shown — it's write-only).
+  function openReplace(provider) {
+    openAdd()
+    setOverride(provider)
+  }
+
   async function handleAdd() {
     const apiKey = keyInput.trim()
     if (!apiKey) return
@@ -331,20 +338,32 @@ function ApiKeyVault() {
                   </div>
                   <p className="mt-1 text-sm text-gray-400">
                     {c.connected ? (
-                      <>Key saved ending in <span className="font-mono text-gray-200">••••{c.last4}</span></>
+                      <>
+                        Key saved ending in <span className="font-mono text-gray-200">••••{c.last4}</span>
+                        {c.updated_at && <span className="text-gray-600"> · updated {new Date(c.updated_at).toLocaleDateString()}</span>}
+                      </>
                     ) : (
                       'Active via the platform key.'
                     )}
                   </p>
                 </div>
                 {c.connected && (
-                  <button
-                    onClick={() => handleDisconnect(c.provider)}
-                    disabled={busy === c.provider}
-                    className="shrink-0 rounded-lg px-3 py-1.5 text-sm text-red-400 transition hover:bg-red-500/10 disabled:opacity-50"
-                  >
-                    {busy === c.provider ? '…' : 'Remove'}
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      onClick={() => openReplace(c.provider)}
+                      disabled={busy === c.provider}
+                      className="rounded-lg px-3 py-1.5 text-sm text-gray-300 transition hover:bg-white/5 disabled:opacity-50"
+                    >
+                      Replace
+                    </button>
+                    <button
+                      onClick={() => handleDisconnect(c.provider)}
+                      disabled={busy === c.provider}
+                      className="rounded-lg px-3 py-1.5 text-sm text-red-400 transition hover:bg-red-500/10 disabled:opacity-50"
+                    >
+                      {busy === c.provider ? '…' : 'Remove'}
+                    </button>
+                  </div>
                 )}
               </div>
             </li>
@@ -376,9 +395,15 @@ function ApiKeyVault() {
         }
       >
         <div className="space-y-4">
-          <p className="text-sm text-gray-400">
-            Paste your key from any provider. Nexus recognizes it automatically and files it under the right one.
-          </p>
+          {override && !needsProvider ? (
+            <p className="rounded-lg bg-nexus-accent/10 px-3 py-2 text-sm text-nexus-accent2">
+              Replacing the <span className="font-medium">{PROVIDERS[override]?.label || override}</span> key — paste the new one and the old key is overwritten.
+            </p>
+          ) : (
+            <p className="text-sm text-gray-400">
+              Paste your key from any provider. Nexus recognizes it automatically and files it under the right one.
+            </p>
+          )}
           {addError && (
             <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{addError}</p>
           )}

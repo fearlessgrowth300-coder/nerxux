@@ -16,6 +16,8 @@ const stubs = {
   '../lib/mcp': 'export const getConnectors = async () => []',
   '../lib/systemPrompt': "export const buildSystemPrompt = async () => ''",
   '../lib/upload': "export const uploadFile = async () => ({}); export const analysisToContext = () => ''",
+  '../lib/pdf': 'export const extractPdfText = async () => ""',
+  '../lib/speech': 'export const speak = async () => false; export const stopSpeaking = () => {}; export const speechOutputSupported = false',
   '../lib/prefs': 'export const getPrefs = () => ({saveHistory:true})',
   '@shared/models': 'export const getModelById = () => ({label:"Test model"})',
   '../components/ModelControls': 'export default () => null',
@@ -41,7 +43,7 @@ function fixture(saved, {pending = false} = {}) {
     setItem: (k,v) => entries.set(k,v),
     removeItem: k => entries.delete(k),
   }
-  globalThis.window = {}
+  globalThis.window = new EventTarget() // Chat/Composer talk over window events (hands-free voice)
   globalThis.document = {addEventListener(){},removeEventListener(){}}
   const db = new Map([['first',[{id:'f1',role:'user',content:'First chat'}]], ['chosen',[userMessage,reply]]])
   let resolveReply
