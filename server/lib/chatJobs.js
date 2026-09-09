@@ -9,9 +9,10 @@ import { randomUUID } from 'node:crypto'
 //   for a reply nobody will read.
 // - Finished jobs are kept for RESULT_TTL_MS so a poll that raced the
 //   completion (or a retried poll) can still pick the result up, then dropped.
-// Generous: a phone that locks its screen stops polling for a while, and a
-// long build must survive that. Stop is explicit (cancelJob) anyway.
-export const STALE_MS = 5 * 60_000
+// Generous: a phone that locks its screen stops polling entirely, and a long
+// build must survive that — the client re-attaches to the job when it comes
+// back. Stop is explicit (cancelJob); this only catches truly abandoned jobs.
+export const STALE_MS = 30 * 60_000
 export const RESULT_TTL_MS = 10 * 60_000
 
 const jobs = new Map()

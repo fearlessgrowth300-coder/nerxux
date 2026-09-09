@@ -27,6 +27,14 @@ LOST, so many small calls always beat one giant one. Long-running commands
 (npm install, builds) are fine on their own; don't combine them with file
 writes.
 
+Paths: every tool call starts in /workspace (persistent for this chat). If
+the project lives in a subfolder (e.g. /workspace/repo after a git clone),
+use absolute paths or "cd /workspace/repo && ..." in EVERY command — files
+written to /workspace/app instead of /workspace/repo/app are in the wrong
+place. Pass code as plain source text in the "code" field, never as a JSON
+object. After writing files, verify with ls / cat before moving on, and
+never repeat a step you have already completed.
+
 Available Tools:
 - run_code(language, code, profile, projectPath): Runs code in the isolated local sandbox.
 - execute_command(command, target, profile, projectPath): Runs a shell/git command. target can be "sandbox" (default) or "pod".
@@ -150,8 +158,31 @@ export const WEB_SEARCH_AGENT_TOOL = {
   },
 }
 
+// The model sometimes hands us its whole tool-call object as the `code` /
+// `command` string ('{"language":"python","code":"..."}'). Run literally,
+// that's a Python dict expression: exit 0, no output, nothing written — and
+// the agent then loops forever believing it wrote the files. Unwrap it.
+export function normalizeToolArgs(name, args = {}) {
+  const out = { ...args }
+  for (const key of ['code', 'command']) {
+    const v = out[key]
+    if (typeof v !== 'string' || !/^\s*\{/.test(v)) continue
+    let inner = null
+    // Models also emit the object with real newlines inside the strings,
+    // which strict JSON rejects — retry with them escaped.
+    for (const candidate of [v, v.replace(/\r?\n/g, '\\n').replace(/\t/g, '\\t')]) {
+      try { inner = JSON.parse(candidate); break } catch {}
+    }
+    if (inner && typeof inner === 'object' && (typeof inner.code === 'string' || typeof inner.command === 'string')) {
+      Object.assign(out, inner, { [key]: inner[key] ?? inner.code ?? inner.command })
+    }
+  }
+  return out
+}
+
 // Executes a single tool call against the local sandbox or Runpod pod
-export async function executeAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null }) {
+export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = 'default', projectPath = null, userId = null }) {
+  const args = normalizeToolArgs(name, rawArgs)
   const cleanSession = sessionId || 'default'
 
   if (name === 'web_search') {

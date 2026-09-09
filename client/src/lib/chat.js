@@ -6,7 +6,49 @@ const POLL_MS = 2000
 // away for one of those, only for a run of them.
 const MAX_POLL_FAILURES = 5
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// Wait for the next poll — but if the page comes back from the background
+// (phone unlocked, tab re-focused) poll immediately instead of finishing a
+// throttled timer, so the answer shows the moment the user looks.
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms)
+    function onVisible() { if (document.visibilityState === 'visible') done() }
+    function done() { clearTimeout(timer); document.removeEventListener?.('visibilitychange', onVisible); resolve() }
+    document.addEventListener?.('visibilitychange', onVisible)
+  })
+}
+
+// Polls an existing job to completion. Used by sendChat, and by the chat page
+// to re-attach to a job that was in flight when the app was closed/reloaded.
+export async function pollJob(jobId, { signal, onProgress } = {}) {
+  const stop = () => api.post(`/api/chat/jobs/${jobId}/cancel`).catch(() => {})
+  signal?.addEventListener('abort', stop, { once: true })
+  try {
+    if (signal?.aborted) { stop(); throw new Error('Stopped.') }
+    let failures = 0
+    for (;;) {
+      await sleep(POLL_MS)
+      if (signal?.aborted) throw new Error('Stopped.')
+      let job
+      try {
+        job = (await api.get(`/api/chat/jobs/${jobId}`)).data
+        failures = 0
+      } catch (err) {
+        // 404 = the server really doesn't have it (restart/expiry) — that's final.
+        if (err?.response?.status === 404 || ++failures >= MAX_POLL_FAILURES) throw err
+        continue
+      }
+      if (job.status === 'running') { if (job.events?.length) onProgress?.(job.events); continue }
+      if (job.status === 'cancelled') throw new Error('Stopped.')
+      if (job.status !== 'done') throw new Error(job.error || 'Chat request failed')
+      return { messages: job.result.messages, routing: job.result.routing || null }
+    }
+  } catch (err) {
+    throw apiError(err, 'Chat request failed')
+  } finally {
+    signal?.removeEventListener('abort', stop)
+  }
+}
 
 // Sends the conversation + options to the backend.
 // Returns { messages: [...], routing?: {...} }.
@@ -33,10 +75,8 @@ export async function sendChat({
   projectPath,
   signal,
   onProgress,
+  onJob, // called with the job id as soon as the server hands one back
 }) {
-  let jobId = null
-  const stop = () => { if (jobId) api.post(`/api/chat/jobs/${jobId}/cancel`).catch(() => {}) }
-  signal?.addEventListener('abort', stop, { once: true })
   try {
     const { data } = await api.post('/api/chat', {
       history,
@@ -55,31 +95,10 @@ export async function sendChat({
     })
     // An older backend answers inline instead of handing back a job.
     if (!data.jobId) return { messages: data.messages, routing: data.routing || null }
-    jobId = data.jobId
-    if (signal?.aborted) { stop(); throw new Error('Stopped.') }
-
-    let failures = 0
-    for (;;) {
-      await sleep(POLL_MS)
-      if (signal?.aborted) throw new Error('Stopped.')
-      let job
-      try {
-        job = (await api.get(`/api/chat/jobs/${jobId}`)).data
-        failures = 0
-      } catch (err) {
-        // 404 = the server really doesn't have it (restart/expiry) — that's final.
-        if (err?.response?.status === 404 || ++failures >= MAX_POLL_FAILURES) throw err
-        continue
-      }
-      if (job.status === 'running') { if (job.events?.length) onProgress?.(job.events); continue }
-      if (job.status === 'cancelled') throw new Error('Stopped.')
-      if (job.status !== 'done') throw new Error(job.error || 'Chat request failed')
-      return { messages: job.result.messages, routing: job.result.routing || null }
-    }
+    onJob?.(data.jobId)
+    return await pollJob(data.jobId, { signal, onProgress })
   } catch (err) {
     throw apiError(err, 'Chat request failed')
-  } finally {
-    signal?.removeEventListener('abort', stop)
   }
 }
 

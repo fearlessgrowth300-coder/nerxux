@@ -90,6 +90,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const MAX_STEPS = 60
   let autoContinues = 0
   let finalContent = ''
+  // Loop guards: a model that re-issues the exact same tool call, or keeps
+  // ending on the exact same "Now the core libraries:" text, is stuck — no
+  // amount of "yes, continue" fixes that. Refuse to re-run duplicates and
+  // stop nudging once the text repeats.
+  const seenCalls = new Map()
+  const seenTexts = new Set()
   const requestStart = Date.now()
 
   for (let step = 0; step < MAX_STEPS; step++) {
@@ -155,6 +161,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       // ("Should I build it now?") or announced a next step without doing it.
       // The user already asked for the task — answer for them and keep going,
       // a bounded number of times, so the job doesn't stall waiting on a "yes".
+      const textKey = rawContent.trim().slice(0, 300)
+      if (toolSteps.length && looksUnfinished(rawContent) && seenTexts.has(textKey)) {
+        finalContent += '\n\n*(stopped — the agent kept repeating this same step without making progress. Check what was actually written and tell it exactly what to do next.)*'
+        break
+      }
+      seenTexts.add(textKey)
       if (toolSteps.length && hasBudget && autoContinues < 4 && looksUnfinished(rawContent)) {
         autoContinues++
         onProgress({ type: 'text', text: rawContent })
@@ -190,6 +202,16 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     messages.push({ role: 'assistant', content: rawContent })
 
     for (const call of detectedCalls) {
+      const callKey = call.name + ' ' + JSON.stringify(call.args)
+      const times = (seenCalls.get(callKey) || 0) + 1
+      seenCalls.set(callKey, times)
+      if (times > 2) {
+        const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: 'Refused: this exact call has already run twice in this turn.', target: 'loop-guard' }
+        toolSteps.push(step)
+        onProgress({ type: 'tool', ...step })
+        messages.push({ role: 'user', content: `[Tool Execution Refused: ${call.name}]\nYou already ran this exact call twice — it will not be run again. It did not achieve what you expected. Check the actual state with ls/cat, then do the NEXT step differently.` })
+        continue
+      }
       try {
         const result = await executeAgentTool({
           name: call.name,

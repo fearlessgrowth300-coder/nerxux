@@ -9,7 +9,7 @@ import {
   ConnectionsIcon, InstructionsIcon, SendIcon, SparkIcon, CloseIcon,
 } from '../components/icons'
 import { useAuth } from '../context/AuthContext'
-import { sendChat, resumeChat } from '../lib/chat'
+import { sendChat, resumeChat, pollJob } from '../lib/chat'
 import { uploadFile, analysisToContext } from '../lib/upload'
 import { extractPdfText } from '../lib/pdf'
 import { speak, stopSpeaking, speechOutputSupported } from '../lib/speech'
@@ -75,6 +75,43 @@ export default function Chat() {
   const taRef = useRef(null)
   const abortRef = useRef(null) // aborts the in-flight turn (Stop button)
   const [liveEvents, setLiveEvents] = useState([]) // what the agent is doing right now
+  // The server job for the reply in flight — persisted so that closing or
+  // reloading the app (or a phone suspending the page) re-attaches to it
+  // instead of losing a long build's result.
+  const [pendingJob, setPendingJob] = useState(null)
+
+  async function resumePendingJob(job) {
+    if (busyRef.current) return
+    busyRef.current = true
+    setSending(true)
+    setError('')
+    const controller = new AbortController()
+    abortRef.current = controller
+    setLiveEvents([])
+    try {
+      const { messages: replies, routing } = await pollJob(job.jobId, { signal: controller.signal, onProgress: setLiveEvents })
+      const toAdd = []
+      if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
+      for (const r of replies) toAdd.push({ id: uuid(), ...r })
+      setMessages((prev) => [...prev, ...toAdd])
+      if (job.conversationId) {
+        try { await saveMessages(job.conversationId, toAdd) }
+        catch { setError('Could not sync the reply. A local copy is saved on this device.') }
+      }
+    } catch (e) {
+      if (!controller.signal.aborted) setError(e.message)
+      setMessages((prev) => [...prev, {
+        id: uuid(), role: 'assistant', model: job.model,
+        content: controller.signal.aborted ? '⏹ Stopped.' : `⚠️ ${e.message}`, error: !controller.signal.aborted,
+      }])
+    } finally {
+      setPendingJob(null)
+      abortRef.current = null
+      setLiveEvents([])
+      busyRef.current = false
+      setSending(false)
+    }
+  }
 
   function stopGeneration() {
     abortRef.current?.abort()
@@ -123,15 +160,20 @@ export default function Chat() {
         }
       })
       .catch(() => {}) // not signed in / table missing -> stay on local draft
-      .finally(() => { if (!cancelled) setReady(true) })
+      .finally(() => {
+        if (cancelled) return
+        setReady(true)
+        // A reply was still generating when the app was last closed — pick it up.
+        if (saved?.pendingJob?.jobId) { setPendingJob(saved.pendingJob); resumePendingJob(saved.pendingJob) }
+      })
     return () => { cancelled = true }
   }, [storageKey, settingsKey])
 
   useEffect(() => {
     if (ready) writeWorkspace(localStorage, storageKey,
-      { conversationId, messages, input }, getPrefs(user?.id).saveHistory !== false)
+      { conversationId, messages, input, pendingJob }, getPrefs(user?.id).saveHistory !== false)
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, input, conversationId, ready, storageKey, user?.id])
+  }, [messages, input, conversationId, pendingJob, ready, storageKey, user?.id])
 
   useEffect(() => {
     try {
@@ -212,7 +254,9 @@ export default function Chat() {
         sessionId: convId,
         signal: controller.signal,
         onProgress: setLiveEvents,
+        onJob: (jobId) => setPendingJob({ jobId, conversationId: convId, model: modelA }),
       })
+      setPendingJob(null)
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
@@ -237,6 +281,7 @@ export default function Chat() {
         setMessages((prev) => [...prev, errMsg])
       }
     } finally {
+      setPendingJob(null)
       abortRef.current = null
       setLiveEvents([])
       busyRef.current = false
@@ -956,14 +1001,26 @@ function WorkingCard({ label, events = [] }) {
   const tools = events.filter((e) => e.type === 'tool')
   const lastText = [...events].reverse().find((e) => e.type === 'text')?.text
   const recent = events.slice(-8)
+  // A live clock so a long turn never looks frozen: total elapsed, and how
+  // long since the agent last did something visible.
+  const startRef = useRef(Date.now())
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t) }, [])
+  const lastAt = events.length ? events[events.length - 1].at || now : startRef.current
+  const fmt = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s` }
+  const idle = now - lastAt
   return (
     <div className="flex justify-start">
       <div className="w-full min-w-0 max-w-[85%]">
         <div className="mb-1"><span className="rounded-full bg-nexus-accent/15 px-2 py-0.5 text-[10px] font-medium text-nexus-accent2">{label}</span></div>
         <div className="min-w-0 rounded-2xl border border-nexus-border bg-nexus-panel px-4 py-3 text-sm">
-          <div className="flex items-center gap-2 text-gray-300">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-gray-300">
             <span className="inline-flex items-center gap-1"><Dot delay="0ms" /><Dot delay="150ms" /><Dot delay="300ms" /></span>
             <span>{tools.length ? `Working — ${tools.length} tool action${tools.length === 1 ? '' : 's'} so far` : 'Thinking…'}</span>
+            <span className="text-xs text-gray-500">· {fmt(now - startRef.current)} elapsed</span>
+            <span className={['text-xs', idle > 90000 ? 'text-amber-400' : 'text-gray-500'].join(' ')}>
+              · {idle < 3000 ? 'active now' : `model generating for ${fmt(idle)}`}
+            </span>
           </div>
           {recent.length > 0 && (
             <div className="mt-2 space-y-1 border-t border-nexus-border/50 pt-2 font-mono text-[11px]">
