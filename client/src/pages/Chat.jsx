@@ -432,14 +432,22 @@ export default function Chat() {
             </button>
             {historyOpen && (
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setHistoryOpen(false)} />
-                {/* w-80 anchored right overflows the left edge of a phone
-                    screen — the clipped-off part is why titles looked cut in
-                    half and short ones looked blank. Cap to the viewport. */}
-                <div className="absolute right-0 z-40 mt-2 max-h-96 w-80 max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
-                  <p className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">
-                    Saved conversations
-                  </p>
+                <div className="fixed inset-0 z-40 bg-black/50" onClick={() => setHistoryOpen(false)} />
+                {/* Anchoring to the button pushed the panel off the left edge:
+                    the button sits near the left, so a right-aligned w-80 panel
+                    grows off-screen and you only see the tail of each title.
+                    max-width can't fix that — only the position can. So the
+                    panel is anchored to the viewport, not to the button. */}
+                <div className="fixed left-1/2 top-20 z-50 max-h-[70vh] w-[92vw] max-w-md -translate-x-1/2 overflow-y-auto rounded-xl border border-nexus-border bg-nexus-panel p-1 shadow-2xl">
+                  <div className="flex items-center justify-between px-3 py-1.5">
+                    <p className="text-[10px] uppercase tracking-wide text-gray-500">
+                      Saved conversations
+                    </p>
+                    <button onClick={() => setHistoryOpen(false)}
+                      className="text-gray-500 transition hover:text-gray-200" title="Close">
+                      <CloseIcon className="h-4 w-4" />
+                    </button>
+                  </div>
                   {conversations.length === 0 && (
                     <p className="px-3 py-3 text-xs text-gray-500">No saved chats yet — start chatting and they'll appear here.</p>
                   )}
