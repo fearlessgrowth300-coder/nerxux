@@ -1,6 +1,7 @@
 import { executeInSandbox } from './sandbox.js'
 import { runOnPod } from './pod.js'
 import { getProviderKey } from './vault.js'
+import { runWebSearchTool } from './webSearch.js'
 
 // System instructions that inform models how to use their execution "hands"
 export const AGENT_SYSTEM_PROMPT = `
@@ -15,6 +16,7 @@ Available Tools:
 - run_code(language, code, profile, projectPath): Runs code in the isolated local sandbox.
 - execute_command(command, target, profile, projectPath): Runs a shell/git command. target can be "sandbox" (default) or "pod".
 - run_on_pod(command): Runs a shell command directly on the Runpod GPU pod.
+- web_search(query): Searches the live web and returns real results (only offered when the user has web search turned on).
 
 Git works in the sandbox (clone, commit, branch, diff all work with no setup).
 git push/pull against a PRIVATE repo needs the user's GitHub token connected
@@ -117,9 +119,33 @@ export const AGENT_TOOLS = [
   },
 ]
 
+// Only added to the request's tool list when the user's Web toggle is on
+// (see ollama.js) — kept separate from AGENT_TOOLS so it's never offered
+// when search is off.
+export const WEB_SEARCH_AGENT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'web_search',
+    description: 'Search the live web for current information and return real results (title, URL, snippet).',
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'The search query' } },
+      required: ['query'],
+    },
+  },
+}
+
 // Executes a single tool call against the local sandbox or Runpod pod
 export async function executeAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null }) {
   const cleanSession = sessionId || 'default'
+
+  if (name === 'web_search') {
+    // Reshaped to match the sandbox result shape ({stdout,...}) that the
+    // caller (ollama.js) already knows how to turn into a tool observation.
+    const start = Date.now()
+    const { content } = await runWebSearchTool({ query: args.query })
+    return { ok: true, stdout: content, stderr: '', exitCode: 0, durationMs: Date.now() - start, target: 'web_search' }
+  }
   const targetProj = args.projectPath || projectPath || null
 
   if (name === 'run_code') {
@@ -199,6 +225,8 @@ export function extractToolCallsFromText(text) {
               projectPath: parsed.projectPath,
             },
           })
+        } else if (parsed.tool === 'web_search') {
+          calls.push({ name: 'web_search', args: { query: parsed.query || parsed.q || '' } })
         }
       }
     } catch {}

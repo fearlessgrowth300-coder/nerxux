@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import { WEB_SEARCH_TOOL, hasBraveKey, runWebSearchTool } from '../lib/webSearch.js'
 
 // Groq serves open models (Llama 4 Scout, Llama 3.3, DeepSeek R1 distill, Gemma2,
 // Qwen3, …) on its LPU hardware with very high-speed inference. Its API is
@@ -93,7 +94,7 @@ function friendlyError(err) {
 
 // Text + vision generation via Groq (OpenAI-compatible), with image attachments
 // and tool calling. Only multimodal models (e.g. Llama 4 Scout) accept images.
-// { prompt, systemPrompt, skills, apiKey, model, attachments, tools?, onToolCall? }
+// { prompt, systemPrompt, skills, apiKey, model, attachments, tools?, onToolCall?, webSearch? }
 export async function run(opts) {
   try {
     return await runInner(opts)
@@ -102,7 +103,7 @@ export async function run(opts) {
   }
 }
 
-async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall }) {
+async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch }) {
   if (!apiKey) throw new Error('Groq API key is not connected')
 
   const client = new OpenAI({ apiKey, baseURL: GROQ_BASE_URL })
@@ -123,7 +124,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
 
   // Convert Anthropic-style tool defs to OpenAI/Groq function tools.
   const hasTools = Array.isArray(tools) && tools.length > 0 && typeof onToolCall === 'function'
-  const oaTools = hasTools
+  const mappedTools = hasTools
     ? tools.map((t) => ({
         type: 'function',
         function: {
@@ -132,7 +133,17 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
           parameters: cleanSchema(t.input_schema || { type: 'object', properties: {} }),
         },
       }))
-    : undefined
+    : []
+  // Groq has no search of its own — give it Brave Search as a regular
+  // function tool when the user has Web on and a key is configured.
+  const useWebSearch = webSearch && hasBraveKey()
+  if (useWebSearch) {
+    mappedTools.push({
+      type: 'function',
+      function: { name: WEB_SEARCH_TOOL.name, description: WEB_SEARCH_TOOL.description, parameters: cleanSchema(WEB_SEARCH_TOOL.input_schema) },
+    })
+  }
+  const oaTools = mappedTools.length ? mappedTools : undefined
 
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
@@ -157,7 +168,9 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
       try { args = JSON.parse(tc.function.arguments || '{}') } catch {}
       let content = ''
       try {
-        let res = await onToolCall(tc.function.name, args)
+        let res = tc.function.name === 'web_search'
+          ? await runWebSearchTool(args)
+          : await onToolCall(tc.function.name, args)
         if (typeof res === 'string') res = { content: res }
         content = res.content
       } catch (e) {

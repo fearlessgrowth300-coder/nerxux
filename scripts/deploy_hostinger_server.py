@@ -1,3 +1,4 @@
+import os
 import sys
 import paramiko
 from _deploy_env import require
@@ -13,6 +14,7 @@ env = require(
     "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "VAULT_ENCRYPTION_KEY",
     "RUNPOD_API_KEY", "RUNPOD_POD_ID", "HOSTINGER_OLLAMA_URL", "CLIENT_ORIGINS",
 )
+brave_key = os.environ.get('BRAVE_SEARCH_API_KEY', '')
 
 ENV_CONTENT = f"""PORT=4000
 CLIENT_ORIGINS={env['CLIENT_ORIGINS']}
@@ -25,6 +27,7 @@ VAULT_ENCRYPTION_KEY={env['VAULT_ENCRYPTION_KEY']}
 RUNPOD_API_KEY={env['RUNPOD_API_KEY']}
 RUNPOD_POD_ID={env['RUNPOD_POD_ID']}
 HOSTINGER_OLLAMA_URL={env['HOSTINGER_OLLAMA_URL']}
+BRAVE_SEARCH_API_KEY={brave_key}
 """
 
 def run(ssh, cmd):

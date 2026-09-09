@@ -3,8 +3,9 @@
 // exposes an HTTP API on :11434; no API key is needed (it's local).
 // Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
-import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
+import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
 import { getComputeStatus } from '../lib/computeManager.js'
+import { hasBraveKey } from '../lib/webSearch.js'
 
 // Some Ollama-fronting proxies return `error` as an object ({message, type})
 // instead of a plain string. `new Error(object)` stringifies it to the
@@ -33,9 +34,10 @@ function composeSystem(systemPrompt = '', skills = []) {
   return parts.join('\n\n')
 }
 
-// { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal } -> normalized response with toolSteps
-export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal }) {
+// { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch } -> normalized response with toolSteps
+export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch }) {
   const targetUrl = resolveTargetUrl(model)
+  const agentTools = webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS
   const isRunpod = targetUrl.includes('11435')
   // This box is CPU-only at ~5 tok/s (vs. 30-65 tok/s on the RunPod GPU). This
   // model in particular tends to produce very long hidden "thinking" before
@@ -71,7 +73,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         body: JSON.stringify({
           model: model || 'nexus-mine',
           messages,
-          tools: AGENT_TOOLS,
+          tools: agentTools,
           stream: false,
           options: { num_predict: numPredict },
         }),
