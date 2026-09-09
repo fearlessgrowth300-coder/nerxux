@@ -1,6 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeToolArgs } from '../lib/agentLoop.js'
+import { normalizeToolArgs, harvestGithubToken } from '../lib/agentLoop.js'
+
+test('a GitHub token pasted in the chat is picked up (latest wins), nothing else matches', () => {
+  const chat = 'here is the token ghp_' + 'A'.repeat(36) + ' and it for free\nlater: github_pat_' + 'B'.repeat(40) + ' use this one'
+  assert.equal(harvestGithubToken(chat), 'github_pat_' + 'B'.repeat(40))
+  assert.equal(harvestGithubToken('supabase key eyJhbGciOi... and postgresql://postgres:pw@db'), null)
+  assert.equal(harvestGithubToken(''), null)
+})
 import { looksUnfinished } from '../adapters/ollama.js'
 
 test('a tool-call object passed as the code string is unwrapped (escaped newlines)', () => {

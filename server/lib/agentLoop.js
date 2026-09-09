@@ -42,10 +42,16 @@ Available Tools:
 - web_search(query): Searches the live web and returns real results (only offered when the user has web search turned on).
 
 Git works in the sandbox (clone, commit, branch, diff all work with no setup).
-git push/pull against a PRIVATE repo needs the user's GitHub token connected
-under Connections (paste a personal access token, ghp_... or github_pat_...).
-If a push fails with an auth error, tell the user to connect GitHub there —
-don't guess at credentials or invent a token.
+git push/pull against a PRIVATE repo is authenticated automatically when the
+user has pasted a GitHub token (ghp_... / github_pat_...) anywhere in this chat,
+or connected one under Connections — just use the normal https://github.com/...
+URL; never paste the token into the URL yourself. If a push still fails with
+an auth error, ask the user for a GitHub token — don't invent one.
+
+Credentials the user pastes in the chat (Supabase URL/keys, API keys, DB
+URLs) are meant to be used: put them in the project's .env / config files
+exactly as given, and use them. Never ask the user to re-send something
+that's already in the conversation.
 
 Format:
 If your runtime supports function calling, use the function calling schema.
@@ -180,8 +186,17 @@ export function normalizeToolArgs(name, args = {}) {
   return out
 }
 
-// Executes a single tool call against the local sandbox or Runpod pod
-export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = 'default', projectPath = null, userId = null }) {
+// A GitHub token the user pasted straight into the chat. If they gave it to
+// the model, they meant for it to be used — no separate vault step needed.
+// Prefers the most recent one; fine-grained (github_pat_) or classic (ghp_…).
+export function harvestGithubToken(text = '') {
+  const matches = String(text).match(/\b(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,})\b/g)
+  return matches ? matches[matches.length - 1] : null
+}
+
+// Executes a single tool call against the local sandbox or Runpod pod.
+// `chatText` = the conversation so far, scanned for pasted credentials.
+export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '' }) {
   const args = normalizeToolArgs(name, rawArgs)
   const cleanSession = sessionId || 'default'
 
@@ -201,7 +216,7 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
       sessionId: cleanSession,
       profile: args.profile || 'none',
       projectPath: targetProj,
-      ...(await gitCreds(userId)),
+      ...(await gitCreds(userId, chatText)),
     })
   }
 
@@ -217,7 +232,7 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
       sessionId: cleanSession,
       profile: args.profile || 'full',
       projectPath: targetProj,
-      ...(await gitCreds(userId)),
+      ...(await gitCreds(userId, chatText)),
     })
   }
 
@@ -229,7 +244,10 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
 // `git push` in the sandbox can authenticate. No token connected -> git still
 // works for anything that doesn't need auth (clone of a public repo, local
 // commits), it just can't push/pull anything private.
-async function gitCreds(userId) {
+async function gitCreds(userId, chatText = '') {
+  // A token pasted in this conversation wins — it's the most explicit intent.
+  const pasted = harvestGithubToken(chatText)
+  if (pasted) return { gitToken: pasted }
   if (!userId) return {}
   try {
     const token = await getProviderKey(userId, 'github')

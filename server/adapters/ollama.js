@@ -219,6 +219,8 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           sessionId,
           projectPath,
           userId,
+          // Everything the user has typed in this chat — pasted tokens are picked up from here.
+          chatText: messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n'),
         })
 
         const step = {
