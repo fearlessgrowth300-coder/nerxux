@@ -109,6 +109,12 @@ api.interceptors.response.use(
 )
 
 // Normalize server errors into Error(message) for consistent UI handling.
+// A server bug can send `error` as an object ({message, type}) instead of a
+// string — never let that reach `new Error()` and render as "[object Object]".
 export function apiError(err, fallback = 'Request failed') {
-  return new Error(err?.response?.data?.error || err?.message || fallback)
+  const raw = err?.response?.data?.error
+  const message = typeof raw === 'string' ? raw
+    : raw && typeof raw === 'object' ? raw.message || JSON.stringify(raw)
+    : err?.message || fallback
+  return new Error(message || fallback)
 }

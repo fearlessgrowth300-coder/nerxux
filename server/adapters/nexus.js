@@ -50,7 +50,8 @@ export async function run({ prompt, systemPrompt, skills, temperature, maxTokens
     let msg = `Model server returned ${resp.status}`
     try {
       const j = await resp.json()
-      if (j.error || j.reply) msg = j.reply || j.error
+      const raw = j.reply || j.error
+      if (raw) msg = typeof raw === 'string' ? raw : raw.message || JSON.stringify(raw)
     } catch {}
     throw new Error(msg)
   }

@@ -6,6 +6,15 @@
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
 import { getComputeStatus } from '../lib/computeManager.js'
 
+// Some Ollama-fronting proxies return `error` as an object ({message, type})
+// instead of a plain string. `new Error(object)` stringifies it to the
+// useless "[object Object]" — always reduce it to real text first.
+function errorText(value) {
+  if (typeof value === 'string') return value
+  if (value && typeof value === 'object') return value.message || value.error || JSON.stringify(value)
+  return String(value)
+}
+
 function resolveTargetUrl(model) {
   const status = getComputeStatus()
   if (status.mode === 'turbo') {
@@ -71,7 +80,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       let msg = `Ollama returned ${resp.status}`
       try {
         const j = await resp.json()
-        if (j.error) msg = j.error
+        if (j.error) msg = errorText(j.error)
       } catch {}
       throw new Error(msg)
     }
