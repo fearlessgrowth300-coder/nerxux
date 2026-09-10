@@ -96,7 +96,7 @@ export default function Chat() {
       setMessages((prev) => [...prev, ...toAdd])
       if (job.conversationId) {
         try { await saveMessages(job.conversationId, toAdd) }
-        catch { setError('Could not sync the reply. A local copy is saved on this device.') }
+        catch (err) { setError(`Could not sync the reply (${err?.message || err}). A local copy is saved on this device.`) }
       }
     } catch (e) {
       if (!controller.signal.aborted) setError(e.message)
@@ -221,11 +221,15 @@ export default function Chat() {
         convId = conv.id; convIdRef.current = conv.id
         setConversationId(conv.id)
         setConversations((prev) => [conv, ...prev])
-      } catch { setError('Chat is saved on this device; cloud history is unavailable.') }
+      } catch (err) {
+        // A bare `catch {}` here meant nobody — including me — could ever tell
+        // WHY history stopped syncing. Say the actual reason.
+        setError(`Chat is saved on this device; cloud history is unavailable (${err?.message || err}).`)
+      }
     }
     if (convId) {
       try { await saveMessages(convId, created ? history : [userMsg]) }
-      catch { setError('Could not sync this message. A local copy is saved on this device.') }
+      catch (err) { setError(`Could not sync this message (${err?.message || err}). A local copy is saved on this device.`) }
     }
 
     // Split attachments: images/pdf go to the model; videos become context text.
@@ -264,7 +268,7 @@ export default function Chat() {
       // Persist this turn to the second brain.
       if (convId) {
         try { await saveMessages(convId, toAdd) }
-        catch { setError('Could not sync the reply. A local copy is saved on this device.') }
+        catch (err) { setError(`Could not sync the reply (${err?.message || err}). A local copy is saved on this device.`) }
       }
     } catch (e) {
       if (controller.signal.aborted) {

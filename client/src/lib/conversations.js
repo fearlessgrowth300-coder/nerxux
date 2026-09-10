@@ -5,6 +5,20 @@ import { supabase } from './supabase'
 // it). Each message stores its full object in `data` so attachments / media /
 // routing cards survive a reload.
 
+// supabase.auth.getUser() is a NETWORK call to /auth/v1/user, so saving a
+// conversation depended on an extra round trip that fails on a flaky phone
+// connection — and the UI reported that as "cloud history is unavailable" even
+// though the database was perfectly reachable. getSession() reads the persisted
+// session locally and only goes to the network when the token needs refreshing.
+async function currentUserId() {
+  const { data: { session } } = await supabase.auth.getSession()
+  if (session?.user?.id) return session.user.id
+  const { data: { user }, error } = await supabase.auth.getUser()
+  if (error) throw new Error(`not signed in: ${error.message}`)
+  if (!user) throw new Error('not signed in — sign out and back in to sync history')
+  return user.id
+}
+
 export async function listConversations() {
   const { data, error } = await supabase
     .from('conversations')
@@ -15,11 +29,10 @@ export async function listConversations() {
 }
 
 export async function createConversation(title = 'New chat') {
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Not authenticated')
+  const userId = await currentUserId()
   const { data, error } = await supabase
     .from('conversations')
-    .insert({ user_id: user.id, title: title.slice(0, 80) || 'New chat' })
+    .insert({ user_id: userId, title: title.slice(0, 80) || 'New chat' })
     .select()
     .single()
   if (error) throw error
@@ -59,14 +72,13 @@ export async function listMessages(conversationId) {
 // Persist a batch of message objects to a conversation. Transient cards
 // (approval prompts, typing) are not saved.
 export async function saveMessages(conversationId, msgs) {
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Not authenticated')
+  const userId = await currentUserId()
   const now = Date.now()
   const rows = (msgs || [])
     .filter((m) => m && m.role && m.role !== 'approval')
     .map((m, index) => ({
       conversation_id: conversationId,
-      user_id: user.id,
+      user_id: userId,
       role: m.role,
       content: typeof m.content === 'string' ? m.content : '',
       model: m.model || null,

@@ -13,6 +13,7 @@ export default function ComputeBar() {
   const [hostingerIp, setHostingerIpInput] = useState('')
   const [podModal, setPodModal] = useState(false)
   const [pods, setPods] = useState(null)
+  const [stopConfirm, setStopConfirm] = useState(false)
 
   // The bar used to read the status exactly once, on mount. RunPod exits a pod
   // on its own (out of funds, GPU reclaimed) and nothing told the page, so it
@@ -56,12 +57,17 @@ export default function ComputeBar() {
     }
   }
 
-  async function handleSwitch(targetMode) {
+  // Switching to Always On used to STOP the pod. Stopping a RunPod pod releases
+  // its GPU, and if the host is full you cannot get it back — the pod is stuck
+  // needing migration and its /workspace (Ollama + the 17GB model) is gone.
+  // Routing chat to Hostinger must never risk that; only the explicit stop
+  // button does, and it asks first.
+  async function handleSwitch(targetMode, { stopPod = false } = {}) {
     if (loading) return
     setError('')
     setLoading(true)
     try {
-      const res = await switchComputeMode(targetMode, targetMode === 'always_on')
+      const res = await switchComputeMode(targetMode, stopPod)
       const updated = await getComputeStatus()
       setStatus(updated)
     } catch (err) {
@@ -134,12 +140,12 @@ export default function ComputeBar() {
         {status.runpodRunning && (
           <button
             type="button"
-            onClick={() => handleSwitch('always_on')}
+            onClick={() => setStopConfirm(true)}
             disabled={loading}
             className="flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium bg-red-500/15 text-red-300 border border-red-500/30 hover:bg-red-500/25 transition cursor-pointer"
-            title="Stop RunPod to halt hourly billing"
+            title="Stop the RunPod pod to halt hourly billing"
           >
-            <span>⏹ Stop Turbo</span>
+            <span>⏹ Stop pod</span>
           </button>
         )}
       </div>
@@ -208,6 +214,34 @@ export default function ComputeBar() {
 
         {error && <span className="text-red-400 text-[11px] ml-2">⚠️ {error}</span>}
       </div>
+
+      {/* Stopping a pod is not reversible in practice: RunPod hands the GPU to
+          someone else, and a full host leaves the pod unstartable — its
+          /workspace, Ollama and the 17GB model with it. Say that plainly before
+          doing it, because it already happened once. */}
+      {stopConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setStopConfirm(false)}>
+          <div className="w-full max-w-md space-y-3 rounded-2xl border border-red-500/30 bg-nexus-panel p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-gray-100">Stop the RunPod pod?</h3>
+            <p className="text-xs leading-relaxed text-gray-400">
+              This halts the hourly charge — but it also gives the GPU back to RunPod. If the
+              host is full when you return, the pod cannot start and you would have to create a
+              new one and re-download the 17GB model.
+            </p>
+            <p className="text-xs leading-relaxed text-gray-400">
+              To just use the cheaper model, click <strong className="text-gray-200">Always On</strong> instead —
+              that leaves the pod running (and still billing).
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <button type="button" onClick={() => setStopConfirm(false)}
+                className="rounded-lg border border-nexus-border px-3 py-1.5 text-xs text-gray-300 hover:bg-white/5">Keep it running</button>
+              <button type="button"
+                onClick={() => { setStopConfirm(false); handleSwitch('always_on', { stopPod: true }) }}
+                className="rounded-lg bg-red-500/80 px-4 py-1.5 text-xs font-medium text-white hover:bg-red-500">Stop the pod</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Pod picker — a replacement pod (after funds run out, or a GPU is
           reclaimed) gets a brand new id. Picking it here beats editing .env on
