@@ -104,6 +104,15 @@ export async function executeInSandbox({
       wslProjectPath = trimmed.replace(/\\/g, '/')
     }
     projectBindMount = `--bind "${wslProjectPath}" /workspace/project`
+    // Also expose the project at its REAL path. The user names the folder by
+    // its host path ("work on /root/viewe-account"), the model repeats that
+    // path, and inside the sandbox it did not exist — so a perfectly correct
+    // instruction came back as "No such folder". Mounting it at both places
+    // means an absolute host path works in shell commands too, not just in
+    // the file tools. Skipped for system directories, which are already bound.
+    if (/^\/(root|home|srv|opt|data|mnt|var\/www|workspace)\//.test(wslProjectPath + '/')) {
+      projectBindMount += ` --bind "${wslProjectPath}" "${wslProjectPath}"`
+    }
   }
 
   const b64Code = Buffer.from(code, 'utf-8').toString('base64')

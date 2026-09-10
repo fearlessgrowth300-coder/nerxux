@@ -55,3 +55,36 @@ test('observations read naturally for file tools and like a terminal for command
   assert.match(observationText('read_file', { ok: false, stdout: '', stderr: 'No such file' }), /^Error: No such file/)
   assert.match(observationText('execute_command', { ok: true, exitCode: 0, stdout: 'hi', stderr: '', target: 'sandbox' }), /Exit Code: 0[\s\S]*hi/)
 })
+
+// The user names the project by its host path and the model repeats it, but
+// inside the sandbox the folder is mounted elsewhere — so a correct instruction
+// came back as "No such folder: /root/viewe-account".
+test('a host path inside the project resolves to the mount', () => {
+  const cmd = fileToolCommand('read_file', { path: '/root/viewe-account/README.md' },
+    { base: '/workspace/project', hostRoot: '/root/viewe-account' })
+  assert.match(cmd, /\/workspace\/project\/README\.md/)
+  assert.doesNotMatch(cmd, /\/root\/viewe-account\/README\.md/)
+})
+
+test('the project root itself resolves to the mount', () => {
+  const cmd = fileToolCommand('list_files', { path: '/root/viewe-account' },
+    { base: '/workspace/project', hostRoot: '/root/viewe-account' })
+  assert.match(cmd, /'\/workspace\/project'/)
+})
+
+test('relative paths and unrelated absolute paths are unchanged', () => {
+  const rel = fileToolCommand('read_file', { path: 'app/main.py' },
+    { base: '/workspace/project', hostRoot: '/root/viewe-account' })
+  assert.match(rel, /\/workspace\/project\/app\/main\.py/)
+
+  const other = fileToolCommand('read_file', { path: '/etc/hosts' },
+    { base: '/workspace/project', hostRoot: '/root/viewe-account' })
+  assert.match(other, /'\/etc\/hosts'/)
+})
+
+test('a path that merely starts with the same letters is not rewritten', () => {
+  const cmd = fileToolCommand('read_file', { path: '/root/viewe-account-backup/x.md' },
+    { base: '/workspace/project', hostRoot: '/root/viewe-account' })
+  assert.match(cmd, /viewe-account-backup\/x\.md/)
+  assert.doesNotMatch(cmd, /\/workspace\/project/)
+})

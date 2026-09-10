@@ -113,19 +113,31 @@ const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 // call (see agentLoop.js), /workspace otherwise — a relative path from the
 // model resolves against whichever one is actually the working project, not
 // always the bare sandbox root.
-const absPath = (p, base) => {
+// `hostRoot` is the project's path on the HOST. The user refers to the project
+// by that path and the model repeats it, but inside the sandbox the folder is
+// mounted at `base` — so a literal /root/my-project/README.md came back as
+// "No such file" even though the instruction was exactly right. Map host paths
+// under the project onto the mount instead of failing.
+const absPath = (p, base, hostRoot = null) => {
   const s = String(p || '').trim()
   if (!s) return base
-  return s.startsWith('/') ? s : `${base}/${s.replace(/^\.\//, '')}`
+  if (!s.startsWith('/')) return `${base}/${s.replace(/^\.\//, '')}`
+  if (hostRoot) {
+    const root = String(hostRoot).replace(/\\/g, '/').replace(/\/+$/, '')
+    if (root && (s === root || s.startsWith(root + '/'))) {
+      return s === root ? base : base + s.slice(root.length)
+    }
+  }
+  return s
 }
 
 // Bash for each file tool. Everything model-supplied goes through base64 or
 // single-quote escaping — the model never gets to build shell syntax.
 // `base`: the effective project root for a relative path (see absPath above).
-export function fileToolCommand(name, args = {}, { base = '/workspace' } = {}) {
+export function fileToolCommand(name, args = {}, { base = '/workspace', hostRoot = null } = {}) {
   switch (name) {
     case 'write_file': {
-      const p = absPath(args.path, base)
+      const p = absPath(args.path, base, hostRoot)
       const fileName = p.split('/').filter(Boolean).pop() || ''
       // Real credentials (Supabase URLs/keys, DB connection strings) live in
       // this chat and legitimately belong in project env files — but an env
@@ -139,13 +151,13 @@ export function fileToolCommand(name, args = {}, { base = '/workspace' } = {}) {
       return `mkdir -p "$(dirname ${q(p)})" && printf '%s' ${q(b64(args.content ?? ''))} | base64 -d > ${q(p)} && echo "wrote ${p} ($(wc -c < ${q(p)}) bytes)"${guard}`
     }
     case 'read_file': {
-      const p = absPath(args.path, base)
+      const p = absPath(args.path, base, hostRoot)
       const start = Math.max(1, Number(args.start) || 1)
       const limit = Math.min(2000, Math.max(1, Number(args.limit) || 400))
       return `test -f ${q(p)} || { echo "No such file: ${p}" >&2; exit 1; }; total=$(wc -l < ${q(p)}); sed -n '${start},${start + limit - 1}p' ${q(p)} | cut -c1-500 | nl -ba -v ${start}; if [ "$total" -gt ${start + limit - 1} ]; then echo "... (${'$'}total lines total; showing ${start}-${start + limit - 1})"; fi`
     }
     case 'edit_file': {
-      const p = absPath(args.path, base)
+      const p = absPath(args.path, base, hostRoot)
       const py = [
         'import sys, base64',
         'p = sys.argv[1]',
@@ -162,12 +174,12 @@ export function fileToolCommand(name, args = {}, { base = '/workspace' } = {}) {
       return `PY=""; for c in python3 python; do "$c" -c pass >/dev/null 2>&1 && PY="$c" && break; done; [ -n "$PY" ] || { echo "python not available" >&2; exit 1; }; printf '%s' ${q(b64(py))} | base64 -d | "$PY" - ${q(p)}`
     }
     case 'list_files': {
-      const p = absPath(args.path, base)
+      const p = absPath(args.path, base, hostRoot)
       const depth = Math.min(8, Math.max(1, Number(args.depth) || 3))
       return `cd ${q(p)} 2>/dev/null || { echo "No such folder: ${p}" >&2; exit 1; }; find . -maxdepth ${depth} \\( -name node_modules -o -name .git -o -name .next -o -name dist \\) -prune -o -print | sed 's|^\\./||' | sort | head -400`
     }
     case 'search_files': {
-      const p = absPath(args.path, base)
+      const p = absPath(args.path, base, hostRoot)
       return `grep -rn --include='*' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.next -E ${q(args.pattern ?? '')} ${q(p)} 2>/dev/null | cut -c1-300 | head -200; true`
     }
     default:

@@ -176,7 +176,10 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
   // relative path resolves against /workspace/project when a local folder
   // is bind-mounted for this call, /workspace otherwise — matching where
   // execute_command/run_code actually start (see sandbox.js's targetDir).
-  const fileCmd = fileToolCommand(name, args, { base: targetProj ? '/workspace/project' : '/workspace' })
+  const fileCmd = fileToolCommand(name, args, {
+    base: targetProj ? '/workspace/project' : '/workspace',
+    hostRoot: targetProj,
+  })
   if (fileCmd) {
     const r = await executeInSandbox({
       code: fileCmd, language: 'bash', sessionId: cleanSession, profile: 'none', projectPath: targetProj,
