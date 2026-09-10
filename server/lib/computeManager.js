@@ -154,6 +154,12 @@ export async function getLiveComputeStatus() {
     // awaited: an SSH probe must not slow down a status poll — the next poll,
     // seconds later, reports the progress.
     if (running && !notice) autoProvisionIfNeeded(podIdOf(pod), pod).catch(() => {})
+    // Turbo selected, pod up, but no tunnel — a restarted server or an SSH
+    // connection that dropped. Nothing used to rebuild it, so Turbo stayed
+    // selected and every message failed with "can't reach the tunnel".
+    if (currentMode === 'turbo' && running && !tunnel.ready && !switching && !provisioning) {
+      reconnectTunnelIfNeeded(podIdOf(pod))
+    }
 
     const setup = getProvisioningState()
     return {
@@ -332,6 +338,15 @@ function watchProvisioning(podId, host, port, firstMessage) {
 // When a running pod has no model, start the install in the background.
 const podIdOf = (pod) => pod?.id || knownPodId
 const autoTried = new Map() // podId -> last attempt, so a failing pod is not hammered
+
+let lastReconnect = 0
+function reconnectTunnelIfNeeded(podId) {
+  if (Date.now() - lastReconnect < 60_000) return
+  lastReconnect = Date.now()
+  switchToTurbo({ podId }).catch((err) => {
+    console.error('[nexus-ai] Turbo tunnel could not be rebuilt:', err.message)
+  })
+}
 
 async function autoProvisionIfNeeded(podId, pod) {
   if (provisioning || switchPromise || tunnel.ready) return
