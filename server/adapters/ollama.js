@@ -5,7 +5,7 @@
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
 import { toOpenAITools } from '../lib/agentTools.js'
-import { getComputeStatus } from '../lib/computeManager.js'
+import { getComputeStatus, ensureTurboReady } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
 
@@ -49,6 +49,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     ...externalTools,
   ]
   const isRunpod = targetUrl.includes('11435')
+  // Rebuild a dead tunnel BEFORE sending, rather than discovering it is dead
+  // by waiting out a five-minute timeout on a request that could never land.
+  if (isRunpod) await ensureTurboReady()
   // Chat requests run as background jobs the client polls (routes/chat.js),
   // so there's no proxy timeout to squeeze under any more. This budget is
   // purely about not leaving someone staring at a spinner forever on the

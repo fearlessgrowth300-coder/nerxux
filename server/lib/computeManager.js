@@ -362,6 +362,23 @@ async function autoProvisionIfNeeded(podId, pod) {
   watchProvisioning(podId, endpoint.host, endpoint.port, message)
 }
 
+// Called before a Turbo request actually uses the tunnel. An SSH tunnel can
+// go ZOMBIE: the local listener still accepts connections, so the port looks
+// open, but nothing flows to the pod — the request then hangs until undici
+// gives up with UND_ERR_HEADERS_TIMEOUT, minutes later. A 2-second probe
+// catches that and rebuilds the tunnel before the user waits at all.
+export async function ensureTurboReady() {
+  if (currentMode !== 'turbo') return true
+  if (await tunnel.health()) return true
+  if (switchPromise) return false // a switch is already under way
+  try {
+    await switchToTurbo()
+    return tunnel.ready
+  } catch {
+    return false
+  }
+}
+
 export function getProvisioningState() {
   if (!provisioning) return null
   const { podId, startedAt, line, done, message } = provisioning
