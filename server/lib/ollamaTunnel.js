@@ -105,14 +105,33 @@ export class OllamaTunnel {
     })
   }
 
+  sshCommon(port) {
+    return ['-p', String(port), '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-i', this.keyPath]
+  }
+
+  // How far along the one-time install is: { done, line }. `line` is the last
+  // thing the installer printed, so the UI can show real progress instead of a
+  // spinner that means nothing.
+  async provisionProgress(host, port) {
+    try {
+      const { stdout } = await this.run('ssh', [...this.sshCommon(port), 'root@' + host,
+        `tail -n 3 ${PROVISION_LOG} 2>/dev/null || true`], { timeout: 15000, windowsHide: true })
+      const text = (stdout || '').trim()
+      const line = text.split('\n').filter(Boolean).pop() || ''
+      return { done: text.includes('PROVISION_DONE'), line, started: Boolean(text) }
+    } catch (err) {
+      return { done: false, line: '', started: false, error: (err.stderr || err.message || '').trim().slice(-200) }
+    }
+  }
+
   async start(host, port) {
     if (this.child && this.endpoint === host + ':' + port && await this.probe()) {
       this.ready = true
       return true
     }
     await this.stop()
-    const common = ['-p', String(port), '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-i', this.keyPath]
+    const common = this.sshCommon(port)
     let lastError = ''
     let started = false
     const start = this.now()
@@ -126,7 +145,9 @@ export class OllamaTunnel {
         // Nothing installed yet — a fresh pod. Kick off the install and say so,
         // instead of failing with "Ollama is not installed" and leaving the
         // user to work out what to type into RunPod's terminal.
-        if (err.code === 42) throw new Error(await this.provision(host, common))
+        if (err.code === 42) {
+          throw Object.assign(new Error(await this.provision(host, common)), { provisioning: true })
+        }
         if (/Permission denied|Host key verification failed/.test(lastError)) {
           throw new Error('RunPod startup failed: ' + lastError)
         }

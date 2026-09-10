@@ -170,6 +170,16 @@ export default function ComputeBar() {
                 that never resolves. */}
             {status.notice && <span className="text-amber-300">{status.notice}</span>}
 
+            {/* A new pod downloading its model. Shows the installer's own last
+                line, so "is it stuck?" has an answer without opening RunPod. */}
+            {status.provisioning && !status.provisioning.done && (
+              <span className="flex items-center gap-1.5 text-amber-300">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+                Setting up your new pod ({status.provisioning.minutes}m):{' '}
+                <span className="text-gray-400">{status.provisioning.line || 'starting…'}</span>
+              </span>
+            )}
+
             {!isTurbo && status.runpodRunning && (
               <span className="text-amber-300">
                 RunPod is still running. Click Always On to stop its billing.

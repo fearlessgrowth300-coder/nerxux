@@ -150,12 +150,14 @@ export async function getLiveComputeStatus() {
       setCurrentMode('always_on')
       notice = `The RunPod pod is ${String(pod.status || 'not running').toLowerCase()}, so Turbo can't be used. Switched to Always On. Click Turbo to start the pod again.`
     }
+    const setup = getProvisioningState()
     return {
       ...getComputeStatus(),
       switching,
       runpodStatus: pod.status || 'UNKNOWN',
       runpodRunning: running,
-      ...(notice ? { notice } : {}),
+      ...(setup ? { provisioning: setup } : {}),
+      ...(setup?.message ? { notice: setup.message } : notice ? { notice } : {}),
     }
   } catch (err) {
     // Can't reach RunPod at all — don't claim Turbo is live.
@@ -248,6 +250,49 @@ export async function killTunnel() {
   return tunnel.stop()
 }
 
+// A fresh pod has to download ~17GB before Turbo can work. Nobody should have
+// to sit pressing a button to find out how it's going, so the server watches
+// the install itself, reports the installer's own progress line, and connects
+// Turbo the moment the model is there.
+let provisioning = null
+
+function watchProvisioning(podId, host, port, firstMessage) {
+  if (provisioning?.timer) clearInterval(provisioning.timer)
+  provisioning = { podId, host, port, startedAt: Date.now(), line: firstMessage, done: false, timer: null }
+
+  const finish = (patch) => {
+    clearInterval(provisioning.timer)
+    provisioning = { ...provisioning, ...patch, timer: null }
+  }
+
+  const tick = async () => {
+    // Don't let a forgotten pod poll forever.
+    if (Date.now() - provisioning.startedAt > 90 * 60_000) {
+      return finish({ done: true, message: 'Pod setup has been running for over an hour — check the pod in RunPod.' })
+    }
+    const p = await tunnel.provisionProgress(host, port)
+    if (p.line) provisioning.line = p.line
+    if (!p.done) return
+    finish({ done: true })
+    try {
+      await switchToTurbo({ podId })
+      provisioning.message = 'Your model finished installing — Turbo is live.'
+    } catch (err) {
+      provisioning.message = `The model finished downloading, but Turbo could not connect: ${err.message}`
+    }
+  }
+
+  provisioning.timer = setInterval(tick, 30000)
+  provisioning.timer.unref?.()
+  tick()
+}
+
+export function getProvisioningState() {
+  if (!provisioning) return null
+  const { podId, startedAt, line, done, message } = provisioning
+  return { podId, startedAt, line, done, message: message || null, minutes: Math.round((Date.now() - startedAt) / 60000) }
+}
+
 export function switchToTurbo({ podId } = {}) {
   return exclusiveSwitch(async () => {
     podId = podId || (await resolvePodId())
@@ -261,7 +306,18 @@ export function switchToTurbo({ podId } = {}) {
       endpoint = podSshEndpoint(pod)
     }
     if (!endpoint) throw new Error('RunPod has not published a ready SSH endpoint yet. Please retry shortly.')
-    await tunnel.start(endpoint.host, endpoint.port)
+    try {
+      await tunnel.start(endpoint.host, endpoint.port)
+    } catch (err) {
+      // A pod that hasn't been set up yet isn't a failure — it's a new pod.
+      // Hand back a "setting up" state and keep watching it in the background,
+      // rather than a red error the user has to keep re-triggering.
+      if (err.provisioning) {
+        watchProvisioning(podId, endpoint.host, endpoint.port, err.message)
+        return { mode: currentMode, podId, provisioning: true, message: err.message }
+      }
+      throw err
+    }
     setCurrentMode('turbo')
     return { mode: 'turbo', podId, tunnelOk: true, url: TURBO_URL,
       message: 'Connected to RunPod GPU' }
