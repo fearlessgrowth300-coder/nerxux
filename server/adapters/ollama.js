@@ -154,6 +154,22 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       // Ollama could not parse the tool call the model emitted — almost always
       // a call cut off part-way, leaving an unclosed element. Losing the whole
       // turn to that is wrong when asking for a smaller call usually works.
+      if (MALFORMED_TOOL_CALL.test(msg)) {
+        // Ollama rejects the call and does NOT hand back what the model wrote,
+        // so the malformed text itself is unrecoverable here. Record the shape
+        // of the request instead — never its content, which routinely holds
+        // credentials the user pasted.
+        console.error('[nexus-ai] tool-call parse failure:', JSON.stringify({
+          error: msg.slice(0, 200),
+          target: isRunpod ? 'turbo' : 'always_on',
+          model: model || 'nexus-mine',
+          step,
+          numPredict,
+          toolsOffered: agentTools.length,
+          messagesInContext: messages.length,
+          approxPromptChars: messages.reduce((n, m) => n + (m.content?.length || 0), 0),
+        }))
+      }
       if (MALFORMED_TOOL_CALL.test(msg) && parseRetries < 2) {
         parseRetries++
         messages.push({
