@@ -133,6 +133,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
   // Tool-calling loop.
   const chat = generativeModel.startChat()
   let lastMedia = null
+  const mediaAll = [] // every generated image/video this turn, not just the last
   let result = await chat.sendMessage(parts)
   for (let i = 0; i < 40; i++) {
     const calls = (result.response.functionCalls && result.response.functionCalls()) || []
@@ -145,6 +146,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
         if (typeof res === 'string') res = { content: res }
         content = res.content
         if (res.media) lastMedia = res.media
+        for (const m of res.mediaList?.length ? res.mediaList : res.media ? [res.media] : []) mediaAll.push(m)
       } catch (e) {
         content = `Tool error: ${e.message}`
       }
@@ -159,6 +161,6 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
     type: lastMedia ? lastMedia.type : 'text',
     content: result.response.text(),
     model: model || 'gemini-1.5-pro',
-    ...(lastMedia ? { media: lastMedia } : {}),
+    ...(lastMedia ? { media: lastMedia, mediaList: mediaAll } : {}),
   }
 }

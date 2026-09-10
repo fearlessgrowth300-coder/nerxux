@@ -53,6 +53,7 @@ export async function run({
 
   const toolCalls = []
   let lastMedia = resume?.media || null
+  const mediaAll = resume?.media ? [resume.media] : [] // all of them, not just the last
   let response
   // A real build is dozens of tool rounds; the user's Stop button (signal)
   // and the job's wall clock are the real limits.
@@ -90,6 +91,7 @@ export async function run({
         if (typeof res === 'string') res = { content: res }
         output = res.content
         if (res.media) lastMedia = res.media
+        for (const m of res.mediaList?.length ? res.mediaList : res.media ? [res.media] : []) mediaAll.push(m)
       } catch (e) {
         output = `Tool error: ${e.message}`
         isError = true
@@ -118,7 +120,7 @@ export async function run({
     content: finalText(response),
     model: response?.model,
     usage: response?.usage,
-    ...(lastMedia ? { media: lastMedia, mediaType: lastMedia.type } : {}),
+    ...(lastMedia ? { media: lastMedia, mediaType: lastMedia.type, mediaList: mediaAll } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
   }
 }

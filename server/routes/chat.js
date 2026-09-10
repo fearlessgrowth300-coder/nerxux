@@ -50,6 +50,7 @@ function toMessage(result, { modelLabel, stage } = {}) {
     modelLabel,
     stage,
     ...(result.media ? { media: result.media, mediaType: result.type } : {}),
+    ...(result.mediaList?.length ? { mediaList: result.mediaList } : {}),
     ...(result.toolSteps?.length ? { toolSteps: result.toolSteps } : {}),
   }
 }
@@ -118,7 +119,7 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
       args: input,
     })
     const content = r.text || (r.media ? 'Generated media (shown below).' : JSON.stringify(r.raw || {}))
-    return { content, media: r.media || null }
+    return { content, media: r.media || null, mediaList: r.mediaList || [] }
   }
   return { tools, onToolCall, permissionFor, steps }
 }
@@ -135,6 +136,10 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
   const tools = (mcp?.tools || [])
     .filter((t) => !(t.braveSearch && info.provider === 'claude'))
     .map(({ braveSearch, ...t }) => t)
+  // The local adapters build their own sandbox/file/git toolset and their own
+  // prompt, so they only need the CONNECTED tools (MCP connectors + native
+  // providers) added on top — passing the agent tools again would duplicate them.
+  const connectorTools = tools.filter((t) => !AGENT_TOOL_NAMES.has(t.name))
   const hasAgentTools = !localAgent && tools.some((t) => AGENT_TOOL_NAMES.has(t.name))
   const fullSystem = hasAgentTools ? [AGENT_GUIDANCE, systemPrompt].filter(Boolean).join('\n\n') : systemPrompt
   if (mcp?.steps) mcp.steps.length = 0
@@ -143,7 +148,7 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
     history,
     systemPrompt: fullSystem,
     model: info.apiModel,
-    tools: localAgent ? undefined : tools,
+    tools: localAgent ? connectorTools : tools,
     onToolCall: mcp?.onToolCall,
     attachments,
     webSearch,

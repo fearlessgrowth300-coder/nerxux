@@ -70,6 +70,7 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
   messages.push({ role: 'user', content: userContent })
 
   let lastMedia = null
+  const mediaAll = [] // every generated image/video this turn, not just the last
   let completion
   const MAX_TURNS = 80
 
@@ -93,6 +94,7 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
         if (typeof res === 'string') res = { content: res }
         content = res.content
         if (res.media) lastMedia = res.media
+        for (const m of res.mediaList?.length ? res.mediaList : res.media ? [res.media] : []) mediaAll.push(m)
       } catch (e) {
         content = `Tool error: ${e.message}`
       }
@@ -107,6 +109,6 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
     content: completion.choices?.[0]?.message?.content || '',
     model: completion.model,
     usage: completion.usage,
-    ...(lastMedia ? { media: lastMedia } : {}),
+    ...(lastMedia ? { media: lastMedia, mediaList: mediaAll } : {}),
   }
 }

@@ -895,7 +895,7 @@ function Message({ message, sessionId, onEdit, disabled }) {
             <>
               {message.toolSteps?.length > 0 && <ToolStepsCard steps={message.toolSteps} />}
               <Markdown sessionId={sessionId}>{message.content}</Markdown>
-              <MediaBlock media={message.media} type={message.mediaType} />
+              <MediaBlock media={message.media} type={message.mediaType} list={message.mediaList} />
             </>
           )}
         </div>
@@ -917,14 +917,39 @@ function Message({ message, sessionId, onEdit, disabled }) {
   )
 }
 
-function MediaBlock({ media, type }) {
-  if (!media) return null
-  const src = media.url || (media.base64 ? `data:${media.mimeType};base64,${media.base64}` : null)
+// Anything a connector generated this turn — shown inline so you never have to
+// go back to the provider's own site to see the result, each with a download.
+function MediaBlock({ media, type, list }) {
+  const items = list?.length ? list : media ? [{ ...media, type: media.type || type }] : []
+  if (!items.length) return null
+  return (
+    <div className="mt-3 space-y-3">
+      {items.map((m, i) => <MediaItem key={(m.url || '') + i} item={m} />)}
+    </div>
+  )
+}
+
+function MediaItem({ item }) {
+  const src = item.url || (item.base64 ? `data:${item.mimeType};base64,${item.base64}` : null)
   if (!src) return null
-  if (type === 'audio') return <audio controls src={src} className="mt-3 w-full" />
-  if (type === 'video') return <video controls src={src} className="mt-3 w-full rounded-lg" />
-  if (type === 'image') return <img src={src} alt="generated" className="mt-3 max-w-full rounded-lg" />
-  return null
+  const ext = (item.mimeType?.split('/')[1] || 'bin').replace('jpeg', 'jpg')
+  const name = `nexus-${item.type || 'file'}-${Date.now()}.${ext}`
+  return (
+    <div>
+      {item.type === 'audio' && <audio controls src={src} className="w-full" />}
+      {item.type === 'video' && <video controls playsInline src={src} className="w-full rounded-lg" />}
+      {item.type === 'image' && <img src={src} alt="generated" className="max-w-full rounded-lg" />}
+      {!['audio', 'video', 'image'].includes(item.type) && (
+        <p className="text-xs text-gray-400">Generated file</p>
+      )}
+      {/* A cross-origin `download` is ignored by the browser and just opens the
+          file, so the link says "Open / download" rather than promising a save. */}
+      <a href={src} download={name} target="_blank" rel="noreferrer"
+        className="mt-1 inline-block text-xs text-nexus-accent2 hover:underline">
+        ↓ Open / download
+      </a>
+    </div>
+  )
 }
 
 function ApprovalCard({ message, onDecide }) {

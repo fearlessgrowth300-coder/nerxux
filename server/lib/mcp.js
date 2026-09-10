@@ -51,22 +51,50 @@ export async function discoverTools({ url, token, authProvider }) {
   })
 }
 
-// Pulls the first image/audio/video out of an MCP tool result, if any.
-function extractMedia(content = []) {
+const EXT_TYPES = {
+  png: 'image', jpg: 'image', jpeg: 'image', webp: 'image', gif: 'image',
+  mp4: 'video', webm: 'video', mov: 'video',
+  mp3: 'audio', wav: 'audio', m4a: 'audio', ogg: 'audio',
+}
+
+function kindFromMime(mime = '') {
+  if (mime.startsWith('video')) return 'video'
+  if (mime.startsWith('audio')) return 'audio'
+  if (mime.startsWith('image')) return 'image'
+  return 'file'
+}
+
+// Generators like Higgsfield don't return the bytes — they return a link to the
+// finished render, sometimes as a resource block and sometimes as a bare URL in
+// the text ("Here's your video: https://…/out.mp4"). The chat should show the
+// result either way, so text is scanned for media URLs too.
+function mediaUrlsInText(text = '') {
+  const found = []
+  for (const m of text.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)) {
+    const url = m[0].replace(/[.,;]+$/, '')
+    const ext = (url.split('?')[0].split('.').pop() || '').toLowerCase()
+    const type = EXT_TYPES[ext]
+    if (type) found.push({ type, mimeType: `${type}/${ext === 'jpg' ? 'jpeg' : ext}`, url })
+  }
+  return found
+}
+
+// Every image/audio/video in an MCP tool result, in order — a "generate 4
+// images" tool returns four content blocks, and showing only the first one
+// silently loses the other three.
+function extractAllMedia(content = []) {
+  const out = []
   for (const c of content) {
     if (c.type === 'image' && c.data) {
-      return { type: 'image', mimeType: c.mimeType || 'image/png', base64: c.data }
-    }
-    if (c.type === 'audio' && c.data) {
-      return { type: 'audio', mimeType: c.mimeType || 'audio/mpeg', base64: c.data }
-    }
-    if (c.type === 'resource' && c.resource?.uri) {
+      out.push({ type: 'image', mimeType: c.mimeType || 'image/png', base64: c.data })
+    } else if (c.type === 'audio' && c.data) {
+      out.push({ type: 'audio', mimeType: c.mimeType || 'audio/mpeg', base64: c.data })
+    } else if (c.type === 'resource' && c.resource?.uri) {
       const mime = c.resource.mimeType || ''
-      const t = mime.startsWith('video') ? 'video' : mime.startsWith('audio') ? 'audio' : mime.startsWith('image') ? 'image' : 'file'
-      return { type: t, mimeType: mime || 'application/octet-stream', url: c.resource.uri }
+      out.push({ type: kindFromMime(mime), mimeType: mime || 'application/octet-stream', url: c.resource.uri })
     }
   }
-  return null
+  return out
 }
 
 export async function callMcpTool({ url, token, authProvider, name, args }) {
@@ -76,6 +104,14 @@ export async function callMcpTool({ url, token, authProvider, name, args }) {
       .filter((c) => c.type === 'text')
       .map((c) => c.text)
       .join('\n')
-    return { text, media: extractMedia(result.content), isError: Boolean(result.isError), raw: result }
+    const seen = new Set()
+    const mediaList = [...extractAllMedia(result.content), ...mediaUrlsInText(text)]
+      .filter((m) => {
+        const key = m.url || m.base64?.slice(0, 64)
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+    return { text, media: mediaList[0] || null, mediaList, isError: Boolean(result.isError), raw: result }
   })
 }

@@ -4,6 +4,7 @@
 // Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
+import { toOpenAITools } from '../lib/agentTools.js'
 import { getComputeStatus } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
@@ -36,9 +37,17 @@ function composeSystem(systemPrompt = '', skills = []) {
 }
 
 // { prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments } -> normalized response with toolSteps
-export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments, onProgress = () => {} }) {
+// `tools` / `onToolCall` carry the connected MCP + native tools (Higgsfield,
+// YouTube, …). Without them the local models were the only ones that couldn't
+// use a connector: the API models got the full toolset and Qwen got none.
+export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments, tools = [], onToolCall = null, onProgress = () => {} }) {
   const targetUrl = resolveTargetUrl(model)
-  const agentTools = webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS
+  const externalTools = toOpenAITools(tools)
+  const externalNames = new Set(tools.map((t) => t.name))
+  const agentTools = [
+    ...(webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS),
+    ...externalTools,
+  ]
   const isRunpod = targetUrl.includes('11435')
   // Chat requests run as background jobs the client polls (routes/chat.js),
   // so there's no proxy timeout to squeeze under any more. This budget is
@@ -83,6 +92,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   }
 
   const toolSteps = []
+  // Every image/video/audio a connector produced this turn, in order, so a
+  // "make me 4 images" turn shows all four instead of only the last one.
+  const mediaOut = []
   // Model round-trips per turn (tool rounds + continuations). Six was enough
   // for "run this script"; building a project is dozens of tool calls, and
   // cutting the loop there is exactly what made the agent stop and narrate
@@ -213,6 +225,21 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         continue
       }
       try {
+        // A connected MCP / native tool (image + video generation, YouTube, …).
+        // These don't run in the sandbox — they're remote calls — so they take
+        // the caller's router instead of executeAgentTool.
+        if (externalNames.has(call.name) && onToolCall) {
+          const res = await onToolCall(call.name, call.args)
+          for (const m of res?.mediaList?.length ? res.mediaList : res?.media ? [res.media] : []) {
+            mediaOut.push(m)
+            onProgress({ type: 'media', media: m })
+          }
+          const step = { tool: call.name, args: call.args, ok: true, exitCode: 0, stdout: String(res?.content ?? '').slice(0, 4000), stderr: '', target: 'connector' }
+          toolSteps.push(step)
+          onProgress({ type: 'tool', ...step })
+          messages.push({ role: 'user', content: `[Tool Execution: ${call.name} on connector]\n${res?.content ?? '(no output)'}` })
+          continue
+        }
         const result = await executeAgentTool({
           name: call.name,
           args: call.args,
@@ -260,10 +287,11 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   return {
     ok: true,
     provider: 'ollama',
-    type: 'text',
+    type: mediaOut.length ? mediaOut[0].type : 'text',
     content: finalContent,
     model: dataModel(model),
     toolSteps,
+    ...(mediaOut.length ? { media: mediaOut[0], mediaList: mediaOut } : {}),
   }
 }
 

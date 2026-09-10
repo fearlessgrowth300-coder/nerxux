@@ -8,6 +8,8 @@ import {
   startRunpodPod,
   stopRunpodPod,
   fetchPodDetails,
+  listPods,
+  setPodId,
 } from '../lib/computeManager.js'
 
 const router = Router()
@@ -73,6 +75,36 @@ router.post('/pod/stop', async (req, res) => {
     res.json({ ok: true, result })
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/compute/pods — every pod on the RunPod account, so a replacement
+// pod can be picked in the app instead of edited into the server's .env.
+router.get('/pods', async (req, res) => {
+  try {
+    const pods = await listPods()
+    res.json({
+      pods: pods.map((p) => ({
+        id: p.id,
+        name: p.name,
+        status: p.desiredStatus,
+        gpu: p.machine?.gpuDisplayName || p.gpuTypeId || null,
+        costPerHr: p.costPerHr,
+        createdAt: p.createdAt,
+      })),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// POST /api/compute/pod — point Turbo at a specific pod. Body: { podId }
+router.post('/pod', (req, res) => {
+  try {
+    const { podId } = req.body || {}
+    res.json({ ok: true, podId: setPodId(podId) })
+  } catch (err) {
+    res.status(400).json({ error: err.message })
   }
 })
 

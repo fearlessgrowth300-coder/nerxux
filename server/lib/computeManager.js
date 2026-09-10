@@ -15,34 +15,46 @@ import { OllamaTunnel, podSshEndpoint, TURBO_URL } from './ollamaTunnel.js'
 // 2. "turbo": RunPod GPU pod (30-65+ tok/s, billed per hour while running)
 
 const getApiKey = () => process.env.RUNPOD_API_KEY || ''
-// The pod id lives in .env only — pods get replaced (GPU reclaimed, migration)
-// and a stale hardcoded fallback silently points everything at a dead pod.
-const getPodId = () => {
-  const id = (process.env.RUNPOD_POD_ID || '').trim()
-  if (!id) throw new Error('RUNPOD_POD_ID is not set on the server — add the pod id to server/.env to use Turbo.')
-  return id
-}
 let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://2.25.126.125:11434'
 const SSH_KEY_PATH = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_ed25519')
 const STATE_FILE = path.join(__dirname, '../.compute-state.json')
 
-function readPersistedMode() {
+function readState() {
   try {
-    const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
-    return saved.mode === 'turbo' ? 'turbo' : 'always_on'
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) || {}
   } catch {
-    return 'always_on'
+    return {}
   }
+}
+
+function writeState(patch) {
+  const next = { ...readState(), ...patch }
+  const temporary = `${STATE_FILE}.tmp`
+  fs.writeFileSync(temporary, JSON.stringify(next))
+  fs.renameSync(temporary, STATE_FILE)
+  return next
 }
 
 function setCurrentMode(mode) {
   currentMode = mode === 'turbo' ? 'turbo' : 'always_on'
-  const temporary = `${STATE_FILE}.tmp`
-  fs.writeFileSync(temporary, JSON.stringify({ mode: currentMode }))
-  fs.renameSync(temporary, STATE_FILE)
+  writeState({ mode: currentMode })
 }
 
-let currentMode = readPersistedMode() // 'always_on' | 'turbo'
+let currentMode = readState().mode === 'turbo' ? 'turbo' : 'always_on'
+// A pod id is not a permanent address. Pods get exited when funds run out, GPUs
+// get reclaimed, and the replacement has a NEW id — so a single id baked into
+// .env means every replacement needs someone to edit the server by hand. The
+// id below is only a starting hint; resolvePodId() falls back to asking the
+// RunPod account what pods actually exist.
+let knownPodId = readState().podId || (process.env.RUNPOD_POD_ID || '').trim() || null
+
+export function setPodId(id) {
+  const clean = String(id || '').trim()
+  if (!/^[a-z0-9]{6,32}$/i.test(clean)) throw new Error('That does not look like a RunPod pod id.')
+  knownPodId = clean
+  writeState({ podId: clean })
+  return clean
+}
 const tunnel = new OllamaTunnel(SSH_KEY_PATH)
 let switchPromise = null
 
@@ -100,7 +112,7 @@ export function getComputeStatus() {
   return {
     mode: currentMode,
     hostingerUrl: HOSTINGER_OLLAMA_URL,
-    runpodPodId: process.env.RUNPOD_POD_ID || null,
+    runpodPodId: knownPodId,
     runpodActive: tunnel.ready,
     activeUrl: currentMode === 'turbo' ? 'http://127.0.0.1:11435' : HOSTINGER_OLLAMA_URL,
     details:
@@ -124,20 +136,41 @@ export function getComputeStatus() {
 // route from a RunPod instance that is still running and accruing charges.
 export async function getLiveComputeStatus() {
   await tunnel.health()
-  const status = { ...getComputeStatus(), switching: Boolean(switchPromise) }
+  const switching = Boolean(switchPromise)
   try {
     const pod = await fetchPodDetails()
+    const running = pod.status === 'RUNNING'
+    // Turbo selected but the pod isn't running (RunPod exits pods when the
+    // balance hits zero). Saying "Connected — Turbo" then is simply false, and
+    // it strands every message on a tunnel that cannot come back. Fall back to
+    // Always On and say why, instead of "Reconnecting…" forever.
+    let notice = null
+    if (currentMode === 'turbo' && !running && !switching) {
+      await tunnel.stop()
+      setCurrentMode('always_on')
+      notice = `The RunPod pod is ${String(pod.status || 'not running').toLowerCase()}, so Turbo can't be used. Switched to Always On. Click Turbo to start the pod again.`
+    }
     return {
-      ...status,
+      ...getComputeStatus(),
+      switching,
       runpodStatus: pod.status || 'UNKNOWN',
-      runpodRunning: pod.status === 'RUNNING',
+      runpodRunning: running,
+      ...(notice ? { notice } : {}),
     }
   } catch (err) {
+    // Can't reach RunPod at all — don't claim Turbo is live.
+    let notice = null
+    if (currentMode === 'turbo' && !switching && !tunnel.ready) {
+      setCurrentMode('always_on')
+      notice = `Couldn't reach RunPod (${err.message}). Switched to Always On.`
+    }
     return {
-      ...status,
+      ...getComputeStatus(),
+      switching,
       runpodStatus: 'UNKNOWN',
       runpodRunning: false,
       runpodStatusError: err.message,
+      ...(notice ? { notice } : {}),
     }
   }
 }
@@ -149,22 +182,52 @@ export function setHostingerIp(ipOrUrl) {
   return HOSTINGER_OLLAMA_URL
 }
 
+// Every pod on the account. This is what makes a replacement pod just work:
+// the id is discovered, not configured.
+export async function listPods() {
+  const data = await runpodRequest('https://rest.runpod.io/v1/pods')
+  return Array.isArray(data) ? data : []
+}
+
+// The pod to use: the known one if it still exists, otherwise whatever the
+// account actually has — preferring a running pod, else the newest.
+export async function resolvePodId() {
+  if (knownPodId) {
+    try {
+      await runpodRequest(`/pods/${knownPodId}`)
+      return knownPodId
+    } catch {
+      // Terminated or belongs to a different account — fall through and look.
+    }
+  }
+  const pods = await listPods()
+  if (!pods.length) {
+    throw new Error('No pods found on this RunPod account. Create a pod in RunPod, then click Turbo again.')
+  }
+  const pick =
+    pods.find((p) => p.desiredStatus === 'RUNNING') ||
+    [...pods].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0]
+  setPodId(pick.id)
+  return pick.id
+}
+
 // Fetch live pod status from Runpod REST v2 API
-export async function fetchPodDetails(podId = getPodId()) {
-  const data = await runpodRequest(`/pods/${podId}`)
-  return data
+export async function fetchPodDetails(podId) {
+  return runpodRequest(`/pods/${podId || (await resolvePodId())}`)
 }
 
 // Start Runpod Pod
-export async function startRunpodPod(podId = getPodId()) {
-  return runpodRequest(`/pods/${podId}/action`, {
+export async function startRunpodPod(podId) {
+  const id = podId || (await resolvePodId())
+  return runpodRequest(`/pods/${id}/action`, {
     method: 'POST',
     body: { action: 'start' },
   })
 }
 
 // Stop the pod only after the provider confirms the action.
-async function stopPod(podId = getPodId()) {
+async function stopPod(podId) {
+  podId = podId || (await resolvePodId())
   const result = await runpodRequest(`/pods/${podId}/action`, {
     method: 'POST', body: { action: 'stop' },
   })
@@ -173,7 +236,7 @@ async function stopPod(podId = getPodId()) {
   return result
 }
 
-export function stopRunpodPod(podId = getPodId()) {
+export function stopRunpodPod(podId) {
   return exclusiveSwitch(() => stopPod(podId))
 }
 
@@ -185,8 +248,9 @@ export async function killTunnel() {
   return tunnel.stop()
 }
 
-export function switchToTurbo({ podId = getPodId() } = {}) {
+export function switchToTurbo({ podId } = {}) {
   return exclusiveSwitch(async () => {
+    podId = podId || (await resolvePodId())
     let pod = await fetchPodDetails(podId)
     if (pod.status !== 'RUNNING') await startRunpodPod(podId)
     const start = Date.now()

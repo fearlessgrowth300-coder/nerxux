@@ -30,3 +30,13 @@ export async function getPodDetails() {
   const { data } = await api.get('/api/compute/pod')
   return data
 }
+
+export async function listPods() {
+  const { data } = await api.get('/api/compute/pods')
+  return data.pods || []
+}
+
+export async function selectPod(podId) {
+  const { data } = await api.post('/api/compute/pod', { podId })
+  return data
+}
