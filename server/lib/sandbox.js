@@ -120,9 +120,17 @@ export async function executeInSandbox({
     'export GIT_TERMINAL_PROMPT=0',
     ...(gitToken
       ? [
-          'export GIT_CONFIG_COUNT=1',
+          // insteadOf is multi-valued, so the same key is set three times: an
+          // existing clone may use ANY of GitHub's URL forms, and a repo with
+          // an SSH remote (git@github.com:owner/repo) would otherwise ignore
+          // the token entirely and fail on a key the sandbox does not have.
+          'export GIT_CONFIG_COUNT=3',
           `export GIT_CONFIG_KEY_0="url.https://x-access-token:${gitToken}@github.com/.insteadOf"`,
           'export GIT_CONFIG_VALUE_0="https://github.com/"',
+          `export GIT_CONFIG_KEY_1="url.https://x-access-token:${gitToken}@github.com/.insteadOf"`,
+          'export GIT_CONFIG_VALUE_1="git@github.com:"',
+          `export GIT_CONFIG_KEY_2="url.https://x-access-token:${gitToken}@github.com/.insteadOf"`,
+          'export GIT_CONFIG_VALUE_2="ssh://git@github.com/"',
         ]
       : []),
   ].join('\n')
