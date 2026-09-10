@@ -10,6 +10,7 @@ import {
   fetchPodDetails,
   listPods,
   setPodId,
+  terminateRunpodPod,
 } from '../lib/computeManager.js'
 
 const router = Router()
@@ -105,6 +106,20 @@ router.post('/pod', (req, res) => {
     res.json({ ok: true, podId: setPodId(podId) })
   } catch (err) {
     res.status(400).json({ error: err.message })
+  }
+})
+
+// POST /api/compute/pod/terminate — destroy a pod and its volume for good.
+// Body: { podId } — required and explicit: terminating whatever pod happened to
+// be auto-detected would be a very expensive accident.
+router.post('/pod/terminate', async (req, res) => {
+  try {
+    const { podId } = req.body || {}
+    if (!podId) return res.status(400).json({ error: 'podId is required' })
+    await terminateRunpodPod(podId)
+    res.json({ ok: true, terminated: podId })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 

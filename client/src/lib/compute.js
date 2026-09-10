@@ -40,3 +40,8 @@ export async function selectPod(podId) {
   const { data } = await api.post('/api/compute/pod', { podId })
   return data
 }
+
+export async function terminatePod(podId) {
+  const { data } = await api.post('/api/compute/pod/terminate', { podId })
+  return data
+}

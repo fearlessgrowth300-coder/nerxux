@@ -5,11 +5,12 @@ import { supabase } from '../lib/supabase'
 import { api, apiError } from '../lib/api'
 import { getPrefs, savePrefs, ACCENT_THEMES, FONTS } from '../lib/prefs'
 import {
-  SettingsIcon, ConnectionsIcon, InstructionsIcon, SkillsIcon, SearchIcon, LogoutIcon,
+  SettingsIcon, ConnectionsIcon, InstructionsIcon, SkillsIcon, SearchIcon, LogoutIcon, SparkIcon,
 } from '../components/icons'
 import { CHAT_MODELS } from '@shared/models'
 import Modal from '../components/Modal'
 import InstallApp from '../components/InstallApp'
+import GpuPods from '../components/GpuPods'
 
 const SECTIONS = [
   { id: 'general', label: 'General', Icon: SettingsIcon },
@@ -17,6 +18,7 @@ const SECTIONS = [
   { id: 'account', label: 'Account', Icon: LogoutIcon },
   { id: 'privacy', label: 'Privacy', Icon: InstructionsIcon },
   { id: 'capabilities', label: 'Capabilities', Icon: SkillsIcon },
+  { id: 'gpu', label: 'GPU pods', Icon: SparkIcon },
   { id: 'connections', label: 'Connections', Icon: ConnectionsIcon },
 ]
 
@@ -72,6 +74,7 @@ export default function Settings() {
         {active === 'account' && <Account />}
         {active === 'privacy' && <Privacy />}
         {active === 'capabilities' && <Capabilities />}
+        {active === 'gpu' && <GpuPods />}
         {active === 'connections' && <ConnectionsSection />}
       </div>
     </div>

@@ -242,6 +242,35 @@ export function stopRunpodPod(podId) {
   return exclusiveSwitch(() => stopPod(podId))
 }
 
+// Terminate: destroys the pod AND its /workspace volume (Ollama + the model).
+// Irreversible, so the caller must name the pod explicitly — never a resolved
+// default, which would make "terminate" hit whatever pod happened to be found.
+export function terminateRunpodPod(podId) {
+  const id = String(podId || '').trim()
+  if (!id) throw new Error('A pod id is required to terminate a pod.')
+  return exclusiveSwitch(async () => {
+    let result
+    try {
+      result = await runpodRequest(`/pods/${id}/action`, { method: 'POST', body: { action: 'terminate' } })
+    } catch {
+      result = await runpodRequest(`https://rest.runpod.io/v1/pods/${id}`, { method: 'DELETE' })
+    }
+    // Forget it, so the next Turbo press discovers the replacement pod instead
+    // of retrying a pod that no longer exists.
+    if (knownPodId === id) {
+      knownPodId = null
+      writeState({ podId: null })
+      await tunnel.stop()
+      setCurrentMode('always_on')
+    }
+    if (provisioning?.podId === id) {
+      if (provisioning.timer) clearInterval(provisioning.timer)
+      provisioning = null
+    }
+    return result
+  })
+}
+
 export async function startTunnel(host, port) {
   return tunnel.start(host, port)
 }
