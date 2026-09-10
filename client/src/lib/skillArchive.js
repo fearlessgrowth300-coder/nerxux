@@ -11,21 +11,47 @@ import JSZip from 'jszip'
 const MAX_RESOURCE_BYTES = 40_000 // per file — keep a skill row sane
 const TEXT_EXT = /\.(md|markdown|txt|json|ya?ml|toml|csv|py|js|ts|sh|bash|sql|html|css)$/i
 
-// Minimal YAML frontmatter reader: the subset Skills actually use (flat
-// key: value pairs, optionally quoted). Not a general YAML parser, and
-// deliberately so — a wrong-but-confident parse is worse than a missing field.
+// Frontmatter reader for the subset Skills actually use: flat `key: value`
+// pairs, and YAML block scalars (`>`, `>-`, `|`, `|-`), which real skills use
+// constantly for the description because it runs to a sentence or three.
+//
+// Missing block-scalar support did not fail loudly — it stored the description
+// as the literal text ">-", and since the description is the ONLY thing the
+// model sees when choosing a skill, those skills were invisible.
 export function parseFrontmatter(text = '') {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
   if (!match) return { meta: {}, body: text.trim() }
+
   const meta = {}
-  for (const line of match[1].split(/\r?\n/)) {
-    const m = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line.trim())
+  const lines = match[1].split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(lines[i])
     if (!m) continue
+    const key = m[1].toLowerCase()
     let value = m[2].trim()
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+
+    const block = /^([>|])([-+]?)\d*$/.exec(value)
+    if (block) {
+      // Consume the indented lines belonging to this key.
+      const collected = []
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1]
+        if (next.trim() && !/^\s/.test(next)) break // a new top-level key
+        collected.push(next.trim())
+        i++
+      }
+      while (collected.length && !collected[collected.length - 1]) collected.pop()
+      // '>' folds the lines into one paragraph; '|' keeps them as written.
+      value = block[1] === '>'
+        ? collected.join(' ').replace(/\s+/g, ' ').trim()
+        : collected.join('\n').trim()
+    } else if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
       value = value.slice(1, -1)
     }
-    meta[m[1].toLowerCase()] = value
+    meta[key] = value
   }
   return { meta, body: text.slice(match[0].length).trim() }
 }

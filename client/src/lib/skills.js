@@ -20,6 +20,19 @@ export async function createSkill({ name, description, content, enabled = true, 
   const row = { user_id: userId, name, description, content, enabled }
   if (resources && Object.keys(resources).length) row.resources = resources
 
+  // Re-importing the same zip must UPDATE each skill, not add a second copy.
+  // Without this an accidental double import doubled the index the model reads
+  // on every message.
+  const { data: existing } = await supabase
+    .from('skills').select('id').eq('user_id', userId).eq('name', name).maybeSingle()
+  if (existing?.id) {
+    const upd = await supabase.from('skills')
+      .update({ ...row, updated_at: new Date().toISOString() })
+      .eq('id', existing.id).select().single()
+    if (upd.error) throw upd.error
+    return { ...upd.data, replaced: true }
+  }
+
   const { data, error } = await supabase.from('skills').insert(row).select().single()
   if (error) {
     // The bundled-files column is newer than some databases. Save the skill
@@ -49,6 +62,7 @@ export async function importSkillsFromZip(file) {
         ok: true,
         files: Object.keys(skill.resources || {}).length,
         resourcesSkipped: Boolean(saved.resourcesSkipped),
+        replaced: Boolean(saved.replaced),
         skipped: skill.skipped,
       })
     } catch (e) {

@@ -171,6 +171,7 @@ export default function Skills() {
             {importReport.map((r) => (
               <li key={r.name} className={r.ok ? 'text-gray-400' : 'text-red-400'}>
                 {r.ok ? '✓' : '✗'} {r.name}
+                {r.ok && r.replaced && ' · updated'}
                 {r.ok && r.files > 0 && ` · ${r.files} bundled file${r.files === 1 ? '' : 's'}`}
                 {r.ok && r.resourcesSkipped && ' · bundled files not saved (run the resources migration)'}
                 {r.ok && r.skipped?.length > 0 && ` · skipped ${r.skipped.join(', ')}`}

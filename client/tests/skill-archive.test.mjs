@@ -83,3 +83,29 @@ test('binary and oversized extras are skipped, not stuffed into the row', async 
   assert.deepEqual(Object.keys(skill.resources), [])
   assert.equal(skill.skipped.length, 2)
 })
+
+// Real skills write their description as a YAML block scalar far more often
+// than as a quoted string. Storing the literal ">-" made those skills
+// undiscoverable, because the description is the only thing the model sees.
+test('folded block scalars become the description', () => {
+  const { meta } = parseFrontmatter(
+    '---\nname: runpod\ndescription: >-\n  Manage Runpod GPU pods from the CLI.\n  Use when the user asks about pods.\nversion: 1\n---\nbody'
+  )
+  assert.equal(meta.description, 'Manage Runpod GPU pods from the CLI. Use when the user asks about pods.')
+  assert.equal(meta.name, 'runpod')
+  assert.equal(meta.version, '1')
+})
+
+test('literal block scalars keep their line breaks', () => {
+  const { meta } = parseFrontmatter('---\ndescription: |\n  line one\n  line two\n---\nbody')
+  assert.equal(meta.description, 'line one\nline two')
+})
+
+test('a block scalar does not swallow the key that follows it', () => {
+  const { meta, body } = parseFrontmatter(
+    '---\ndescription: >-\n  some text\nname: flash\n---\n# Flash'
+  )
+  assert.equal(meta.description, 'some text')
+  assert.equal(meta.name, 'flash')
+  assert.equal(body, '# Flash')
+})

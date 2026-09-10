@@ -15,6 +15,7 @@ import { supabaseAdmin } from './supabase.js'
 // fetched on demand.
 
 const MAX_SKILL_CHARS = 60_000
+const MAX_INDEX_DESC = 180 // per skill, in the always-present index
 
 export const LOAD_SKILL_TOOL = {
   name: 'load_skill',
@@ -89,9 +90,18 @@ export async function buildSkillToolset(userId) {
     return { index: '', tools: [], has: () => false, run: async () => 'No skills are available.' }
   }
 
+  // The index rides on EVERY message, so each line has to earn its place. Real
+  // skill descriptions run to several hundred characters ("Use when the user
+  // asks to ... or ... or ..."); the first sentence or two is what the model
+  // actually matches on, and 69 full descriptions came to 18KB per message.
   const lines = skills.map((s) => {
-    const desc = (s.description || '').trim() || '(no description)'
-    return `- ${s.name}: ${desc}`
+    let desc = (s.description || '').replace(/\s+/g, ' ').trim()
+    if (desc.length > MAX_INDEX_DESC) {
+      const cut = desc.slice(0, MAX_INDEX_DESC)
+      const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('; '))
+      desc = (stop > MAX_INDEX_DESC / 2 ? cut.slice(0, stop + 1) : cut.trimEnd() + '…')
+    }
+    return `- ${s.name}: ${desc || '(no description)'}`
   })
   const index =
     '# Skills available\n' +
