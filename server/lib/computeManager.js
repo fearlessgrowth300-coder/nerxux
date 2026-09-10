@@ -150,6 +150,11 @@ export async function getLiveComputeStatus() {
       setCurrentMode('always_on')
       notice = `The RunPod pod is ${String(pod.status || 'not running').toLowerCase()}, so Turbo can't be used. Switched to Always On. Click Turbo to start the pod again.`
     }
+    // Prepare a freshly created pod without being asked. Deliberately not
+    // awaited: an SSH probe must not slow down a status poll — the next poll,
+    // seconds later, reports the progress.
+    if (running && !notice) autoProvisionIfNeeded(podIdOf(pod), pod).catch(() => {})
+
     const setup = getProvisioningState()
     return {
       ...getComputeStatus(),
@@ -319,6 +324,27 @@ function watchProvisioning(podId, host, port, firstMessage) {
   provisioning.timer = setInterval(tick, 30000)
   provisioning.timer.unref?.()
   tick()
+}
+
+// A pod the user just created is not useful until Ollama and the model are on
+// it, and making that wait for a button press means the app sits there saying
+// "pod is running" while doing nothing — which is exactly what it looked like.
+// When a running pod has no model, start the install in the background.
+const podIdOf = (pod) => pod?.id || knownPodId
+const autoTried = new Map() // podId -> last attempt, so a failing pod is not hammered
+
+async function autoProvisionIfNeeded(podId, pod) {
+  if (provisioning || switchPromise || tunnel.ready) return
+  const last = autoTried.get(podId) || 0
+  if (Date.now() - last < 5 * 60_000) return
+  autoTried.set(podId, Date.now())
+
+  const endpoint = podSshEndpoint(pod)
+  if (!endpoint) return
+  if (await tunnel.podHasModel(endpoint.host, endpoint.port)) return
+
+  const message = await tunnel.provision(endpoint.host, tunnel.sshCommon(endpoint.port))
+  watchProvisioning(podId, endpoint.host, endpoint.port, message)
 }
 
 export function getProvisioningState() {

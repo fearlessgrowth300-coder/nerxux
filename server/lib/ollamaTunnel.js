@@ -189,6 +189,20 @@ export class OllamaTunnel {
       'This takes about 10–20 minutes and keeps going even if you close the app. Press Turbo again to check progress.'
   }
 
+  // Is the model actually there and being served? Asked over SSH, so it works
+  // before any tunnel exists — which is what lets a freshly created pod be
+  // prepared in the background instead of waiting for someone to press a button.
+  async podHasModel(host, port) {
+    try {
+      const { stdout } = await this.run('ssh', [...this.sshCommon(port), 'root@' + host,
+        'curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null || true'],
+        { timeout: 20000, windowsHide: true })
+      return String(stdout || '').includes(TURBO_MODEL)
+    } catch {
+      return false
+    }
+  }
+
   async start(host, port) {
     if (this.child && this.endpoint === host + ':' + port && await this.probe()) {
       this.ready = true

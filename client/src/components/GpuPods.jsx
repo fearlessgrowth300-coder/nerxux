@@ -73,6 +73,14 @@ export default function GpuPods() {
                 <span className="text-gray-400">{setup.line || 'starting…'}</span>
               </p>
             )}
+            {/* A running pod with no setup underway looked identical to a pod
+                being ignored. Say which it is. */}
+            {!setup && status.runpodRunning && status.mode !== 'turbo' && (
+              <p className="mt-1 text-gray-500">
+                Checking the pod for Ollama and the model — if they are missing the install
+                starts on its own within a minute. Connect Turbo starts it immediately.
+              </p>
+            )}
             <div className="mt-2 flex flex-wrap gap-2">
               <button onClick={() => act('connect', () => switchComputeMode('turbo', false))} disabled={Boolean(busy)}
                 className="rounded-lg bg-nexus-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:opacity-40">
