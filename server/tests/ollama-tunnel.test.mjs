@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import http from 'node:http'
-import { OllamaTunnel, podSshEndpoint, checkOllama, TURBO_MODEL, START_OLLAMA } from '../lib/ollamaTunnel.js'
+import { OllamaTunnel, podSshEndpoint, checkOllama, TURBO_MODEL, START_OLLAMA, PROVISION_OLLAMA, PROVISION_STATUS } from '../lib/ollamaTunnel.js'
 
 test('uses the current pod SSH endpoint and never falls back to a stale port', () => {
   assert.deepEqual(podSshEndpoint({status:'RUNNING',runtime:{ports:[{private:22,public:40084,ip:'213.192.2.75'}]}}),
@@ -69,7 +69,7 @@ test('a late close from the old SSH process cannot clear the new connection', as
 // not an error to hand back. Rather than telling the user Ollama is missing and
 // leaving them to work out what to paste into RunPod's web terminal, the pod
 // installs itself and the message says what is happening.
-function freshPodTunnel({ tail = '' } = {}) {
+function freshPodTunnel({ install = 'STARTED', status = '' } = {}) {
   const sent = []
   const tunnel = new OllamaTunnel('/test/key', {
     now: () => 0, sleep: async () => {},
@@ -77,7 +77,8 @@ function freshPodTunnel({ tail = '' } = {}) {
       const command = args[args.length - 1]
       sent.push(command)
       if (command === START_OLLAMA) throw Object.assign(new Error('missing'), { code: 42, stderr: 'not installed' })
-      if (command.startsWith('tail ')) return { stdout: tail }
+      if (command === PROVISION_OLLAMA) return { stdout: install }
+      if (command === PROVISION_STATUS) return { stdout: status }
       return { stdout: '' }
     },
     spawn: () => { throw new Error('must not open a tunnel to an unprovisioned pod') },
@@ -88,22 +89,50 @@ function freshPodTunnel({ tail = '' } = {}) {
 test('a pod with nothing installed provisions itself instead of just failing', async () => {
   const f = freshPodTunnel()
   await assert.rejects(() => f.tunnel.start('host', 1000), /installing Ollama and downloading/)
-  assert.ok(f.sent.some((c) => c.includes('ollama-linux-amd64.tgz')), 'the install must actually be sent to the pod')
-  assert.ok(f.sent.some((c) => c.includes(TURBO_MODEL)), 'it must pull the model Turbo needs')
+  assert.ok(f.sent.includes(PROVISION_OLLAMA), 'the install must actually be sent to the pod')
   assert.equal(f.tunnel.ready, false)
 })
 
 test('a setup already running reports its progress rather than starting a second 17GB download', async () => {
-  const f = freshPodTunnel({ tail: '[3/3] pulling the model (~17GB, this is the slow part)...' })
-  await assert.rejects(() => f.tunnel.start('host', 1000), /this is the slow part/)
-  assert.ok(!f.sent.some((c) => c.includes('ollama-linux-amd64.tgz')), 'must not re-run the installer')
+  const f = freshPodTunnel({ install: 'RUNNING', status: 'STATE=alive\n[4/4] pulling the model' })
+  await assert.rejects(() => f.tunnel.start('host', 1000), /\[4\/4\] pulling the model/)
 })
 
 test('a finished setup that is not answering yet says so, instead of claiming Turbo is live', async () => {
-  const f = freshPodTunnel({ tail: 'PROVISION_DONE' })
+  const f = freshPodTunnel({ install: 'DONE' })
   await assert.rejects(() => f.tunnel.start('host', 1000), /not answering yet/)
   assert.equal(f.tunnel.ready, false)
 })
+
+// The install script is only reachable through a remote shell, so the one thing
+// worth pinning here is that it asks which asset actually exists rather than
+// pinning a name. A stale .tgz URL 404'd on a real pod and the failure showed
+// up as endless "progress".
+test('the installer feature-tests the download instead of pinning one asset name', () => {
+  assert.ok(PROVISION_OLLAMA.includes('ollama-linux-amd64.tar.zst'))
+  assert.ok(PROVISION_OLLAMA.includes('ollama-linux-amd64.tgz'))
+  assert.ok(PROVISION_OLLAMA.includes('test -x $D/bin/ollama'), 'a failed extract must not look like success')
+  assert.ok(PROVISION_OLLAMA.includes(TURBO_MODEL))
+})
+
+test('an installer that died is reported as failed, not as slow progress', async () => {
+  const f = freshPodTunnel({ status: 'STATE=dead\ntar: Error is not recoverable: exiting now' })
+  const p = await f.tunnel.provisionProgress('host', 1000)
+  assert.equal(p.failed, true)
+  assert.equal(p.done, false)
+  assert.match(p.line, /not recoverable/)
+})
+
+test('a live installer is progress, and a finished one is done', async () => {
+  const alive = await freshPodTunnel({ status: 'STATE=alive\n[2/4] downloading Ollama...' }).tunnel.provisionProgress('h', 1)
+  assert.equal(alive.alive, true)
+  assert.equal(alive.done, false)
+  assert.equal(alive.failed, false)
+  const done = await freshPodTunnel({ status: 'STATE=dead\nPROVISION_DONE' }).tunnel.provisionProgress('h', 1)
+  assert.equal(done.done, true)
+  assert.equal(done.failed, false)
+})
+
 test('failed model readiness closes the tunnel rather than leaving an orphan listener', async () => {
   const f=fixture({notReady:true})
   await assert.rejects(()=>f.tunnel.start('host',1000),/did not load the required model/)

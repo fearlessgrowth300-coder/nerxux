@@ -272,6 +272,11 @@ function watchProvisioning(podId, host, port, firstMessage) {
     }
     const p = await tunnel.provisionProgress(host, port)
     if (p.line) provisioning.line = p.line
+    // The installer stopped without finishing — say so, with its last output,
+    // rather than counting minutes at a process that is already dead.
+    if (p.failed) {
+      return finish({ done: true, failed: true, message: `Pod setup failed: ${p.line || 'the installer stopped'}. Press Turbo to try again.` })
+    }
     if (!p.done) return
     finish({ done: true })
     try {

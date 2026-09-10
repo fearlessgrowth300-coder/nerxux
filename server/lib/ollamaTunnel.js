@@ -25,30 +25,58 @@ export const START_OLLAMA = [
   'fi',
 ].join('\n')
 
+export const PROVISION_LOG = '/workspace/nerxux-provision.log'
+export const PROVISION_PID = '/workspace/nerxux-ollama/.provision.pid'
+
 // A brand new pod has an empty /workspace — no Ollama, no model. Rather than
 // making someone paste shell into RunPod's web terminal, the pod installs
-// itself on first use. It runs detached (the model is ~17GB, far longer than
-// any request should wait) and logs progress where the next attempt can read it.
-export const PROVISION_LOG = '/workspace/nerxux-provision.log'
+// itself on first use, onto the persistent volume so a later stop/start does
+// not repeat the download. It runs detached (~17GB outlives any request) and
+// logs where the next attempt can read it.
+//
+// Safe to run on every Turbo press: it starts an install only when one is not
+// already running and not already finished. An install that DIED is started
+// again rather than reported as eternally "in progress" — that was the failure
+// mode that hid a broken download URL behind a reassuring progress message.
+//
+// $D is expanded by the outer shell (D is set below), which is why the inner
+// script needs no escaping. The asset name is asked for by feature test:
+// Ollama moved its releases from .tgz to .tar.zst, and pinning either one
+// alone means a silent 404 the next time they change it.
 export const PROVISION_OLLAMA = [
   'set -eu',
   'D=/workspace/nerxux-ollama',
-  // Already provisioning? Don't start a second 17GB download on top of the first.
-  `if [ -f ${PROVISION_LOG} ] && kill -0 "$(cat $D/.provision.pid 2>/dev/null || echo 0)" 2>/dev/null; then exit 0; fi`,
   'mkdir -p "$D/models"',
-  `nohup sh -c '`,
-  `  set -eu`,
-  `  D=/workspace/nerxux-ollama`,
-  `  echo "[1/3] downloading Ollama..."`,
-  `  curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz | tar -xz -C "$D"`,
-  `  echo "[2/3] starting Ollama..."`,
-  `  OLLAMA_HOST=127.0.0.1:11434 OLLAMA_KEEP_ALIVE=-1 OLLAMA_MODELS="$D/models" "$D/bin/ollama" serve >"$D/ollama.log" 2>&1 &`,
-  `  sleep 8`,
-  `  echo "[3/3] pulling ${TURBO_MODEL} (~17GB, this is the slow part)..."`,
-  `  OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS="$D/models" "$D/bin/ollama" pull ${TURBO_MODEL}`,
-  `  echo "PROVISION_DONE"`,
-  `' >${PROVISION_LOG} 2>&1 </dev/null &`,
-  'echo $! > "$D/.provision.pid"',
+  'if [ -f ' + PROVISION_PID + ' ] && kill -0 "$(cat ' + PROVISION_PID + ' 2>/dev/null || echo 0)" 2>/dev/null; then echo RUNNING; exit 0; fi',
+  'if grep -q PROVISION_DONE ' + PROVISION_LOG + ' 2>/dev/null; then echo DONE; exit 0; fi',
+  'nohup sh -c "',
+  '  set -eu',
+  '  echo [1/4] making sure zstd is available...',
+  '  command -v zstd >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq zstd; } || true',
+  '  echo [2/4] downloading Ollama...',
+  '  if command -v zstd >/dev/null 2>&1 && curl -fsSLI https://ollama.com/download/ollama-linux-amd64.tar.zst >/dev/null 2>&1; then',
+  '    curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst | zstd -d | tar -xf - -C $D',
+  '  else',
+  '    curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz | tar -xz -C $D',
+  '  fi',
+  '  test -x $D/bin/ollama',
+  '  echo [3/4] starting Ollama...',
+  '  OLLAMA_HOST=127.0.0.1:11434 OLLAMA_KEEP_ALIVE=-1 OLLAMA_MODELS=$D/models $D/bin/ollama serve >$D/ollama.log 2>&1 &',
+  '  sleep 8',
+  '  echo [4/4] pulling ' + TURBO_MODEL + ' - about 17GB, this is the slow part...',
+  '  OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS=$D/models $D/bin/ollama pull ' + TURBO_MODEL,
+  '  echo PROVISION_DONE',
+  '" >' + PROVISION_LOG + ' 2>&1 </dev/null &',
+  'echo $! > ' + PROVISION_PID,
+  'echo STARTED',
+].join('\n')
+
+// Reads both the installer's log AND whether its process is still alive, so a
+// crashed install is reported as failed instead of looking like slow progress.
+export const PROVISION_STATUS = [
+  'if [ -f ' + PROVISION_PID + ' ] && kill -0 "$(cat ' + PROVISION_PID + ' 2>/dev/null || echo 0)" 2>/dev/null',
+  '  then echo STATE=alive; else echo STATE=dead; fi',
+  'tail -n 3 ' + PROVISION_LOG + ' 2>/dev/null || true',
 ].join('\n')
 
 export function podSshEndpoint(pod) {
@@ -110,19 +138,48 @@ export class OllamaTunnel {
       '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-i', this.keyPath]
   }
 
-  // How far along the one-time install is: { done, line }. `line` is the last
-  // thing the installer printed, so the UI can show real progress instead of a
-  // spinner that means nothing.
+  // How far along the one-time install is. Reports a DEAD installer as failed
+  // rather than as slow progress, so a broken download surfaces instead of
+  // showing a hopeful "[1/4]..." forever.
   async provisionProgress(host, port) {
     try {
-      const { stdout } = await this.run('ssh', [...this.sshCommon(port), 'root@' + host,
-        `tail -n 3 ${PROVISION_LOG} 2>/dev/null || true`], { timeout: 15000, windowsHide: true })
+      const { stdout } = await this.run('ssh', [...this.sshCommon(port), 'root@' + host, PROVISION_STATUS],
+        { timeout: 20000, windowsHide: true })
       const text = (stdout || '').trim()
-      const line = text.split('\n').filter(Boolean).pop() || ''
-      return { done: text.includes('PROVISION_DONE'), line, started: Boolean(text) }
+      const alive = text.includes('STATE=alive')
+      const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('STATE='))
+      const line = lines.pop() || ''
+      const done = text.includes('PROVISION_DONE')
+      return { done, alive, line, failed: !done && !alive && lines.length + (line ? 1 : 0) > 0 }
     } catch (err) {
-      return { done: false, line: '', started: false, error: (err.stderr || err.message || '').trim().slice(-200) }
+      return { done: false, alive: false, line: '', failed: false, error: (err.stderr || err.message || '').trim().slice(-200) }
     }
+  }
+
+  // Starts (or reports on) the one-time install of Ollama + the model on a new
+  // pod. Returns the message to show the user — never a silent success: the
+  // download outlives the request by a long way.
+  async provision(host, common) {
+    let output = ''
+    try {
+      const { stdout } = await this.run('ssh', [...common, 'root@' + host, PROVISION_OLLAMA],
+        { timeout: 30000, windowsHide: true })
+      output = (stdout || '').trim()
+    } catch (err) {
+      return 'This pod has no Ollama installed and the setup could not be started: ' +
+        (err.stderr || err.message || '').trim().slice(-300)
+    }
+
+    if (output.includes('DONE')) {
+      return 'The pod finished installing but Ollama is not answering yet. Press Turbo again in a minute.'
+    }
+    if (output.includes('RUNNING')) {
+      const p = await this.provisionProgress(host, Number(common[common.indexOf('-p') + 1]))
+      return 'Setting up your new pod — this takes 10–20 minutes (the model is ~17GB)' +
+        (p.line ? '. Latest: ' + p.line : '') + '. Press Turbo again to check.'
+    }
+    return 'New pod detected — installing Ollama and downloading the 27B model (~17GB) on the pod now. ' +
+      'This takes about 10–20 minutes and keeps going even if you close the app. Press Turbo again to check progress.'
   }
 
   async start(host, port) {
@@ -178,31 +235,6 @@ export class OllamaTunnel {
     await this.stop()
     throw new Error(failure.trim() ? 'RunPod tunnel failed: ' + failure.trim() :
       'RunPod Ollama did not load the required model. Check its persistent Ollama log.')
-  }
-
-  // Starts (or reports on) the one-time install of Ollama + the model on a new
-  // pod. Returns the message to show the user — this is never a silent success:
-  // the download outlives the request by a long way.
-  async provision(host, common) {
-    let tail = ''
-    try {
-      const { stdout } = await this.run('ssh', [...common, 'root@' + host, `tail -n 3 ${PROVISION_LOG} 2>/dev/null || true`],
-        { timeout: 15000, windowsHide: true })
-      tail = (stdout || '').trim()
-    } catch {}
-
-    if (tail.includes('PROVISION_DONE')) {
-      return 'The pod finished installing but Ollama is not answering yet. Press Turbo again in a minute.'
-    }
-    if (tail) {
-      return `Setting up your new pod — this runs on the pod and takes 10–20 minutes (the model is ~17GB). Latest: ${tail.split('\n').pop()}. Press Turbo again to check.`
-    }
-    try {
-      await this.run('ssh', [...common, 'root@' + host, PROVISION_OLLAMA], { timeout: 20000, windowsHide: true })
-    } catch (err) {
-      return 'This pod has no Ollama installed and the setup could not be started: ' + (err.stderr || err.message || '').trim().slice(-300)
-    }
-    return 'New pod detected — installing Ollama and downloading the 27B model (~17GB) on the pod now. This takes about 10–20 minutes and keeps going even if you close the app. Press Turbo again to check progress.'
   }
 
   async health() {
