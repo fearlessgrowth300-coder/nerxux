@@ -18,10 +18,22 @@ const GRAVEYARD_FILE = path.join(__dirname, '../.chat-jobs-graveyard.json')
 // Generous: a phone that locks its screen stops polling entirely, and a long
 // build must survive that — the client re-attaches to the job when it comes
 // back. Stop is explicit (cancelJob); this only catches truly abandoned jobs.
-export const STALE_MS = 30 * 60_000
+// Must exceed the longest a single turn is allowed to run (60 min on the GPU),
+// or unattended work is killed by the polling heuristic before the model is
+// even out of time — exactly the case where nobody is watching: the phone is
+// locked, the PC is off, and a long build is running on the server.
+export const STALE_MS = 70 * 60_000
 export const RESULT_TTL_MS = 10 * 60_000
 
 const jobs = new Map()
+
+// A finished reply nobody collected used to be dropped after RESULT_TTL_MS and
+// lost for good, because only the CLIENT writes replies to the conversation.
+// Close the app while something is generating, come back an hour later, and
+// the answer never existed. This hands an uncollected result somewhere durable
+// before it is discarded.
+let rescueUndelivered = null
+export function setRescueHandler(fn) { rescueUndelivered = fn }
 
 // A deploy restarts the process; that wipes this whole in-memory Map, no
 // matter how gracefully we shut down — there's no way to actually resume a
@@ -49,10 +61,12 @@ export function saveGraveyard() {
   try { fs.writeFileSync(GRAVEYARD_FILE, JSON.stringify(running)) } catch {}
 }
 
-export function createJob(userId, controller, now = Date.now()) {
+export function createJob(userId, controller, now = Date.now(), conversationId = null) {
   const job = {
     id: randomUUID(),
     userId,
+    conversationId,
+    delivered: false,
     controller,
     status: 'running',
     result: null,
@@ -119,6 +133,9 @@ export function sweepJobs(now = Date.now()) {
       job.controller.abort()
       failJob(job, Object.assign(new Error('abandoned'), { name: 'AbortError' }), now)
     } else if (job.status !== 'running' && now - job.finishedAt > RESULT_TTL_MS) {
+      if (!job.delivered && job.status === 'done' && job.conversationId && rescueUndelivered) {
+        Promise.resolve(rescueUndelivered(job)).catch(() => {})
+      }
       jobs.delete(job.id)
     }
   }

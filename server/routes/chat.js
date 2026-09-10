@@ -9,13 +9,37 @@ import { callMcpTool } from '../lib/mcp.js'
 import { shouldAttachAgentTools } from '../lib/needsTools.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
-import { createJob, completeJob, failJob, touchJob, cancelJob } from '../lib/chatJobs.js'
+import { createJob, completeJob, failJob, touchJob, cancelJob, setRescueHandler } from '../lib/chatJobs.js'
+import { supabaseAdmin } from '../lib/supabase.js'
 import { executeAgentTool, AGENT_GUIDANCE } from '../lib/agentLoop.js'
 import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
 import { WEB_SEARCH_TOOL, hasBraveKey } from '../lib/webSearch.js'
 import { buildSkillToolset } from '../lib/skillTools.js'
 
 const router = Router()
+
+// A reply that finished while nobody was watching — the app closed, the phone
+// asleep, the PC off — is written straight into the conversation, so the work
+// is waiting in History instead of being thrown away with the job. Only ever
+// runs for a result the client never collected, so it cannot duplicate one the
+// client already saved itself.
+setRescueHandler(async (job) => {
+  const messages = (job.result?.messages || []).filter((m) => m && m.role && m.role !== 'approval')
+  if (!messages.length) return
+  const now = Date.now()
+  const { error } = await supabaseAdmin.from('conversation_messages').insert(
+    messages.map((m, i) => ({
+      conversation_id: job.conversationId,
+      user_id: job.userId,
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : '',
+      model: m.model || null,
+      data: m,
+      created_at: new Date(now + i).toISOString(),
+    }))
+  )
+  if (error) console.error('[nexus-ai] could not rescue an uncollected reply:', error.message)
+})
 router.use(requireAuth)
 
 // Provider/model metadata for router "tools".
@@ -199,7 +223,9 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
 router.post('/', async (req, res, next) => {
   const controller = new AbortController()
   if (req.body?.async) {
-    const job = createJob(req.user.id, controller)
+    // The conversation id travels as sessionId, so an uncollected reply can
+    // still be written to the right chat.
+    const job = createJob(req.user.id, controller, Date.now(), req.body?.sessionId || null)
     const onProgress = (event) => { job.events.push({ ...event, at: Date.now() }) }
     handleChat(req.user.id, req.body, controller.signal, onProgress)
       .then((result) => completeJob(job, result))
@@ -225,6 +251,7 @@ router.get('/jobs/:id', (req, res) => {
     return res.status(404).json({ error: 'That request has expired — please resend your message.' })
   }
   if (job.status === 'running') return res.json({ status: 'running', events: job.events })
+  job.delivered = true // the client has it; no need to rescue it later
   res.json({ status: job.status, result: job.result, error: job.error })
 })
 

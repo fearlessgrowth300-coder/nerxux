@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  createJob, completeJob, failJob, touchJob, sweepJobs, saveGraveyard, loadGraveyard, STALE_MS, RESULT_TTL_MS,
+  createJob, completeJob, failJob, touchJob, sweepJobs, saveGraveyard, loadGraveyard, setRescueHandler, STALE_MS, RESULT_TTL_MS,
 } from '../lib/chatJobs.js'
 
 const GRAVEYARD_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../.chat-jobs-graveyard.json')
@@ -84,4 +84,39 @@ test('a job the graveyard remembers gets an honest, specific answer instead of a
   assert.equal(touchJob('never-seen-anywhere', 'alice'), null) // a truly unknown id is still a plain 404
 
   loadGraveyard() // nothing left to read — must not throw
+})
+
+// "Can I close everything and let it keep working?" — these are the two rules
+// that decide the answer.
+test('an unattended job is not killed before its own time budget runs out', () => {
+  const job = createJob('u1', { abort() {} }, 0)
+  // A long GPU turn is allowed 60 minutes; nobody polls the whole time.
+  sweepJobs(59 * 60_000)
+  assert.equal(job.status, 'running', 'a 59-minute unattended job must still be alive')
+  sweepJobs(71 * 60_000)
+  assert.notEqual(job.status, 'running', 'but a truly abandoned one is eventually dropped')
+})
+
+test('a reply nobody collected is handed somewhere durable before it is dropped', async () => {
+  const rescued = []
+  setRescueHandler((job) => { rescued.push(job) })
+  const job = createJob('u1', { abort() {} }, 0, 'conv-1')
+  completeJob(job, { messages: [{ role: 'assistant', content: 'the finished work' }] }, 1000)
+
+  sweepJobs(1000 + RESULT_TTL_MS + 1)
+  assert.equal(rescued.length, 1, 'the uncollected result must be saved, not binned')
+  assert.equal(rescued[0].conversationId, 'conv-1')
+  setRescueHandler(null)
+})
+
+test('a result the client already picked up is not saved twice', () => {
+  const rescued = []
+  setRescueHandler((job) => { rescued.push(job) })
+  const job = createJob('u1', { abort() {} }, 0, 'conv-1')
+  completeJob(job, { messages: [{ role: 'assistant', content: 'x' }] }, 1000)
+  job.delivered = true // what the poll route sets when it hands the result over
+
+  sweepJobs(1000 + RESULT_TTL_MS + 1)
+  assert.equal(rescued.length, 0)
+  setRescueHandler(null)
 })
