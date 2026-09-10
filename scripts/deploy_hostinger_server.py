@@ -1,5 +1,7 @@
 import os
 import sys
+import subprocess
+from pathlib import Path
 import paramiko
 from _deploy_env import require
 
@@ -30,14 +32,24 @@ HOSTINGER_OLLAMA_URL={env['HOSTINGER_OLLAMA_URL']}
 BRAVE_SEARCH_API_KEY={brave_key}
 """
 
-def run(ssh, cmd):
+def run(ssh, cmd, check=True):
+    """Run a command on the server.
+
+    `check` matters more than it looks: this used to ignore exit codes
+    entirely, so a `git pull` that refused (a dirty tree on the server) was
+    printed as a warning while the deploy carried on to restart PM2 on the OLD
+    code and report success. Three deploys in a row silently did nothing.
+    """
     safe_print(f"\n[HOSTINGER] $ {cmd}")
     stdin, stdout, stderr = ssh.exec_command(cmd)
     out = stdout.read().decode('utf-8', errors='replace')
     err = stderr.read().decode('utf-8', errors='replace')
+    status = stdout.channel.recv_exit_status()
     safe_print(out)
     if err:
         safe_print("[STDERR] " + err)
+    if check and status != 0:
+        raise SystemExit(f"FAILED (exit {status}): {cmd}\n{err or out}")
     return out
 
 def main():
@@ -48,7 +60,19 @@ def main():
     safe_print("Connected!")
 
     # 1. Clone or pull repo
-    run(ssh, "if [ -d /root/nerxux ]; then cd /root/nerxux && git pull; else git clone https://github.com/fearlessgrowth300-coder/nerxux.git /root/nerxux; fi")
+    # fetch + reset, not pull: the server is a deploy target, not a place to
+    # edit. Anything left in its working tree (a file hand-copied while
+    # debugging, say) must not be able to block a deploy.
+    run(ssh, "if [ -d /root/nerxux ]; then cd /root/nerxux && git fetch origin main && git reset --hard origin/main; "
+             "else git clone https://github.com/fearlessgrowth300-coder/nerxux.git /root/nerxux; fi")
+
+    # Prove the code about to run is the code that was pushed.
+    expected = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                              cwd=str(Path(__file__).resolve().parent.parent)).stdout.strip()
+    landed = run(ssh, "cd /root/nerxux && git rev-parse HEAD").strip()
+    if expected and landed and expected != landed:
+        raise SystemExit(f"Deployed {landed[:8]} but local HEAD is {expected[:8]} — push first, then redeploy.")
+    safe_print(f"Deployed commit: {landed[:8]}")
 
     # 2. Write server/.env
     safe_print("Writing server/.env...")
