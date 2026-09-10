@@ -92,7 +92,7 @@ export default function ComputeBar() {
   const isTurbo = status.mode === 'turbo'
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-nexus-panel/80 border-b border-nexus-border/60 text-xs">
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 bg-nexus-panel/80 border-b border-nexus-border/60 text-xs">
       <div className="flex items-center gap-2">
         <span className="text-gray-400 font-medium">Compute:</span>
 

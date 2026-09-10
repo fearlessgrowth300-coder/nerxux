@@ -70,13 +70,43 @@ function kindFromMime(mime = '') {
 // result either way, so text is scanned for media URLs too.
 function mediaUrlsInText(text = '') {
   const found = []
-  for (const m of text.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)) {
-    const url = m[0].replace(/[.,;]+$/, '')
-    const ext = (url.split('?')[0].split('.').pop() || '').toLowerCase()
-    const type = EXT_TYPES[ext]
-    if (type) found.push({ type, mimeType: `${type}/${ext === 'jpg' ? 'jpeg' : ext}`, url })
+  const seen = new Set()
+  const add = (url, hint) => {
+    const clean = String(url).replace(/[.,;]+$/, '')
+    if (!/^https?:\/\//.test(clean) || seen.has(clean)) return
+    const ext = (clean.split('?')[0].split('.').pop() || '').toLowerCase()
+    const type = EXT_TYPES[ext] || hint
+    if (!type) return
+    seen.add(clean)
+    found.push({ type, mimeType: EXT_TYPES[ext] ? `${type}/${ext === 'jpg' ? 'jpeg' : ext}` : `${type}/*`, url: clean })
   }
+
+  // A generator's finished asset often has NO file extension — the CDN link is
+  // a bare id — so the key it arrives under is the only clue about what it is.
+  // Read those keys before falling back to matching extensions.
+  for (const m of text.matchAll(/"([a-z0-9_]*(?:image|thumbnail|photo|picture)[a-z0-9_]*url|url)"\s*:\s*"([^"]+)"/gi)) {
+    add(m[2], /video/i.test(m[1]) ? 'video' : 'image')
+  }
+  for (const m of text.matchAll(/"([a-z0-9_]*(?:video|clip|movie)[a-z0-9_]*url)"\s*:\s*"([^"]+)"/gi)) add(m[2], 'video')
+  for (const m of text.matchAll(/"([a-z0-9_]*audio[a-z0-9_]*url)"\s*:\s*"([^"]+)"/gi)) add(m[2], 'audio')
+
+  for (const m of text.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)) add(m[0], null)
   return found
+}
+
+// A tool that QUEUES work and returns a job id has not produced anything yet.
+// Left alone the model announced "here it is!" over an image that did not
+// exist, because the result read like success. Make the next step explicit.
+const QUEUED = /submitted\s+\d+\s+job|job[_ ]?id|use\s+job_status|poll for completion/i
+export function queuedJobHint(text = '') {
+  if (!QUEUED.test(text)) return ''
+  if (/https?:\/\//.test(text)) return '' // a link is already there — it finished
+  return (
+    '\n\n[IMPORTANT] This only QUEUED the work — nothing has been generated yet and there is ' +
+    'no image or video to show. Call job_status with sync:true (and the job id above) to wait for ' +
+    'it to finish and get the result URL. Do NOT tell the user it is ready, and do NOT describe ' +
+    'the result, until a URL comes back.'
+  )
 }
 
 // Every image/audio/video in an MCP tool result, in order — a "generate 4

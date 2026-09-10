@@ -5,7 +5,7 @@ import { routeIntent } from '../lib/router.js'
 import { listConnections, getProviderKey } from '../lib/vault.js'
 import { runTool } from '../adapters/index.js'
 import { getEnabledConnectors } from '../lib/mcpStore.js'
-import { callMcpTool } from '../lib/mcp.js'
+import { callMcpTool, queuedJobHint } from '../lib/mcp.js'
 import { shouldAttachAgentTools } from '../lib/needsTools.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
@@ -153,7 +153,9 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
       name,
       args: input,
     })
-    const content = r.text || (r.media ? 'Generated media (shown below).' : JSON.stringify(r.raw || {}))
+    const base = r.text || (r.media ? 'Generated media (shown below).' : JSON.stringify(r.raw || {}))
+    // A queued job is not a finished one — say so, loudly.
+    const content = base + queuedJobHint(base)
     return { content, media: r.media || null, mediaList: r.mediaList || [] }
   }
   return { tools, onToolCall, permissionFor, steps, skillIndex: skillset.index }

@@ -433,7 +433,7 @@ export default function Chat() {
   return (
     <div className="flex h-full flex-col">
       <ComputeBar />
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-nexus-border px-4 py-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-nexus-border px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
           <AutoToggle auto={auto} setAuto={setAuto} />
           {auto ? (
@@ -512,7 +512,7 @@ export default function Chat() {
         onChange={handleFile} className="hidden" />
 
       {isEmpty ? (
-        <div className="flex flex-1 flex-col items-center justify-center px-4">
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-4">
           <div className="w-full max-w-2xl">
             <h1 className="mb-8 flex items-center justify-center gap-2 text-center text-3xl font-semibold text-gray-100">
               <SparkIcon className="h-7 w-7 text-nexus-accent2" />
@@ -533,7 +533,7 @@ export default function Chat() {
         </div>
       ) : (
         <>
-          <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6">
+          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-6">
             <div className="mx-auto w-full max-w-3xl space-y-5">
               {messages.map((m) =>
                 m.role === 'video' ? <VideoAnalysisCard key={m.id} message={m} />
@@ -546,7 +546,7 @@ export default function Chat() {
               )}
             </div>
           </div>
-          <div className="border-t border-nexus-border px-4 py-3">
+          <div className="shrink-0 border-t border-nexus-border px-4 py-3">
             <div className="mx-auto w-full max-w-3xl">
               {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
               {pipelineActive && (
