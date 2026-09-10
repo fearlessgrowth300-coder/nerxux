@@ -120,6 +120,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const seenTexts = new Set()
   const requestStart = Date.now()
   let parseRetries = 0
+  let tunnelRetries = 0
 
   for (let step = 0; step < MAX_STEPS; step++) {
     let resp
@@ -139,6 +140,20 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     } catch (e) {
       if (e.name === 'AbortError') throw e // client disconnected — stop, don't burn CPU on a dead request
       const cause = e.cause?.code || e.cause?.message || ''
+      // The tunnel was checked before the turn started, but a build is dozens
+      // of round-trips over many minutes and the tunnel can die in the middle
+      // of one — a dropped SSH connection, or the server being restarted by a
+      // deploy. Throwing here threw away everything done so far. Rebuild and
+      // retry the same step instead.
+      if (isRunpod && tunnelRetries < 3) {
+        tunnelRetries++
+        onProgress({ type: 'text', text: `(reconnecting to the GPU — attempt ${tunnelRetries})` })
+        const back = await ensureTurboReady()
+        if (back) {
+          step--
+          continue
+        }
+      }
       const targetDesc = isRunpod ? `Runpod GPU Ollama tunnel at ${targetUrl}` : `local Ollama at ${targetUrl}`
       throw new Error(
         `Can't reach ${targetDesc}. Is the SSH tunnel / Ollama active? (${e.message}${cause ? ' / ' + cause : ''})`
