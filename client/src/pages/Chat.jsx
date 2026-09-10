@@ -236,7 +236,15 @@ export default function Chat() {
     setSending(true)
 
     // Ensure a persistent conversation exists (titled from the first message).
-    let convId = isEdit ? null : convIdRef.current
+    // Editing a message FORKS a new chat so the original is preserved — but
+    // people also use Edit to retry a turn that failed, and forking there
+    // silently starts a fresh conversation: the model then sees only the
+    // edited message and answers as though nothing had been discussed. When
+    // everything after the edited message is a failed reply, it is a retry,
+    // so stay in the same conversation.
+    const editIndex = isEdit ? messages.findIndex((m) => m.id === edit.id && m.role === 'user') : -1
+    const isRetry = editIndex >= 0 && messages.slice(editIndex + 1).every((m) => m.error)
+    let convId = isEdit && !isRetry ? null : convIdRef.current
     let created = false
     if (!convId) {
       setConversationId(null); convIdRef.current = null
@@ -535,11 +543,13 @@ export default function Chat() {
         <>
           <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-6">
             <div className="mx-auto w-full max-w-3xl space-y-5">
-              {messages.map((m) =>
+              {messages.map((m, i) =>
                 m.role === 'video' ? <VideoAnalysisCard key={m.id} message={m} />
                   : m.role === 'routing' ? <RoutingCard key={m.id} routing={m.routing} />
                     : m.role === 'approval' ? <ApprovalCard key={m.id} message={m} onDecide={handleApproval} />
-                      : <Message key={m.id} message={m} sessionId={conversationId} onEdit={(content) => handleSend({ id: m.id, content })} disabled={sending || opening || !ready || uploading} />
+                      : <Message key={m.id} message={m} sessionId={conversationId}
+                          retryOnly={messages.slice(i + 1).every((x) => x.error)}
+                          onEdit={(content) => handleSend({ id: m.id, content })} disabled={sending || opening || !ready || uploading} />
               )}
               {sending && (
                 <WorkingCard events={liveEvents} label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
@@ -879,7 +889,7 @@ function ToolStepsCard({ steps = [] }) {
   )
 }
 
-function Message({ message, sessionId, onEdit, disabled }) {
+function Message({ message, sessionId, onEdit, disabled, retryOnly = false }) {
   const isUser = message.role === 'user'
   const [editing, setEditing] = useState(false)
   const [editedText, setEditedText] = useState(message.content || '')
@@ -916,7 +926,11 @@ function Message({ message, sessionId, onEdit, disabled }) {
                 <div className="space-y-2">
                   <textarea aria-label="Edit message" autoFocus value={editedText} onChange={e => setEditedText(e.target.value)} rows={4}
                     className="w-full min-w-[240px] rounded-lg bg-black/20 p-2 text-sm text-white outline-none" />
-                  <p className="text-xs text-white/80">Continues in a new chat. Your original stays in History.</p>
+                  <p className="text-xs text-white/80">
+                    {retryOnly
+                      ? 'Retries in this chat — the failed reply is replaced.'
+                      : 'Continues in a new chat. Your original stays in History.'}
+                  </p>
                   <div className="flex justify-end gap-2">
                     <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-xs">Cancel</button>
                     <button type="button" disabled={disabled || !editedText.trim()} onClick={() => { setEditing(false); onEdit(editedText) }}
