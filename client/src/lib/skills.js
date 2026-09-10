@@ -23,8 +23,13 @@ export async function createSkill({ name, description, content, enabled = true, 
   // Re-importing the same zip must UPDATE each skill, not add a second copy.
   // Without this an accidental double import doubled the index the model reads
   // on every message.
-  const { data: existing } = await supabase
-    .from('skills').select('id').eq('user_id', userId).eq('name', name).maybeSingle()
+  // limit(1) rather than maybeSingle(): maybeSingle ERRORS when more than one
+  // row matches, so a database that already contains a duplicate would make
+  // every future import fail instead of healing itself.
+  const { data: matches } = await supabase
+    .from('skills').select('id').eq('user_id', userId).eq('name', name)
+    .order('created_at', { ascending: false }).limit(1)
+  const existing = matches?.[0]
   if (existing?.id) {
     const upd = await supabase.from('skills')
       .update({ ...row, updated_at: new Date().toISOString() })
