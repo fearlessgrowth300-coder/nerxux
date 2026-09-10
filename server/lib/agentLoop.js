@@ -158,7 +158,15 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
   // An explicit projectPath (even "" / null, to unmount) updates what this
   // chat remembers; omitting the field just reuses whatever was set before.
   if ('projectPath' in args) {
-    if (args.projectPath) lastProjectPath.set(cleanSession, args.projectPath)
+    // Only a real path is worth remembering. A stray true/{}/number used to be
+    // stored and then reused on every later call, so one malformed argument
+    // broke the whole session.
+    const raw = args.projectPath
+    const clean = typeof raw === 'string' ? raw.trim()
+      : raw && typeof raw === 'object' && typeof raw.path === 'string' ? raw.path.trim()
+      : ''
+    args.projectPath = clean || null
+    if (clean) lastProjectPath.set(cleanSession, clean)
     else lastProjectPath.delete(cleanSession)
   }
   const targetProj = args.projectPath || projectPath || lastProjectPath.get(cleanSession) || null

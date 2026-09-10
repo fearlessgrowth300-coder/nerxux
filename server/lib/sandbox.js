@@ -94,8 +94,17 @@ export async function executeInSandbox({
   // Convert host Windows path (e.g. C:\Users\... or C:/Users/...) to WSL (/mnt/c/Users/...)
   let wslProjectPath = ''
   let projectBindMount = ''
-  if (projectPath && typeof projectPath === 'string') {
-    const trimmed = projectPath.trim()
+  // A model can put anything in a tool argument — true, {}, {path: "..."}, a
+  // number. Any truthy non-string used to skip the mount below while still
+  // sending --chdir /workspace/project, so bwrap died with "Can't chdir to
+  // /workspace/project" before running a single command. And because the value
+  // is remembered for the session, one bad argument broke every later command
+  // too. Normalise first, and let the mount decide the working directory.
+  const projectDir = typeof projectPath === 'string' ? projectPath.trim()
+    : projectPath && typeof projectPath === 'object' && typeof projectPath.path === 'string' ? projectPath.path.trim()
+    : ''
+  if (projectDir) {
+    const trimmed = projectDir
     if (/^[a-zA-Z]:[\\/]/.test(trimmed)) {
       const drive = trimmed[0].toLowerCase()
       const rest = trimmed.slice(2).replace(/\\/g, '/')
@@ -117,7 +126,8 @@ export async function executeInSandbox({
 
   const b64Code = Buffer.from(code, 'utf-8').toString('base64')
   const netFlag = effectiveProfile === 'full' ? '' : '--unshare-net'
-  const targetDir = workingDir || (projectPath ? '/workspace/project' : '/workspace')
+  // Keyed off the mount that actually happened, never off the raw argument.
+  const targetDir = workingDir || (projectBindMount ? '/workspace/project' : '/workspace')
 
   // Git auth must travel as ENVIRONMENT into bwrap: the host's ~/.gitconfig
   // isn't mounted inside the sandbox, so a `git config --global` set out here
