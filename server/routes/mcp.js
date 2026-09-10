@@ -30,8 +30,14 @@ function popupResult(ok, message) {
 // PUBLIC — the MCP server redirects the browser here after the user authorizes.
 // No bearer token is present on this navigation, so it sits before requireAuth.
 router.get('/oauth/callback', async (req, res) => {
-  const { code, state, error } = req.query
-  if (error) return res.send(popupResult(false, String(error)))
+  const { code, state, error, error_description: errorDescription, error_uri: errorUri } = req.query
+  if (error) {
+    // The provider's own explanation lives in error_description; showing only
+    // `error` reduced every failure to an unactionable "invalid_request".
+    console.error('[nexus-ai] MCP OAuth callback error:', JSON.stringify(req.query))
+    const detail = [errorDescription, errorUri].filter(Boolean).map(String).join(' — ')
+    return res.send(popupResult(false, detail ? `${error}: ${detail}` : String(error)))
+  }
   if (!code || !state) return res.send(popupResult(false, 'Missing code or state'))
   try {
     const result = await completeOAuth(String(state), String(code))

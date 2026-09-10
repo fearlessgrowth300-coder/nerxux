@@ -177,7 +177,13 @@ export async function startOAuth(userId, id, redirectUri) {
   // Reset transient handshake state; re-register fresh (DCR) when not yet
   // connected and not using a pre-registered client, so the redirect_uri matches.
   const reset = { oauth_state: null, oauth_verifier: null, oauth_redirect: redirectUri }
-  if (!row.oauth_client_id && !row.oauth_tokens_ciphertext) reset.oauth_client = null
+  // Re-register only when the client we hold cannot serve THIS callback. Doing
+  // it on every attempt burned a fresh dynamic registration per click, so a
+  // retry authorised against a client that had already been replaced — and
+  // left a trail of dead client registrations at the provider.
+  const registered = row.oauth_client?.redirect_uris || []
+  const clientFits = row.oauth_client?.client_id && registered.includes(redirectUri)
+  if (!row.oauth_client_id && !row.oauth_tokens_ciphertext && !clientFits) reset.oauth_client = null
   await supabaseAdmin
     .from('mcp_connectors')
     .update({ ...reset, updated_at: new Date().toISOString() })
