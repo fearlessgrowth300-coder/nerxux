@@ -127,6 +127,10 @@ export async function executeInSandbox({
   // hanging on a username prompt that nobody can answer.
   const gitConfigSetup = [
     'export GIT_TERMINAL_PROMPT=0',
+    // Chromium lives under /usr (bind-mounted read-only into the sandbox);
+    // without this Playwright looks in a home cache that does not exist in
+    // here and reports the browser as not installed.
+    'export PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright',
     ...(gitToken
       ? [
           // insteadOf is multi-valued, so the same key is set three times: an
