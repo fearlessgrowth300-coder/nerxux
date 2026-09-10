@@ -101,17 +101,25 @@ export default function Chat() {
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
-      setMessages((prev) => [...prev, ...toAdd])
+      // Only render into the conversation the reply belongs to.
+      if (!job.conversationId || job.conversationId === convIdRef.current) {
+        setMessages((prev) => [...prev, ...toAdd])
+      }
       if (job.conversationId) {
         try { await saveMessages(job.conversationId, toAdd) }
         catch (err) { setError(`Could not sync the reply (${err?.message || err}). A local copy is saved on this device.`) }
       }
     } catch (e) {
-      if (!controller.signal.aborted) setError(e.message)
-      setMessages((prev) => [...prev, {
-        id: uuid(), role: 'assistant', model: job.model,
-        content: controller.signal.aborted ? '⏹ Stopped.' : `⚠️ ${e.message}`, error: !controller.signal.aborted,
-      }])
+      // Same rule as the success path: a failure belongs to the conversation
+      // the job was started in. Appending it to whatever is on screen is how
+      // "Stopped." turned up inside an unrelated chat.
+      if (!job.conversationId || job.conversationId === convIdRef.current) {
+        if (!controller.signal.aborted) setError(e.message)
+        setMessages((prev) => [...prev, {
+          id: uuid(), role: 'assistant', model: job.model,
+          content: controller.signal.aborted ? '⏹ Stopped.' : `⚠️ ${e.message}`, error: !controller.signal.aborted,
+        }])
+      }
     } finally {
       setPendingJob(null)
       abortRef.current = null
@@ -185,7 +193,13 @@ export default function Chat() {
         try {
           const running = await listRunningJobs()
           if (cancelled || !running.length) return
-          const mine = running.find((j) => j.conversationId && j.conversationId === convIdRef.current) || running[0]
+          // ONLY a job belonging to the conversation being viewed. Falling back
+          // to "any running job" meant opening the app on a second device
+          // adopted whatever was running elsewhere and rendered its progress
+          // into the wrong chat — and left that chat busy, so History clicks
+          // did nothing.
+          const mine = running.find((j) => j.conversationId && j.conversationId === convIdRef.current)
+          if (!mine) return
           const job = { jobId: mine.jobId, conversationId: mine.conversationId, model: null }
           setPendingJob(job)
           resumePendingJob(job)
@@ -393,7 +407,17 @@ export default function Chat() {
   }
 
   async function openConversation(id) {
-    if (busyRef.current || !ready || uploading) return
+    if (opening || !ready || uploading) return
+    // Leaving a conversation while a reply is generating must not cancel it and
+    // must not block navigation: the job keeps running on the server and its
+    // answer is saved to ITS conversation. Detach from it locally instead.
+    if (id !== convIdRef.current && busyRef.current) {
+      abortRef.current = null // Stop must never cancel a job you have left
+      busyRef.current = false
+      setSending(false)
+      setLiveEvents([])
+      setPendingJob(null)
+    }
     busyRef.current = true
     setOpening(true)
     setHistoryOpen(false)
