@@ -147,7 +147,14 @@ export class OllamaTunnel {
         { timeout: 20000, windowsHide: true })
       const text = (stdout || '').trim()
       const alive = text.includes('STATE=alive')
-      const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('STATE='))
+      // Ollama redraws its progress bar in place — carriage returns plus ANSI
+      // escapes. Left alone those reach the UI as literal "[?25h" garbage, and
+      // the whole redrawn bar arrives as one enormous line.
+      const lines = text
+        .replace(/\[[0-9;?]*[a-zA-Z]/g, '')
+        .split(/[\r\n]+/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('STATE='))
       const line = lines.pop() || ''
       const done = text.includes('PROVISION_DONE')
       return { done, alive, line, failed: !done && !alive && lines.length + (line ? 1 : 0) > 0 }
