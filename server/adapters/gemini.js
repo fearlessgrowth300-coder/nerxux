@@ -48,6 +48,46 @@ function cleanSchema(schema) {
   return out
 }
 
+// The SDK THROWS from functionCalls()/text() when a response has no usable
+// candidate, so one blocked reply took down the whole turn — including any text
+// the model did produce. Read them defensively and decide what to say ourselves.
+function safeFunctionCalls(response) {
+  try {
+    return response.functionCalls?.() || []
+  } catch {
+    return []
+  }
+}
+
+function safeText(response) {
+  try {
+    return response.text() || ''
+  } catch {
+    return ''
+  }
+}
+
+// "Response was blocked due to OTHER" tells the user nothing they can act on.
+function blockedMessage(response, modelName, hasTools) {
+  const candidate = response?.candidates?.[0]
+  const reason = response?.promptFeedback?.blockReason || candidate?.finishReason || 'UNKNOWN'
+  if (/SAFETY/i.test(reason)) {
+    return `${modelName} blocked this response on its safety filters. Rephrase the request, or use a different model.`
+  }
+  if (/RECITATION/i.test(reason)) {
+    return `${modelName} stopped because the answer was reproducing training data verbatim. Ask for it in your own words.`
+  }
+  if (/MAX_TOKENS/i.test(reason)) {
+    return `${modelName} hit its output limit before saying anything usable. Ask for a shorter answer.`
+  }
+  return (
+    `${modelName} returned an empty response (reason: ${reason})` +
+    (hasTools
+      ? '. This usually means the model refused the request while tools were attached — try turning off connectors for this chat, or switch to Claude or GPT for tool-heavy work.'
+      : '. Try again, or switch models.')
+  )
+}
+
 // Turn Google's verbose SDK errors into a short, actionable message.
 function friendlyError(err) {
   const raw = String(err?.message || err || '')
@@ -61,6 +101,18 @@ function friendlyError(err) {
         'Gemini quota is 0 for this API key — the free tier is not enabled for its project. ' +
         'Create a new key at aistudio.google.com/apikey ("Create API key in new project"), ' +
         'or if that still shows 0, enable billing on the project (free tier may be unavailable in your region).'
+      )
+    }
+    // Google returns a short retryDelay even when the exhausted quota is a
+    // DAILY one, so "retry in ~12s" sends people round in circles for the rest
+    // of the day. Say which quota actually ran out.
+    const perDay = /PerDay|generate_content_free_tier_requests/i.test(raw)
+    const limit = raw.match(/limit:\s*(\d+)/)?.[1]
+    const model = raw.match(/models\/([\w.-]+):/)?.[1] || raw.match(/model:\s*([\w.-]+)/)?.[1]
+    if (perDay) {
+      return new Error(
+        `Gemini's free daily limit${limit ? ` of ${limit} requests` : ''}${model ? ` for ${model}` : ''} is used up for today. ` +
+        'It resets at midnight Pacific time. To keep going now, pick a different model or enable billing at aistudio.google.com/apikey.'
       )
     }
     const retry = raw.match(/retry in ([\d.]+)s/i)?.[1]
@@ -119,7 +171,8 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
 
   if (!hasTools) {
     const result = await generativeModel.generateContent(parts)
-    let content = result.response.text()
+    let content = safeText(result.response)
+    if (!content) throw new Error(blockedMessage(result.response, modelName, false))
     // Surface the real pages Gemini grounded on, so search answers are
     // checkable instead of a bare claim.
     const chunks = result.response.candidates?.[0]?.groundingMetadata?.groundingChunks || []
@@ -136,7 +189,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
   const mediaAll = [] // every generated image/video this turn, not just the last
   let result = await chat.sendMessage(parts)
   for (let i = 0; i < 40; i++) {
-    const calls = (result.response.functionCalls && result.response.functionCalls()) || []
+    const calls = safeFunctionCalls(result.response)
     if (!calls.length) break
     const responses = []
     for (const call of calls) {
@@ -155,12 +208,20 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
     result = await chat.sendMessage(responses)
   }
 
+  const content = safeText(result.response)
+  // Nothing usable came back at all — explain why rather than letting the SDK's
+  // "Function call not available. Response was blocked due to OTHER" surface.
+  if (!content && !lastMedia) throw new Error(blockedMessage(result.response, modelName, true))
   return {
     ok: true,
     provider: 'gemini',
     type: lastMedia ? lastMedia.type : 'text',
-    content: result.response.text(),
-    model: model || 'gemini-1.5-pro',
+    content,
+    model: modelName,
     ...(lastMedia ? { media: lastMedia, mediaList: mediaAll } : {}),
   }
 }
+
+
+// Exported for tests only.
+export { friendlyError as _friendlyError, blockedMessage as _blockedMessage, safeFunctionCalls as _safeFunctionCalls, safeText as _safeText }
