@@ -18,6 +18,9 @@ function errorText(value) {
   return String(value)
 }
 
+// Ollama's own wording when the tool call it received will not parse.
+const MALFORMED_TOOL_CALL = /XML syntax error|unexpected end element|invalid character|unmarshal|failed to parse tool/i
+
 function resolveTargetUrl(model) {
   const status = getComputeStatus()
   if (status.mode === 'turbo') {
@@ -60,7 +63,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // A real build (install + write dozens of files + run it) is a long turn.
   // On the GPU the cap is only a backstop against a runaway loop — the user
   // has a Stop button and abandoned jobs get aborted — so it's generous.
-  const WALL_CLOCK_BUDGET_MS = (isRunpod ? 60 : 10) * 60 * 1000
+  const WALL_CLOCK_BUDGET_MS = (isRunpod ? 60 : 25) * 60 * 1000
   // This model tends to produce long hidden "thinking" before its actual
   // answer. num_predict bounds a single call so one runaway generation can't
   // eat the whole budget; Turbo (30-65 tok/s) gets a much higher ceiling.
@@ -69,7 +72,11 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // A tool call that writes files counts against this too: at 3000 the model's
   // "write the whole app in one command" calls got truncated mid-JSON, the
   // call was lost, and the turn ended in a "cut short" note.
-  const numPredict = isRunpod ? 12000 : 900
+  // Always On was left at 900 — a THIRD of the 3000 that was already proven
+  // too small above. A write_file carrying a real file cannot fit in 900
+  // tokens, so the call was cut mid-emission and Ollama's tool parser
+  // rejected the fragment ("XML syntax error ... unexpected end element").
+  const numPredict = isRunpod ? 12000 : 3000
   const system = composeSystem(systemPrompt, skills)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
@@ -112,6 +119,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const seenCalls = new Map()
   const seenTexts = new Set()
   const requestStart = Date.now()
+  let parseRetries = 0
 
   for (let step = 0; step < MAX_STEPS; step++) {
     let resp
@@ -143,7 +151,25 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         const j = await resp.json()
         if (j.error) msg = errorText(j.error)
       } catch {}
-      throw new Error(msg)
+      // Ollama could not parse the tool call the model emitted — almost always
+      // a call cut off part-way, leaving an unclosed element. Losing the whole
+      // turn to that is wrong when asking for a smaller call usually works.
+      if (MALFORMED_TOOL_CALL.test(msg) && parseRetries < 2) {
+        parseRetries++
+        messages.push({
+          role: 'user',
+          content: 'Your last tool call was cut off before it finished, so it could not be read and did NOT run. ' +
+            'Do not repeat it as-is. Redo it as a smaller call — write ONE file, and if the file is long, ' +
+            'write it in several successive calls rather than one large one.',
+        })
+        continue
+      }
+      throw new Error(
+        MALFORMED_TOOL_CALL.test(msg)
+          ? `The model kept producing a tool call too long to complete${isRunpod ? '' : ' on the Always On box'}. ` +
+            'Ask for one smaller step at a time' + (isRunpod ? '' : ', or switch to Turbo for file-writing work') + '.'
+          : msg
+      )
     }
 
     const data = await resp.json()
