@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { redactSecrets } from './redact.js'
 
 // OS-Level Isolation Sandbox using Linux Landlock / Namespaces via Bubblewrap (bwrap).
 // - Filesystem isolation: read-only system binds, host Windows drive (/mnt/c) completely unmapped.
@@ -65,29 +66,29 @@ export async function executeInSandbox({
     case 'python':
     case 'py':
       fileName = 'main.py'
-      runCommand = 'python3 -u /workspace/main.py'
+      runCommand = 'python3 -u /nexus/main.py'
       break
     case 'javascript':
     case 'js':
       fileName = 'main.js'
-      runCommand = 'node /workspace/main.js'
+      runCommand = 'node /nexus/main.js'
       break
     case 'typescript':
     case 'ts':
       fileName = 'main.ts'
-      runCommand = 'tsx /workspace/main.ts'
+      runCommand = 'tsx /nexus/main.ts'
       break
     case 'c++':
     case 'cpp':
     case 'c':
       fileName = 'main.cpp'
-      runCommand = 'g++ -O2 -std=c++17 /workspace/main.cpp -o /tmp/main && /tmp/main'
+      runCommand = 'g++ -O2 -std=c++17 /nexus/main.cpp -o /tmp/main && /tmp/main'
       break
     case 'bash':
     case 'sh':
     default:
       fileName = 'script.sh'
-      runCommand = 'bash /workspace/script.sh'
+      runCommand = 'bash /nexus/script.sh'
       break
   }
 
@@ -158,12 +159,32 @@ export async function executeInSandbox({
       : []),
   ].join('\n')
 
+  // The harness used to keep its own files INSIDE the workspace: the command
+  // being executed was written to /workspace/script.sh and the git hook
+  // template to /workspace/.nexus-git-template. The model saw both as project
+  // content — and since script.sh holds the current command, `cat script.sh`
+  // echoed whatever it had just run, changing every call. It burned dozens of
+  // tool calls investigating the harness instead of doing the work. Keep them
+  // outside /workspace, mounted read-only at /nexus.
   const bashScript = `
 set -e
 SESSION_DIR="/tmp/nexus_sandbox/${cleanSession}"
-mkdir -p "$SESSION_DIR"
+WORK_DIR="$SESSION_DIR/work"
+HARNESS_DIR="$SESSION_DIR/.harness"
+mkdir -p "$WORK_DIR" "$HARNESS_DIR/hooks"
 ${wslProjectPath ? `mkdir -p "${wslProjectPath}"` : ''}
-cd "$SESSION_DIR"
+
+# Sessions that predate the split kept their files at the session root; move
+# them into work/ so nobody loses what they were in the middle of.
+for leftover in "$SESSION_DIR"/* "$SESSION_DIR"/.[!.]*; do
+  [ -e "$leftover" ] || continue
+  case "$leftover" in
+    "$WORK_DIR"|"$HARNESS_DIR") continue ;;
+  esac
+  mv "$leftover" "$WORK_DIR"/ 2>/dev/null || true
+done
+
+cd "$HARNESS_DIR"
 echo "${b64Code}" | base64 -d > "${fileName}"
 
 export GIT_AUTHOR_NAME="${gitUser}"
@@ -174,10 +195,9 @@ export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
 ${gitToken ? `export GITHUB_TOKEN="${gitToken}"` : ''}
 ${gitConfigSetup}
 
-mkdir -p "$SESSION_DIR/.nexus-git-template/hooks"
-echo "${PRE_COMMIT_HOOK_B64}" | base64 -d > "$SESSION_DIR/.nexus-git-template/hooks/pre-commit"
-chmod +x "$SESSION_DIR/.nexus-git-template/hooks/pre-commit"
-export GIT_TEMPLATE_DIR=/workspace/.nexus-git-template
+echo "${PRE_COMMIT_HOOK_B64}" | base64 -d > "$HARNESS_DIR/hooks/pre-commit"
+chmod +x "$HARNESS_DIR/hooks/pre-commit"
+export GIT_TEMPLATE_DIR=/nexus
 
 set +e
 bwrap \\
@@ -198,7 +218,8 @@ bwrap \\
   --proc /proc \\
   --dev /dev \\
   --tmpfs /tmp \\
-  --bind "$SESSION_DIR" /workspace \\
+  --bind "$WORK_DIR" /workspace \
+  --ro-bind "$HARNESS_DIR" /nexus \\
   ${projectBindMount} \\
   --chdir "${targetDir}" \\
   --unshare-pid \\
@@ -215,7 +236,7 @@ set -e
 # — but a model can still run e.g. "git remote set-url ...TOKEN@..." on its
 # own, which git happily writes into .git/config. Scrub any such userinfo
 # unconditionally, regardless of what the command did or how it exited.
-find "$SESSION_DIR" -path '*/.git/config' -exec \\
+find "$WORK_DIR" -path '*/.git/config' -exec \\
   sed -i -E 's#(https://)[^/@[:space:]]+@#\\1#g' {} + 2>/dev/null || true
 
 # Same idea for the files themselves: real credentials belong in this
@@ -225,7 +246,7 @@ find "$SESSION_DIR" -path '*/.git/config' -exec \\
 # .gitignore, execute_command writing a file directly, an already-tracked
 # file later turned into an env file). Unstage, never delete — the model's
 # work stays on disk either way.
-for gitdir in $(find "$SESSION_DIR" -maxdepth 6 -name .git -type d 2>/dev/null); do
+for gitdir in $(find "$WORK_DIR" -maxdepth 6 -name .git -type d 2>/dev/null); do
   repo="$(dirname "$gitdir")"
   staged=$(cd "$repo" && git diff --cached --name-only 2>/dev/null | grep -E '(^|/)\\.env(\\..+)?$|\\.(pem|key|p12|pfx)$|(^|/)id_(rsa|ed25519|ecdsa)$' || true)
   if [ -n "$staged" ]; then
@@ -236,6 +257,11 @@ done
 
 exit $BWRAP_EXIT
 `
+
+  // Tool output is stored in the conversation and rendered in the chat, so a
+  // credential printed here is published, not just displayed. The live git
+  // token is passed explicitly because it will not always match a pattern.
+  const clean = (text) => redactSecrets(text, gitToken ? [gitToken] : [])
 
   return new Promise((resolve) => {
     let stdout = ''
@@ -276,8 +302,8 @@ exit $BWRAP_EXIT
       if (timedOut) {
         resolve({
           ok: false,
-          stdout,
-          stderr: (stderr ? stderr + '\n' : '') + `Execution timed out after ${TIMEOUT_MS / 1000}s`,
+          stdout: clean(stdout),
+          stderr: clean((stderr ? stderr + '\n' : '') + `Execution timed out after ${TIMEOUT_MS / 1000}s`),
           exitCode: 124,
           durationMs,
           isolation: 'OS-level (Landlock/Bubblewrap namespaces)',
@@ -286,8 +312,8 @@ exit $BWRAP_EXIT
       } else {
         resolve({
           ok: code === 0,
-          stdout,
-          stderr,
+          stdout: clean(stdout),
+          stderr: clean(stderr),
           exitCode: code ?? 0,
           durationMs,
           isolation: 'OS-level (Landlock/Bubblewrap namespaces)',
@@ -305,8 +331,8 @@ exit $BWRAP_EXIT
         : ''
       resolve({
         ok: false,
-        stdout,
-        stderr: err.message + hint,
+        stdout: clean(stdout),
+        stderr: clean(err.message + hint),
         exitCode: 1,
         durationMs: Date.now() - startTime,
         isolation: 'OS-level (Landlock/Bubblewrap namespaces)',
