@@ -20,6 +20,12 @@ function sleep(ms) {
 
 // Polls an existing job to completion. Used by sendChat, and by the chat page
 // to re-attach to a job that was in flight when the app was closed/reloaded.
+// Jobs still running server-side for this user.
+export async function listRunningJobs() {
+  const { data } = await api.get('/api/chat/jobs')
+  return data.jobs || []
+}
+
 export async function pollJob(jobId, { signal, onProgress } = {}) {
   const stop = () => api.post(`/api/chat/jobs/${jobId}/cancel`).catch(() => {})
   signal?.addEventListener('abort', stop, { once: true })

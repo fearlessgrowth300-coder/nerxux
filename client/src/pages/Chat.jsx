@@ -9,7 +9,7 @@ import {
   ConnectionsIcon, InstructionsIcon, SendIcon, SparkIcon, CloseIcon,
 } from '../components/icons'
 import { useAuth } from '../context/AuthContext'
-import { sendChat, resumeChat, pollJob } from '../lib/chat'
+import { sendChat, resumeChat, pollJob, listRunningJobs } from '../lib/chat'
 import { uploadFile, analysisToContext } from '../lib/upload'
 import { extractPdfText } from '../lib/pdf'
 import { speak, stopSpeaking, speechOutputSupported } from '../lib/speech'
@@ -70,6 +70,10 @@ export default function Chat() {
   const [conversations, setConversations] = useState([])
   const [historyOpen, setHistoryOpen] = useState(false)
   const convIdRef = useRef(null) // mirror of conversationId for async closures
+  // Which storage key has actually been restored. The write effect must not
+  // run for a key whose restore has not finished, or a reload can save empty
+  // state over the in-flight job it was about to resume.
+  const restoredKeyRef = useRef(null)
   const [ready, setReady] = useState(false)
   const busyRef = useRef(false)
   const [opening, setOpening] = useState(false)
@@ -165,17 +169,33 @@ export default function Chat() {
         }
       })
       .catch(() => {}) // not signed in / table missing -> stay on local draft
-      .finally(() => {
+      .finally(async () => {
         if (cancelled) return
+        restoredKeyRef.current = storageKey
         setReady(true)
         // A reply was still generating when the app was last closed — pick it up.
-        if (saved?.pendingJob?.jobId) { setPendingJob(saved.pendingJob); resumePendingJob(saved.pendingJob) }
+        if (saved?.pendingJob?.jobId) {
+          setPendingJob(saved.pendingJob)
+          resumePendingJob(saved.pendingJob)
+          return
+        }
+        // Nothing remembered locally, but the server may still be working on
+        // something for this user — a cleared browser, another device, or a
+        // reload that raced the save. Ask, rather than abandoning live work.
+        try {
+          const running = await listRunningJobs()
+          if (cancelled || !running.length) return
+          const mine = running.find((j) => j.conversationId && j.conversationId === convIdRef.current) || running[0]
+          const job = { jobId: mine.jobId, conversationId: mine.conversationId, model: null }
+          setPendingJob(job)
+          resumePendingJob(job)
+        } catch {}
       })
     return () => { cancelled = true }
   }, [storageKey, settingsKey])
 
   useEffect(() => {
-    if (ready) writeWorkspace(localStorage, storageKey,
+    if (ready && restoredKeyRef.current === storageKey) writeWorkspace(localStorage, storageKey,
       { conversationId, messages, input, pendingJob }, getPrefs(user?.id).saveHistory !== false)
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, input, conversationId, pendingJob, ready, storageKey, user?.id])

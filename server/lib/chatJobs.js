@@ -141,6 +141,17 @@ export function sweepJobs(now = Date.now()) {
   }
 }
 
+// What is this user still running? localStorage is not a reliable record of
+// that — it can be cleared, raced on load, or simply belong to another device
+// — but the server always knows. Lets a reloaded page re-attach to its own
+// work instead of losing sight of a job that is still going.
+export function listRunningJobs(userId) {
+  return [...jobs.values()]
+    .filter((j) => j.userId === userId && j.status === 'running')
+    .map((j) => ({ jobId: j.id, conversationId: j.conversationId || null, startedAt: j.createdAt }))
+    .sort((a, b) => b.startedAt - a.startedAt)
+}
+
 export function jobCount() {
   return jobs.size
 }

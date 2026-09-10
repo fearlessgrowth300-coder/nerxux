@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  createJob, completeJob, failJob, touchJob, sweepJobs, saveGraveyard, loadGraveyard, setRescueHandler, STALE_MS, RESULT_TTL_MS,
+  createJob, completeJob, failJob, touchJob, sweepJobs, saveGraveyard, loadGraveyard, setRescueHandler, listRunningJobs, STALE_MS, RESULT_TTL_MS,
 } from '../lib/chatJobs.js'
 
 const GRAVEYARD_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../.chat-jobs-graveyard.json')
@@ -119,4 +119,27 @@ test('a result the client already picked up is not saved twice', () => {
   sweepJobs(1000 + RESULT_TTL_MS + 1)
   assert.equal(rescued.length, 0)
   setRescueHandler(null)
+})
+
+// A reloaded page must be able to find its own work again without relying on
+// localStorage, which can be cleared, raced on load, or belong to a device the
+// user is no longer holding.
+test('the server can say what is still running for a user', () => {
+  const a = createJob('u1', { abort() {} }, 1000, 'conv-a')
+  const b = createJob('u1', { abort() {} }, 2000, 'conv-b')
+  createJob('u2', { abort() {} }, 3000, 'conv-c') // someone else's
+
+  const mine = listRunningJobs('u1')
+  assert.equal(mine.length, 2)
+  assert.equal(mine[0].jobId, b.id, 'newest first')
+  assert.equal(mine[0].conversationId, 'conv-b')
+  assert.ok(mine.every((j) => j.startedAt), 'each job reports when it started')
+
+  completeJob(b, { messages: [] }, 4000)
+  assert.deepEqual(listRunningJobs('u1').map((j) => j.jobId), [a.id], 'finished jobs drop out')
+})
+
+test("one user cannot see another user's running work", () => {
+  createJob('victim', { abort() {} }, 1000, 'private')
+  assert.deepEqual(listRunningJobs('attacker'), [])
 })

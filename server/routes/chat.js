@@ -9,7 +9,7 @@ import { callMcpTool } from '../lib/mcp.js'
 import { shouldAttachAgentTools } from '../lib/needsTools.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
-import { createJob, completeJob, failJob, touchJob, cancelJob, setRescueHandler } from '../lib/chatJobs.js'
+import { createJob, completeJob, failJob, touchJob, cancelJob, setRescueHandler, listRunningJobs } from '../lib/chatJobs.js'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { executeAgentTool, AGENT_GUIDANCE } from '../lib/agentLoop.js'
 import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
@@ -241,6 +241,12 @@ router.post('/', async (req, res, next) => {
     if (err.name === 'AbortError') return // client disconnected — nothing to respond to
     next(err)
   }
+})
+
+// GET /api/chat/jobs — what is still running for this user. A reloaded page
+// asks this instead of trusting localStorage, so a job never gets orphaned.
+router.get('/jobs', (req, res) => {
+  res.json({ jobs: listRunningJobs(req.user.id) })
 })
 
 // GET /api/chat/jobs/:id — poll an async chat job. While it runs, `events`
