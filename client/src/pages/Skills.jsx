@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import PageShell from '../components/PageShell'
 import Modal from '../components/Modal'
-import { listSkills, createSkill, updateSkill, deleteSkill } from '../lib/skills'
+import { listSkills, createSkill, updateSkill, deleteSkill, importSkillsFromZip } from '../lib/skills'
 
 const EMPTY = { name: '', description: '', content: '', enabled: true }
 
@@ -18,6 +18,10 @@ export default function Skills() {
 
   // Delete confirm + per-row busy state.
   const [confirmDelete, setConfirmDelete] = useState(null)
+  // Zip import (Anthropic-style skill folders).
+  const zipRef = useRef(null)
+  const [importing, setImporting] = useState(false)
+  const [importReport, setImportReport] = useState(null)
   const [busyId, setBusyId] = useState(null)
 
   async function refresh() {
@@ -35,6 +39,22 @@ export default function Skills() {
   useEffect(() => {
     refresh()
   }, [])
+
+  async function handleZip(e) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // so the same file can be re-picked after a fix
+    if (!file) return
+    setImporting(true)
+    setError('')
+    try {
+      setImportReport(await importSkillsFromZip(file))
+      await refresh()
+    } catch (err) {
+      setError(err.message || 'Could not read that zip.')
+    } finally {
+      setImporting(false)
+    }
+  }
 
   function openNew() {
     setForm(EMPTY)
@@ -112,20 +132,53 @@ export default function Skills() {
   return (
     <PageShell
       title="Skills"
-      description={`Reusable prompt modules. ${enabledCount} enabled skill${enabledCount === 1 ? ' is' : 's are'} appended to your system prompt.`}
+      description={`Instructions the AI can pull in when they apply — not training. ${enabledCount} enabled skill${enabledCount === 1 ? '' : 's'} listed for the model; it reads a skill in full only when it is relevant.`}
       actions={
-        <button
-          onClick={openNew}
-          className="rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
-        >
-          + New skill
-        </button>
+        <div className="flex items-center gap-2">
+          <input ref={zipRef} type="file" accept=".zip,application/zip" onChange={handleZip} className="hidden" />
+          <button
+            onClick={() => zipRef.current?.click()}
+            disabled={importing}
+            title="Import a skill folder (.zip containing SKILL.md)"
+            className="rounded-lg border border-nexus-border px-4 py-2 text-sm text-gray-300 transition hover:bg-white/5 disabled:opacity-40"
+          >
+            {importing ? 'Importing…' : 'Import .zip'}
+          </button>
+          <button
+            onClick={openNew}
+            className="rounded-lg bg-nexus-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
+          >
+            + New skill
+          </button>
+        </div>
       }
     >
       {error && (
         <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">
           {error}
         </p>
+      )}
+      {importReport && (
+        <div className="mb-4 rounded-lg border border-nexus-border bg-nexus-panel px-3 py-2 text-sm">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-gray-200">
+              Imported {importReport.filter((r) => r.ok).length} of {importReport.length} skill
+              {importReport.length === 1 ? '' : 's'}
+            </span>
+            <button onClick={() => setImportReport(null)} className="text-xs text-gray-500 hover:text-gray-300">Dismiss</button>
+          </div>
+          <ul className="space-y-0.5 text-xs">
+            {importReport.map((r) => (
+              <li key={r.name} className={r.ok ? 'text-gray-400' : 'text-red-400'}>
+                {r.ok ? '✓' : '✗'} {r.name}
+                {r.ok && r.files > 0 && ` · ${r.files} bundled file${r.files === 1 ? '' : 's'}`}
+                {r.ok && r.resourcesSkipped && ' · bundled files not saved (run the resources migration)'}
+                {r.ok && r.skipped?.length > 0 && ` · skipped ${r.skipped.join(', ')}`}
+                {!r.ok && ` — ${r.error}`}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {loading ? (

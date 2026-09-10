@@ -13,6 +13,7 @@ import { createJob, completeJob, failJob, touchJob, cancelJob } from '../lib/cha
 import { executeAgentTool, AGENT_GUIDANCE } from '../lib/agentLoop.js'
 import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
 import { WEB_SEARCH_TOOL, hasBraveKey } from '../lib/webSearch.js'
+import { buildSkillToolset } from '../lib/skillTools.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -98,6 +99,12 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
   // which brings its own (better) native search under the same name.
   if (agent?.webSearch && hasBraveKey()) tools.push({ ...WEB_SEARCH_TOOL, braveSearch: true })
 
+  // Skills: only the INDEX goes in the prompt; bodies are fetched on demand.
+  // Pasting every enabled skill into every message is what makes a library of
+  // thirty skills impossible.
+  const skillset = await buildSkillToolset(userId)
+  tools.push(...skillset.tools)
+
   const permissionFor = (name) => permMap.get(name) || 'allow'
   // Returns { content, media? } — content is text for the model, media (if any)
   // is a generated image/audio/video to surface in the chat.
@@ -111,6 +118,7 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
       agent.onProgress?.({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
       return { content: observationText(name, result) }
     }
+    if (skillset.has(name)) return { content: await skillset.run(name, input) }
     if (native.has(name)) return { content: await native.run(name, input) }
     const target = routeMap.get(name)
     if (!target) return { content: `No connector provides tool "${name}".` }
@@ -124,7 +132,7 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
     const content = r.text || (r.media ? 'Generated media (shown below).' : JSON.stringify(r.raw || {}))
     return { content, media: r.media || null, mediaList: r.mediaList || [] }
   }
-  return { tools, onToolCall, permissionFor, steps }
+  return { tools, onToolCall, permissionFor, steps, skillIndex: skillset.index }
 }
 
 // Runs a chat-capable model (claude/openai/gemini) by id, with optional MCP
@@ -147,7 +155,11 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
   // does not.
   const handNames = new Set(AGENT_TOOL_DEFS.map((t) => t.name))
   const hasAgentTools = !localAgent && tools.some((t) => handNames.has(t.name))
-  const fullSystem = hasAgentTools ? [AGENT_GUIDANCE, systemPrompt].filter(Boolean).join('\n\n') : systemPrompt
+  const fullSystem = [
+    hasAgentTools ? AGENT_GUIDANCE : null,
+    mcp?.skillIndex || null,
+    systemPrompt,
+  ].filter(Boolean).join('\n\n')
   if (mcp?.steps) mcp.steps.length = 0
   const result = await runTool(info.provider, userId, {
     prompt,
