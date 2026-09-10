@@ -65,12 +65,44 @@ test('a late close from the old SSH process cannot clear the new connection', as
   assert.equal(f.tunnel.ready,true)
   await f.tunnel.stop()
 })
-test('missing installation errors are surfaced immediately without a false connected state', async () => {
-  const f=fixture({missing:true})
-  await assert.rejects(()=>f.tunnel.start('host',1000),/Persistent Ollama installation is missing/)
-  assert.equal(f.runs,1)
-  assert.equal(f.children.length,0)
-  assert.equal(f.tunnel.ready,false)
+// A pod with nothing installed is the NORMAL state of a freshly created pod,
+// not an error to hand back. Rather than telling the user Ollama is missing and
+// leaving them to work out what to paste into RunPod's web terminal, the pod
+// installs itself and the message says what is happening.
+function freshPodTunnel({ tail = '' } = {}) {
+  const sent = []
+  const tunnel = new OllamaTunnel('/test/key', {
+    now: () => 0, sleep: async () => {},
+    run: async (file, args) => {
+      const command = args[args.length - 1]
+      sent.push(command)
+      if (command === START_OLLAMA) throw Object.assign(new Error('missing'), { code: 42, stderr: 'not installed' })
+      if (command.startsWith('tail ')) return { stdout: tail }
+      return { stdout: '' }
+    },
+    spawn: () => { throw new Error('must not open a tunnel to an unprovisioned pod') },
+  })
+  return { tunnel, sent }
+}
+
+test('a pod with nothing installed provisions itself instead of just failing', async () => {
+  const f = freshPodTunnel()
+  await assert.rejects(() => f.tunnel.start('host', 1000), /installing Ollama and downloading/)
+  assert.ok(f.sent.some((c) => c.includes('ollama-linux-amd64.tgz')), 'the install must actually be sent to the pod')
+  assert.ok(f.sent.some((c) => c.includes(TURBO_MODEL)), 'it must pull the model Turbo needs')
+  assert.equal(f.tunnel.ready, false)
+})
+
+test('a setup already running reports its progress rather than starting a second 17GB download', async () => {
+  const f = freshPodTunnel({ tail: '[3/3] pulling the model (~17GB, this is the slow part)...' })
+  await assert.rejects(() => f.tunnel.start('host', 1000), /this is the slow part/)
+  assert.ok(!f.sent.some((c) => c.includes('ollama-linux-amd64.tgz')), 'must not re-run the installer')
+})
+
+test('a finished setup that is not answering yet says so, instead of claiming Turbo is live', async () => {
+  const f = freshPodTunnel({ tail: 'PROVISION_DONE' })
+  await assert.rejects(() => f.tunnel.start('host', 1000), /not answering yet/)
+  assert.equal(f.tunnel.ready, false)
 })
 test('failed model readiness closes the tunnel rather than leaving an orphan listener', async () => {
   const f=fixture({notReady:true})
