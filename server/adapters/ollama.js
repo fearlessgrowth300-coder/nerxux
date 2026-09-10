@@ -4,7 +4,7 @@
 // Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
-import { toOpenAITools } from '../lib/agentTools.js'
+import { toOpenAITools, AGENT_TOOL_NAMES } from '../lib/agentTools.js'
 import { getComputeStatus, ensureTurboReady } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
@@ -273,7 +273,10 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         // A connected MCP / native tool (image + video generation, YouTube, …).
         // These don't run in the sandbox — they're remote calls — so they take
         // the caller's router instead of executeAgentTool.
-        if (externalNames.has(call.name) && onToolCall) {
+        // Route by what it is NOT: a connector tool discovered mid-turn via
+        // find_connector_tools will not be in the offered list, but it is still
+        // callable — the caller's router knows every connector tool.
+        if (onToolCall && (externalNames.has(call.name) || !AGENT_TOOL_NAMES.has(call.name))) {
           const res = await onToolCall(call.name, call.args)
           for (const m of res?.mediaList?.length ? res.mediaList : res?.media ? [res.media] : []) {
             mediaOut.push(m)

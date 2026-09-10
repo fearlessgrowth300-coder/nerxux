@@ -15,6 +15,7 @@ import { executeAgentTool, AGENT_GUIDANCE } from '../lib/agentLoop.js'
 import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
 import { WEB_SEARCH_TOOL, hasBraveKey } from '../lib/webSearch.js'
 import { buildSkillToolset } from '../lib/skillTools.js'
+import { selectConnectorTools, describeMatches, FIND_CONNECTOR_TOOLS } from '../lib/connectorTools.js'
 
 const router = Router()
 
@@ -88,18 +89,19 @@ function toMessage(result, { modelLabel, stage } = {}) {
 // things exactly like the local models do. Each adapter converts the defs
 // to its own function-calling format.
 // `agent` = { sessionId, projectPath, webSearch, onProgress, chatText }.
-async function buildMcpToolset(userId, connectorIds, agent = null) {
+async function buildMcpToolset(userId, connectorIds, agent = null, userText = '') {
   let connectors = await getEnabledConnectors(userId)
   // Per-chat selection: if the client sent a list, only use those connectors.
   if (Array.isArray(connectorIds)) {
     connectors = connectors.filter((c) => connectorIds.includes(c.id))
   }
   const tools = []
+  const connectorTools = [] // every connector tool, before selection
   const routeMap = new Map()
   const permMap = new Map()
   for (const c of connectors) {
     for (const t of c.tools || []) {
-      tools.push({
+      connectorTools.push({
         name: t.name,
         description: t.description || '',
         input_schema: t.inputSchema || { type: 'object', properties: {} },
@@ -108,6 +110,15 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
       permMap.set(t.name, c.toolPerms?.[t.name] || 'allow')
     }
   }
+  // One connector can expose more tool definitions than the model's whole
+  // context window (Higgsfield: 101 tools, ~41k tokens against a 32k window),
+  // which evicts the conversation and leaves the model calling whatever tool
+  // is in front of it. Offer the ones this message is about; the rest stay
+  // reachable through find_connector_tools.
+  const picked = selectConnectorTools(connectorTools, userText)
+  tools.push(...picked.tools)
+  if (picked.trimmed) tools.push(FIND_CONNECTOR_TOOLS)
+
   // Merge native (first-party) tools — e.g. YouTube — for connected providers.
   const native = await buildNativeToolset(userId)
   for (const t of native.tools) tools.push(t)
@@ -141,6 +152,9 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
       steps.push(step)
       agent.onProgress?.({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
       return { content: observationText(name, result) }
+    }
+    if (name === FIND_CONNECTOR_TOOLS.name) {
+      return { content: describeMatches(connectorTools, input?.query || '') }
     }
     if (skillset.has(name)) return { content: await skillset.run(name, input) }
     if (native.has(name)) return { content: await native.run(name, input) }
@@ -295,7 +309,7 @@ async function handleChat(userId, body, signal, onProgress = () => {}) {
   const mcp = await buildMcpToolset(userId, connectorIds, {
     hands, sessionId, projectPath, webSearch, onProgress,
     chatText: history.filter((m) => m.role === 'user').map((m) => m.content).join('\n'),
-  })
+  }, userText)
   const extra = { attachments, webSearch, sessionId, projectPath, signal, onProgress }
   {
 
