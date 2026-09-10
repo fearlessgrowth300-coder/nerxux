@@ -240,8 +240,19 @@ export class OllamaTunnel {
       await this.sleep(1000)
     }
     await this.stop()
-    throw new Error(failure.trim() ? 'RunPod tunnel failed: ' + failure.trim() :
-      'RunPod Ollama did not load the required model. Check its persistent Ollama log.')
+    if (failure.trim()) throw new Error('RunPod tunnel failed: ' + failure.trim())
+    // Ollama is installed and serving, but the model isn't registered yet. That
+    // is the normal middle of a first-time setup — the pull is still verifying
+    // 17GB — so report setup progress rather than "did not load the required
+    // model", which reads like a broken pod.
+    const setup = await this.provisionProgress(host, port)
+    if (setup.alive || (!setup.done && setup.line)) {
+      throw Object.assign(
+        new Error('Still setting up your new pod' + (setup.line ? ' — ' + setup.line : '') + '. Press Turbo again to check.'),
+        { provisioning: true }
+      )
+    }
+    throw new Error('RunPod Ollama did not load the required model. Check its persistent Ollama log.')
   }
 
   async health() {
