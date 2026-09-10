@@ -184,14 +184,27 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
   }
 
   // Tool-calling loop.
-  const chat = generativeModel.startChat()
+  //
+  // Driven with an explicit `contents` array rather than startChat(): the
+  // SDK sends tool results with role "function", which Gemini 3 rejects
+  // outright ("Role 'function' is not supported ... use SYSTEM, USER,
+  // ASSISTANT"), so every chat where Gemini actually CALLED a tool died on
+  // its second turn. Function results belong in a `user` turn.
+  //
+  // The model's own parts are appended verbatim, because Gemini 3 attaches a
+  // thoughtSignature to them and refuses a history where it has been dropped.
   let lastMedia = null
   const mediaAll = [] // every generated image/video this turn, not just the last
-  let result = await chat.sendMessage(parts)
+  const contents = [{ role: 'user', parts }]
+  let result = await generativeModel.generateContent({ contents })
+
   for (let i = 0; i < 40; i++) {
     const calls = safeFunctionCalls(result.response)
     if (!calls.length) break
-    const responses = []
+    const modelParts = result.response.candidates?.[0]?.content?.parts
+    contents.push({ role: 'model', parts: modelParts?.length ? modelParts : calls.map((c) => ({ functionCall: c })) })
+
+    const responseParts = []
     for (const call of calls) {
       let content = ''
       try {
@@ -203,9 +216,10 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
       } catch (e) {
         content = `Tool error: ${e.message}`
       }
-      responses.push({ functionResponse: { name: call.name, response: { result: content } } })
+      responseParts.push({ functionResponse: { name: call.name, response: { result: content } } })
     }
-    result = await chat.sendMessage(responses)
+    contents.push({ role: 'user', parts: responseParts })
+    result = await generativeModel.generateContent({ contents })
   }
 
   const content = safeText(result.response)
@@ -224,4 +238,4 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
 
 
 // Exported for tests only.
-export { friendlyError as _friendlyError, blockedMessage as _blockedMessage, safeFunctionCalls as _safeFunctionCalls, safeText as _safeText }
+export { cleanSchema as _cleanSchema, friendlyError as _friendlyError, blockedMessage as _blockedMessage, safeFunctionCalls as _safeFunctionCalls, safeText as _safeText }
