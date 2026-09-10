@@ -52,6 +52,10 @@ export default function Chat() {
   const [pipeline, setPipeline] = useState(false)
   const [auto, setAuto] = useState(false)
   const [webSearch, setWebSearch] = useState(false)
+  // 'auto' attaches the build/run tools only when the message asks for work.
+  // They cost ~1,250 prompt tokens per message and invite an extra API
+  // request, which matters on a small free-tier allowance.
+  const [agentTools, setAgentTools] = useState('auto') // 'auto' | 'on' | 'off'
   const [voiceReplies, setVoiceReplies] = useState(false) // read replies aloud (hands-free)
 
   const [uploading, setUploading] = useState(false)
@@ -132,6 +136,7 @@ export default function Chat() {
       setPipeline(Boolean(s.pipeline))
       setAuto(Boolean(s.auto))
       setWebSearch(Boolean(s.webSearch))
+      if (s.agentTools) setAgentTools(s.agentTools)
       setVoiceReplies(Boolean(s.voiceReplies))
     } catch {}
     listSkills().then(setSkills).catch(() => {})
@@ -177,9 +182,9 @@ export default function Chat() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(settingsKey, JSON.stringify({ modelA, modelB, pipeline, auto, webSearch, voiceReplies }))
+      localStorage.setItem(settingsKey, JSON.stringify({ modelA, modelB, pipeline, auto, webSearch, voiceReplies, agentTools }))
     } catch {}
-  }, [modelA, modelB, pipeline, auto, webSearch, voiceReplies, settingsKey])
+  }, [modelA, modelB, pipeline, auto, webSearch, voiceReplies, agentTools, settingsKey])
 
   // Hands-free: read each new reply aloud, then hand the mic back so the user
   // can answer without touching anything.
@@ -254,6 +259,7 @@ export default function Chat() {
         modelA, modelB, pipeline, systemPrompt, videoContext, auto,
         attachments: media,
         webSearch,
+        agentTools,
         connectorIds: [...activeConnectors],
         sessionId: convId,
         signal: controller.signal,
@@ -398,6 +404,7 @@ export default function Chat() {
       skills={skills} taRef={taRef} navigate={navigate}
       connectors={connectors} activeConnectors={activeConnectors} toggleConnector={toggleConnector}
       webSearch={webSearch} setWebSearch={setWebSearch}
+      agentTools={agentTools} setAgentTools={setAgentTools}
       voiceReplies={voiceReplies} setVoiceReplies={setVoiceReplies}
       attachments={attachments} removeAttachment={(id) => setAttachments((p) => p.filter((a) => a.id !== id))}
     />
@@ -540,7 +547,7 @@ export default function Chat() {
 
 function Composer({
   input, setInput, onSend, sending, uploading, onUploadClick, skills, taRef, navigate,
-  connectors, activeConnectors, toggleConnector, webSearch, setWebSearch, voiceReplies, setVoiceReplies,
+  connectors, activeConnectors, toggleConnector, webSearch, setWebSearch, agentTools, setAgentTools, voiceReplies, setVoiceReplies,
   attachments, removeAttachment, onStop, canStop,
 }) {
   const [slashOpen, setSlashOpen] = useState(false)
@@ -664,6 +671,9 @@ function Composer({
                       <MenuRow Icon={ConnectionsIcon} label="Connectors" chevron onClick={() => setSubmenu('connectors')} />
                       <div className="my-1 border-t border-nexus-border" />
                       <MenuRow Icon={SearchIcon} label="Web search" toggle={webSearch} onClick={() => setWebSearch((v) => !v)} />
+                      <MenuRow Icon={FileIcon} label="Build & run tools"
+                        hint={agentTools === 'auto' ? 'auto — on when you ask for work' : agentTools === 'on' ? 'always on' : 'off'}
+                        onClick={() => setAgentTools((v) => (v === 'auto' ? 'on' : v === 'on' ? 'off' : 'auto'))} />
                       {speechOutputSupported && (
                         <MenuRow Icon={MicIcon} label="Voice replies (hands-free)" hint="reads answers aloud" toggle={voiceReplies} onClick={() => setVoiceReplies((v) => !v)} />
                       )}

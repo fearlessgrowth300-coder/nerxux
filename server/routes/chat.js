@@ -6,6 +6,7 @@ import { listConnections, getProviderKey } from '../lib/vault.js'
 import { runTool } from '../adapters/index.js'
 import { getEnabledConnectors } from '../lib/mcpStore.js'
 import { callMcpTool } from '../lib/mcp.js'
+import { shouldAttachAgentTools } from '../lib/needsTools.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
 import { createJob, completeJob, failJob, touchJob, cancelJob } from '../lib/chatJobs.js'
@@ -86,14 +87,16 @@ async function buildMcpToolset(userId, connectorIds, agent = null) {
   const native = await buildNativeToolset(userId)
   for (const t of native.tools) tools.push(t)
 
-  // The agent's hands. Brave web search is tagged so runChatModel can drop it
-  // for Claude, which brings its own (better) native web search under the
-  // same name.
   const steps = []
-  if (agent) {
-    tools.push(...AGENT_TOOL_DEFS)
-    if (agent.webSearch && hasBraveKey()) tools.push({ ...WEB_SEARCH_TOOL, braveSearch: true })
-  }
+  // The agent's hands (sandbox / files / git). They add ~1,250 prompt tokens to
+  // EVERY message and tempt the model into a tool round-trip — another API
+  // request — for questions that never needed one, which is what burns a small
+  // free-tier allowance. So they are attached per turn, not always.
+  if (agent?.hands) tools.push(...AGENT_TOOL_DEFS)
+  // Web search is deliberately NOT tied to the hands: turning it on has to keep
+  // working for a plain question. Tagged so runChatModel can drop it for Claude,
+  // which brings its own (better) native search under the same name.
+  if (agent?.webSearch && hasBraveKey()) tools.push({ ...WEB_SEARCH_TOOL, braveSearch: true })
 
   const permissionFor = (name) => permMap.get(name) || 'allow'
   // Returns { content, media? } — content is text for the model, media (if any)
@@ -140,7 +143,10 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
   // prompt, so they only need the CONNECTED tools (MCP connectors + native
   // providers) added on top — passing the agent tools again would duplicate them.
   const connectorTools = tools.filter((t) => !AGENT_TOOL_NAMES.has(t.name))
-  const hasAgentTools = !localAgent && tools.some((t) => AGENT_TOOL_NAMES.has(t.name))
+  // Only the hands justify the long build-oriented preamble; web search alone
+  // does not.
+  const handNames = new Set(AGENT_TOOL_DEFS.map((t) => t.name))
+  const hasAgentTools = !localAgent && tools.some((t) => handNames.has(t.name))
   const fullSystem = hasAgentTools ? [AGENT_GUIDANCE, systemPrompt].filter(Boolean).join('\n\n') : systemPrompt
   if (mcp?.steps) mcp.steps.length = 0
   const result = await runTool(info.provider, userId, {
@@ -229,6 +235,7 @@ async function handleChat(userId, body, signal, onProgress = () => {}) {
     connectorIds = null,
     sessionId = null,
     projectPath = null,
+    agentTools = 'auto',
   } = body || {}
 
   const lastUser = [...history].reverse().find((m) => m.role === 'user')
@@ -237,8 +244,9 @@ async function handleChat(userId, body, signal, onProgress = () => {}) {
 
   // Connected MCP/native tools plus the agent's own hands (sandbox, files,
   // git, web search) — the same toolset for every model.
+  const hands = shouldAttachAgentTools(agentTools, userText, { projectPath })
   const mcp = await buildMcpToolset(userId, connectorIds, {
-    sessionId, projectPath, webSearch, onProgress,
+    hands, sessionId, projectPath, webSearch, onProgress,
     chatText: history.filter((m) => m.role === 'user').map((m) => m.content).join('\n'),
   })
   const extra = { attachments, webSearch, sessionId, projectPath, signal, onProgress }
@@ -371,6 +379,7 @@ async function handleChat(userId, body, signal, onProgress = () => {}) {
       if (r.result?.pending) {
         const pendingId = savePending({
           userId: userId, modelId: modelA, systemPrompt, webSearch, connectorIds,
+          hands, sessionId, projectPath,
           resumeState: r.result.resumeState, pendingTools: r.result.pendingTools,
         })
         return ({
@@ -397,7 +406,15 @@ router.post('/resume', async (req, res, next) => {
       return res.status(400).json({ error: 'This approval expired — please resend your message.' })
     }
 
-    const mcp = await buildMcpToolset(pend.userId, pend.connectorIds)
+    // Rebuild the SAME toolset the paused turn had. Without the agent context
+    // an approved sandbox/file/git tool came back as "No connector provides
+    // tool ..." — approving it did nothing.
+    const mcp = await buildMcpToolset(pend.userId, pend.connectorIds, {
+      hands: pend.hands !== false,
+      sessionId: pend.sessionId,
+      projectPath: pend.projectPath,
+      webSearch: pend.webSearch,
+    })
 
     // Combine the already-run auto tools with the user's decisions.
     const results = [...(pend.resumeState.autoResults || [])]
@@ -432,6 +449,7 @@ router.post('/resume', async (req, res, next) => {
       const nextId = savePending({
         userId: pend.userId, modelId: pend.modelId, systemPrompt: pend.systemPrompt,
         webSearch: pend.webSearch, connectorIds: pend.connectorIds,
+        hands: pend.hands, sessionId: pend.sessionId, projectPath: pend.projectPath,
         resumeState: r.result.resumeState, pendingTools: r.result.pendingTools,
       })
       return res.json({ messages: [{ role: 'approval', pendingId: nextId, modelLabel: r.label, tools: r.result.pendingTools }] })
