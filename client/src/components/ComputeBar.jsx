@@ -93,7 +93,7 @@ export default function ComputeBar() {
 
   return (
     <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 bg-nexus-panel/80 border-b border-nexus-border/60 text-xs">
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="text-gray-400 font-medium">Compute:</span>
 
         {/* Button 1: Always On */}
@@ -151,14 +151,14 @@ export default function ComputeBar() {
       </div>
 
       {/* Live Status indicator */}
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {loading ? (
           <div className="flex items-center gap-1.5 text-amber-400 animate-pulse">
             <span className="h-2 w-2 rounded-full bg-amber-400 animate-ping" />
             <span>Switching compute infrastructure... (~1–2m)</span>
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-gray-400">
+          <div className="flex min-w-0 items-center gap-2 text-gray-400">
             <span
               className={`h-2 w-2 rounded-full ${
                 isTurbo ? 'bg-amber-400' : 'bg-emerald-400'

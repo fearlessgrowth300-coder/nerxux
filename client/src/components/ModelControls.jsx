@@ -105,14 +105,14 @@ export default function ModelControls({
 
 function Select({ label, value, onChange, options, allowNone }) {
   return (
-    <label className="flex items-center gap-1.5">
+    <label className="flex min-w-0 max-w-full items-center gap-1.5">
       <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
         {label}
       </span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-lg border border-nexus-border bg-nexus-bg px-2 py-1.5 text-xs text-gray-100 outline-none transition focus:border-nexus-accent"
+        className="min-w-0 max-w-full rounded-lg border border-nexus-border bg-nexus-bg px-2 py-1.5 text-xs text-gray-100 outline-none transition focus:border-nexus-accent"
       >
         {allowNone && <option value="">None</option>}
         {options.map((m) => (

@@ -69,6 +69,7 @@ export default function Chat() {
   const [conversationId, setConversationId] = useState(null)
   const [conversations, setConversations] = useState([])
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const convIdRef = useRef(null) // mirror of conversationId for async closures
   // Which storage key has actually been restored. The write effect must not
   // run for a key whose restore has not finished, or a reload can save empty
@@ -79,6 +80,7 @@ export default function Chat() {
   const [opening, setOpening] = useState(false)
 
   const scrollRef = useRef(null)
+  const followBottomRef = useRef(true)
   const fileInputRef = useRef(null)
   const taRef = useRef(null)
   const abortRef = useRef(null) // aborts the in-flight turn (Stop button)
@@ -213,8 +215,16 @@ export default function Chat() {
   useEffect(() => {
     if (ready && restoredKeyRef.current === storageKey) writeWorkspace(localStorage, storageKey,
       { conversationId, messages, input, pendingJob }, getPrefs(user?.id).saveHistory !== false)
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, input, conversationId, pendingJob, ready, storageKey, user?.id])
+
+  useEffect(() => {
+    followBottomRef.current = true
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+  }, [conversationId])
+
+  useEffect(() => {
+    if (followBottomRef.current) scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+  }, [messages, liveEvents, sending])
 
   useEffect(() => {
     try {
@@ -241,6 +251,7 @@ export default function Chat() {
     const isEdit = Boolean(edit?.id)
     const text = (isEdit ? edit.content : input).trim()
     if (!text || busyRef.current || !ready || uploading) return
+    followBottomRef.current = true
     busyRef.current = true
     setError('')
     const history = isEdit ? editedHistory(messages, edit.id, text) :
@@ -466,23 +477,22 @@ export default function Chat() {
   )
 
   return (
-    <div className="flex h-full flex-col">
-      <ComputeBar />
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-nexus-border px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <AutoToggle auto={auto} setAuto={setAuto} />
-          {auto ? (
-            <span className="text-xs text-gray-500">The intent router picks the tools for each message.</span>
-          ) : (
-            <ModelControls
-              modelA={modelA} modelB={modelB} pipeline={pipeline}
-              onChangeA={setModelA} onChangeB={setModelB} onTogglePipeline={() => setPipeline((v) => !v)}
-            />
-          )}
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-nexus-border px-3 py-2 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <button type="button" onClick={() => setSettingsOpen((v) => !v)}
+            aria-expanded={settingsOpen} aria-controls="chat-settings"
+            className="shrink-0 rounded-lg border border-nexus-border px-2.5 py-1.5 text-xs text-gray-300 hover:bg-white/5">
+            {settingsOpen ? 'Close settings' : 'Chat settings'}
+          </button>
+          <span className="hidden min-w-0 truncate text-xs text-gray-400 sm:block"
+            title={getModelById(modelA)?.label || modelA}>
+            {auto ? 'Auto-route' : getModelById(modelA)?.label || modelA}{pipelineActive ? ' · Pipeline' : ''}
+          </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <button onClick={newChat} disabled={sending || opening || !ready || uploading} title="Start a new conversation"
-            className="flex items-center gap-1.5 rounded-lg border border-nexus-border px-3 py-1.5 text-sm text-gray-300 transition hover:bg-white/5">
+            className="flex items-center gap-1.5 rounded-lg border border-nexus-border px-2.5 py-1.5 text-xs text-gray-300 transition hover:bg-white/5">
             <PlusIcon className="h-4 w-4" /> New chat
           </button>
           <div className="relative">
@@ -493,7 +503,7 @@ export default function Chat() {
                 if (open) { try { setConversations(await listConversations()) } catch {} }
               }}
               title="Conversation history (your second brain)"
-              className="flex items-center gap-1.5 rounded-lg border border-nexus-border px-3 py-1.5 text-sm text-gray-300 transition hover:bg-white/5">
+              className="flex items-center gap-1.5 rounded-lg border border-nexus-border px-2.5 py-1.5 text-xs text-gray-300 transition hover:bg-white/5">
               <SearchIcon className="h-4 w-4" /> History
             </button>
             {historyOpen && (
@@ -542,6 +552,18 @@ export default function Chat() {
         </div>
       </div>
 
+      <div id="chat-settings" hidden={!settingsOpen}
+        className="max-h-[40dvh] shrink-0 overflow-y-auto border-b border-nexus-border">
+        <ComputeBar />
+        <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+          <AutoToggle auto={auto} setAuto={setAuto} />
+          {auto ? <span className="text-xs text-gray-500">The intent router picks the tools for each message.</span> : (
+            <ModelControls modelA={modelA} modelB={modelB} pipeline={pipeline}
+              onChangeA={setModelA} onChangeB={setModelB} onTogglePipeline={() => setPipeline((v) => !v)} />
+          )}
+        </div>
+      </div>
+
       <input ref={fileInputRef} type="file"
         accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.mp4,.mov,.webm,image/*,application/pdf,video/mp4,video/quicktime,video/webm"
         onChange={handleFile} className="hidden" />
@@ -568,7 +590,12 @@ export default function Chat() {
         </div>
       ) : (
         <>
-          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-6">
+          <div ref={scrollRef} role="region" aria-label="Conversation" tabIndex={0}
+            onScroll={(e) => {
+              const el = e.currentTarget
+              followBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
+            }}
+            className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-3 py-4 sm:px-4">
             <div className="mx-auto w-full max-w-3xl space-y-5">
               {messages.map((m, i) =>
                 m.role === 'video' ? <VideoAnalysisCard key={m.id} message={m} />
@@ -583,7 +610,7 @@ export default function Chat() {
               )}
             </div>
           </div>
-          <div className="shrink-0 border-t border-nexus-border px-4 py-3">
+          <div className="shrink-0 border-t border-nexus-border px-3 py-2 sm:px-4">
             <div className="mx-auto w-full max-w-3xl">
               {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
               {pipelineActive && (
@@ -614,6 +641,13 @@ function Composer({
   const [listening, setListening] = useState(false)
   const plusRef = useRef(null)
   const recRef = useRef(null)
+
+  useEffect(() => {
+    const el = taRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+  }, [input, taRef])
 
   const speechSupported =
     typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition)
@@ -707,9 +741,10 @@ function Composer({
           </div>
         )}
 
-        <textarea ref={taRef} rows={3} value={input} onChange={onChange} onKeyDown={onKeyDown}
+        <textarea ref={taRef} rows={1} value={input} onChange={onChange} onKeyDown={onKeyDown}
           placeholder="Type / for skills, or ask anything…"
-          className="max-h-60 min-h-[72px] w-full resize-none bg-transparent px-1 text-sm text-gray-100 outline-none placeholder:text-gray-600" />
+          aria-label="Message"
+          className="max-h-[120px] min-h-[24px] w-full resize-none overflow-y-auto bg-transparent px-1 text-sm leading-6 text-gray-100 outline-none placeholder:text-gray-600" />
 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1">
