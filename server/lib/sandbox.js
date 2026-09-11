@@ -88,7 +88,8 @@ export async function executeInSandbox({
     case 'sh':
     default:
       fileName = 'script.sh'
-      runCommand = 'bash /nexus/script.sh'
+      // A failing program piped to tail/tee must not look like a passing test.
+      runCommand = 'bash -o pipefail /nexus/script.sh'
       break
   }
 
@@ -316,7 +317,7 @@ exit $BWRAP_EXIT
           ok: code === 0,
           stdout: clean(stdout),
           stderr: clean(stderr),
-          exitCode: code ?? 0,
+          exitCode: code ?? 1,
           durationMs,
           isolation: 'OS-level (Landlock/Bubblewrap namespaces)',
           profile,

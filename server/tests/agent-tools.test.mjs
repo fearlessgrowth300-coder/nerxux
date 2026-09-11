@@ -56,6 +56,27 @@ test('observations read naturally for file tools and like a terminal for command
   assert.match(observationText('execute_command', { ok: true, exitCode: 0, stdout: 'hi', stderr: '', target: 'sandbox' }), /Exit Code: 0[\s\S]*hi/)
 })
 
+test('command observations preserve stderr when stdout is also present', () => {
+  const text = observationText('execute_command', {
+    ok: false, exitCode: 1, stdout: 'Starting check', stderr: 'TypeError: wrong response shape',
+  })
+  assert.match(text, /Exit Code: 1/)
+  assert.match(text, /Starting check/)
+  assert.match(text, /Stderr:\nTypeError: wrong response shape/)
+  assert.doesNotMatch(observationText('execute_command', { ok: false, exitCode: 1 }), /succeeded/)
+})
+
+test('read_file preserves long source lines and notices an unterminated final line', { skip: !bashAvailable }, () => {
+  const ws = execFileSync('bash', ['-c', 'mktemp -d'], { encoding: 'utf8' }).trim()
+  const run = (cmd) => execFileSync('bash', ['-c', cmd], { encoding: 'utf8' })
+  const content = 'x'.repeat(750) + 'END_OF_LINE\nlast line without newline'
+  run(fileToolCommand('write_file', { path: `${ws}/long.txt`, content }))
+  const first = run(fileToolCommand('read_file', { path: `${ws}/long.txt`, limit: 1 }))
+  assert.ok(first.includes('x'.repeat(750) + 'END_OF_LINE'))
+  assert.match(first, /2 lines total; showing 1-1/)
+  assert.match(run(fileToolCommand('read_file', { path: `${ws}/long.txt`, start: 2 })), /last line without newline/)
+})
+
 // The user names the project by its host path and the model repeats it, but
 // inside the sandbox the folder is mounted elsewhere — so a correct instruction
 // came back as "No such folder: /root/viewe-account".

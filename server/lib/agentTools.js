@@ -89,7 +89,7 @@ export function observationText(name, result) {
   if (['write_file', 'read_file', 'edit_file', 'list_files', 'search_files', 'web_search'].includes(name)) {
     return result.ok ? (out || '(ok)') : `Error: ${err || out || 'failed'}`
   }
-  const body = out ? out : err ? `(Error: ${err})` : '(command succeeded with no stdout)'
+  const body = out ? out : err ? `(Error: ${err})` : result.ok ? '(command succeeded with no stdout)' : '(command failed with no output)'
   return `[Tool Execution: ${name} on ${result.target || 'sandbox'}]\nExit Code: ${result.exitCode}\nOutput:\n${body}${out && err ? `\nStderr:\n${err}` : ''}`
 }
 
@@ -154,7 +154,7 @@ export function fileToolCommand(name, args = {}, { base = '/workspace', hostRoot
       const p = absPath(args.path, base, hostRoot)
       const start = Math.max(1, Number(args.start) || 1)
       const limit = Math.min(2000, Math.max(1, Number(args.limit) || 400))
-      return `test -f ${q(p)} || { echo "No such file: ${p}" >&2; exit 1; }; total=$(wc -l < ${q(p)}); sed -n '${start},${start + limit - 1}p' ${q(p)} | cut -c1-500 | nl -ba -v ${start}; if [ "$total" -gt ${start + limit - 1} ]; then echo "... (${'$'}total lines total; showing ${start}-${start + limit - 1})"; fi`
+      return `test -f ${q(p)} || { echo "No such file: ${p}" >&2; exit 1; }; total=$(awk 'END { print NR }' ${q(p)}); sed -n '${start},${start + limit - 1}p' ${q(p)} | nl -ba -v ${start}; if [ "$total" -gt ${start + limit - 1} ]; then echo "... (${'$'}total lines total; showing ${start}-${start + limit - 1})"; fi`
     }
     case 'edit_file': {
       const p = absPath(args.path, base, hostRoot)
@@ -166,7 +166,7 @@ export function fileToolCommand(name, args = {}, { base = '/workspace', hostRoot
         'src = open(p, encoding="utf-8").read()',
         'n = src.count(old)',
         'if n != 1:',
-        '    sys.stderr.write(f"old text must appear exactly once in {p}, found {n}\\n"); sys.exit(1)',
+        '    sys.stderr.write(f"old text must appear exactly once in {p}, found {n}. No changes made. Read the current section with read_file, then use a unique exact snippet without line-number prefixes.\\n"); sys.exit(1)',
         'open(p, "w", encoding="utf-8").write(src.replace(old, new, 1))',
         'print(f"edited {p}")',
       ].join('\n')

@@ -13,6 +13,7 @@ import { createJob, completeJob, failJob, touchJob, cancelJob, setRescueHandler,
 import { supabaseAdmin } from '../lib/supabase.js'
 import { executeAgentTool, AGENT_GUIDANCE } from '../lib/agentLoop.js'
 import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
+import { createToolRecovery } from '../lib/toolRecovery.js'
 import { WEB_SEARCH_TOOL, hasBraveKey } from '../lib/webSearch.js'
 import { buildSkillToolset } from '../lib/skillTools.js'
 import { selectConnectorTools, describeMatches, FIND_CONNECTOR_TOOLS } from '../lib/connectorTools.js'
@@ -152,6 +153,7 @@ async function buildMcpToolset(userId, connectorIds, agent = null, userText = ''
   tools.push(...skillset.tools)
 
   const permissionFor = (name) => permMap.get(name) || 'allow'
+  const recovery = createToolRecovery()
   // Returns { content, media? } — content is text for the model, media (if any)
   // is a generated image/audio/video to surface in the chat.
   const onToolCall = async (name, input) => {
@@ -162,7 +164,7 @@ async function buildMcpToolset(userId, connectorIds, agent = null, userText = ''
       const step = toStep(name, input, result)
       steps.push(step)
       agent.onProgress?.({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
-      return { content: observationText(name, result) }
+      return { content: observationText(name, result) + recovery(name, result) }
     }
     if (name === FIND_CONNECTOR_TOOLS.name) {
       return { content: describeMatches(connectorTools, input?.query || '') }

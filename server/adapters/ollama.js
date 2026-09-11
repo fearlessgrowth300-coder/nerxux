@@ -4,7 +4,8 @@
 // Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
-import { toOpenAITools, AGENT_TOOL_NAMES } from '../lib/agentTools.js'
+import { toOpenAITools, AGENT_TOOL_NAMES, observationText } from '../lib/agentTools.js'
+import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages } from '../lib/fitContext.js'
 import { getComputeStatus, ensureTurboReady } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
@@ -126,6 +127,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // amount of "yes, continue" fixes that. Refuse to re-run duplicates and
   // stop nudging once the text repeats.
   const seenCalls = new Map()
+  const recovery = createToolRecovery()
   const seenTexts = new Set()
   const requestStart = Date.now()
   let parseRetries = 0
@@ -301,7 +303,10 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       const callKey = call.name + ' ' + JSON.stringify(call.args)
       const times = (seenCalls.get(callKey) || 0) + 1
       seenCalls.set(callKey, times)
-      if (times > 2) {
+      // Reads are how the agent recovers from a stale edit. They are bounded
+      // by the turn budget, not by a lifetime cap of two reads per file.
+      const isRead = ['read_file', 'list_files', 'search_files'].includes(call.name)
+      if (times > 2 && !isRead) {
         const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: 'Refused: this exact call has already run twice in this turn.', target: 'loop-guard' }
         toolSteps.push(step)
         onProgress({ type: 'tool', ...step })
@@ -350,14 +355,10 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         toolSteps.push(step)
         onProgress({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
 
-        // Give observation back to the model
-        const outputSummary = result.stdout
-          ? result.stdout
-          : result.stderr
-            ? `(Error: ${result.stderr})`
-            : '(command succeeded with no stdout)'
-
-        const obs = `[Tool Execution: ${call.name} on ${result.target || 'sandbox'}]\nExit Code: ${result.exitCode}\nOutput:\n${outputSummary}`
+        // A test rerun after a patch is new work, even with identical args.
+        if (result.ok && ['write_file', 'edit_file'].includes(call.name)) seenCalls.clear()
+        // Always include stderr: a script can print progress before throwing.
+        const obs = observationText(call.name, result) + recovery(call.name, result)
         messages.push({ role: 'user', content: obs })
       } catch (err) {
         const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: err.message, target: 'error' }
