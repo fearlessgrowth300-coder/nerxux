@@ -5,6 +5,7 @@
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
 import { toOpenAITools, AGENT_TOOL_NAMES } from '../lib/agentTools.js'
+import { fitMessages } from '../lib/fitContext.js'
 import { getComputeStatus, ensureTurboReady } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
@@ -77,6 +78,14 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // tokens, so the call was cut mid-emission and Ollama's tool parser
   // rejected the fragment ("XML syntax error ... unexpected end element").
   const numPredict = isRunpod ? 12000 : 3000
+  // The model supports far more, but Ollama defaults it to 32,768 — which a
+  // build conversation crosses, after which EVERY message in that chat fails
+  // with "exceeds the available context size". 64k is verified to fit on the
+  // A40 alongside the weights. The CPU box stays small on purpose: it reads at
+  // ~23 tok/s, so a 64k prompt there would be three quarters of an hour.
+  const numCtx = isRunpod ? 65536 : 16384
+  // What is left for the conversation once the answer's budget is set aside.
+  const promptBudget = numCtx - numPredict - 1500
   const system = composeSystem(systemPrompt, skills)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
@@ -130,10 +139,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: model || 'nexus-mine',
-          messages,
+          // Re-fitted every round: a long turn keeps appending tool output, so
+          // a conversation that fitted at the start need not fit by step 40.
+          messages: fitMessages(messages, promptBudget).messages,
           tools: agentTools,
           stream: false,
-          options: { num_predict: numPredict },
+          options: { num_predict: numPredict, num_ctx: numCtx },
         }),
         signal,
       })
