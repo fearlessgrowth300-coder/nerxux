@@ -259,7 +259,7 @@ export default function TrainModel() {
         <span className={`h-2.5 w-2.5 rounded-full ${health?.reachable ? (health?.loaded ? 'bg-green-400' : 'bg-yellow-400') : 'bg-red-500'}`} />
         <span className="text-gray-300">
           {!health?.reachable
-            ? 'Model server offline — run: cd nexus-model && python serve.py'
+            ? health?.message || 'Model server offline — run: cd nexus-model && python serve.py'
             : health?.loaded
               ? `Your model is live (${health.params?.toLocaleString()} parameters)`
               : 'Model server up, but no trained weights yet — train below.'}

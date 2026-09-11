@@ -32,6 +32,14 @@ async function isUp(timeoutMs = 2000) {
 }
 
 // Start serve.py if it isn't already responding. Safe to call repeatedly.
+// Whether there is anything for serve.py to load at all. Checked before every
+// attempt to reach it, so a server with no trained weights fails in milliseconds
+// instead of a real network timeout — and the earlier failure carries a message
+// that makes sense on a hosted server, not "run this command yourself".
+export function hasCheckpoint() {
+  return fs.existsSync(path.join(MODEL_DIR, 'out'))
+}
+
 export async function ensureModelServer() {
   if (await isUp()) {
     console.log(`[nexus-ai] model server already up at ${MODEL_URL}`)

@@ -5,9 +5,12 @@
 // the model server is down when a chat arrives, it starts it and retries.
 // 127.0.0.1, not "localhost": on Windows Node resolves localhost to IPv6 ::1
 // first, which can fail to reach an IPv4-bound local server.
-import { ensureModelServer } from '../lib/modelServer.js'
+import { ensureModelServer, hasCheckpoint } from '../lib/modelServer.js'
 
 const MODEL_URL = process.env.NEXUS_MODEL_URL || 'http://127.0.0.1:4500'
+export const NO_CHECKPOINT_MESSAGE =
+  'This experimental model has no trained weights on this server, so it cannot answer. ' +
+  'Open the model picker and switch model A to "Qwen 3.8 27B Uncensored" (or another model) to continue.'
 
 function composeSystem(systemPrompt = '', skills = []) {
   const parts = []
@@ -28,6 +31,10 @@ function postChat(body) {
 
 // { prompt, systemPrompt, skills, temperature?, maxTokens? }
 export async function run({ prompt, systemPrompt, skills, temperature, maxTokens }) {
+  // Fail in milliseconds, not after a real network timeout plus a doomed
+  // auto-start attempt, and say something the user can actually act on — the
+  // previous message told them to open a terminal on a server they don't have.
+  if (!hasCheckpoint()) throw new Error(NO_CHECKPOINT_MESSAGE)
   const system = composeSystem(systemPrompt, skills)
   const body = { prompt, system, temperature: temperature ?? 0.8, max_tokens: maxTokens ?? 160 }
 
@@ -68,6 +75,7 @@ export async function run({ prompt, systemPrompt, skills, temperature, maxTokens
 // Lightweight reachability check used by the Train page. Tries to auto-start the
 // model server if it's not reachable, so the Train page recovers on its own.
 export async function health() {
+  if (!hasCheckpoint()) return { reachable: false, loaded: false, message: NO_CHECKPOINT_MESSAGE }
   try {
     const r = await fetch(`${MODEL_URL}/health`, { method: 'GET' })
     if (!r.ok) return { reachable: true, loaded: false }
