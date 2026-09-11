@@ -11,7 +11,7 @@ const stubs = {
   '../context/AuthContext': "export const useAuth = () => ({user:{id:'test-user',email:'test@example.com'}})",
   'react-router-dom': 'export const useNavigate = () => () => {}',
   '../lib/conversations': 'export const {listConversations,createConversation,listMessages,saveMessages,deleteConversation} = globalThis.__chatTest',
-  '../lib/chat': 'export const {sendChat,resumeChat} = globalThis.__chatTest; export const pollJob = async () => ({messages:[]})',
+  '../lib/chat': 'export const {sendChat,resumeChat} = globalThis.__chatTest; export const pollJob = async () => ({messages:[]}); export const listRunningJobs = async () => []',
   '../lib/skills': 'export const listSkills = async () => []',
   '../lib/mcp': 'export const getConnectors = async () => []',
   '../lib/systemPrompt': "export const buildSystemPrompt = async () => ''",

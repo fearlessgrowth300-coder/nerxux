@@ -79,7 +79,10 @@ app.use(
   })
 )
 
-app.use(express.json({ limit: '2mb' }))
+// Attachments travel as base64 inside the chat body, which is ~33% larger
+// than the file. 2mb rejected any real photo — the client now shrinks
+// images, and this leaves room for a PDF plus its extracted text.
+app.use(express.json({ limit: '12mb' }))
 
 // ---- Health check ----
 app.get('/api/health', (req, res) => {

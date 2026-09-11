@@ -112,6 +112,11 @@ api.interceptors.response.use(
 // A server bug can send `error` as an object ({message, type}) instead of a
 // string — never let that reach `new Error()` and render as "[object Object]".
 export function apiError(err, fallback = 'Request failed') {
+  // 413 arrives as the bare server string "request entity too large", which
+  // says nothing about what to do. Name the cause.
+  if (err?.response?.status === 413) {
+    return new Error('That attachment is too large to send. Try a smaller image, or crop it first.')
+  }
   const raw = err?.response?.data?.error
   const message = typeof raw === 'string' ? raw
     : raw && typeof raw === 'object' ? raw.message || JSON.stringify(raw)
