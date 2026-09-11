@@ -97,7 +97,7 @@ export default function Chat() {
     abortRef.current = controller
     setLiveEvents([])
     try {
-      const { messages: replies, routing } = await pollJob(job.jobId, { signal: controller.signal, onProgress: setLiveEvents })
+      const { messages: replies, routing, duplicate } = await pollJob(job.jobId, { signal: controller.signal, onProgress: setLiveEvents })
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
@@ -105,7 +105,9 @@ export default function Chat() {
       if (!job.conversationId || job.conversationId === convIdRef.current) {
         setMessages((prev) => [...prev, ...toAdd])
       }
-      if (job.conversationId) {
+      // Another device already collected and saved this reply — saving it again
+      // is how the conversation ended up with two identical cards.
+      if (job.conversationId && !duplicate) {
         try { await saveMessages(job.conversationId, toAdd) }
         catch (err) { setError(`Could not sync the reply (${err?.message || err}). A local copy is saved on this device.`) }
       }
@@ -296,7 +298,7 @@ export default function Chat() {
     setLiveEvents([])
     try {
       const systemPrompt = await buildSystemPrompt()
-      const { messages: replies, routing } = await sendChat({
+      const { messages: replies, routing, duplicate } = await sendChat({
         history: history.map(({ role, content }) => ({ role, content })),
         modelA, modelB, pipeline, systemPrompt, videoContext, auto,
         attachments: media,
@@ -313,8 +315,9 @@ export default function Chat() {
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
       setMessages((prev) => [...prev, ...toAdd])
-      // Persist this turn to the second brain.
-      if (convId) {
+      // Persist this turn to the second brain — unless another device watching
+      // the same job already did, which is how a reply got saved twice.
+      if (convId && !duplicate) {
         try { await saveMessages(convId, toAdd) }
         catch (err) { setError(`Could not sync the reply (${err?.message || err}). A local copy is saved on this device.`) }
       }

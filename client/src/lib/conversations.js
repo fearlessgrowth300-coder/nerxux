@@ -69,9 +69,21 @@ export async function listMessages(conversationId) {
   return (data ?? []).map((r) => r.data).filter(Boolean)
 }
 
+// Postgres text/jsonb cannot hold U+0000, and tool output sometimes contains it
+// (a binary file printed to the terminal). One such byte failed the whole save.
+function withoutNul(value) {
+  if (typeof value === 'string') return value.split('\u0000').join('')
+  if (Array.isArray(value)) return value.map(withoutNul)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, withoutNul(v)]))
+  }
+  return value
+}
+
 // Persist a batch of message objects to a conversation. Transient cards
 // (approval prompts, typing) are not saved.
 export async function saveMessages(conversationId, msgs) {
+  msgs = withoutNul(msgs)
   const userId = await currentUserId()
   const now = Date.now()
   const rows = (msgs || [])

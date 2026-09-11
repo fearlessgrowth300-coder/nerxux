@@ -19,13 +19,24 @@ import { selectConnectorTools, describeMatches, FIND_CONNECTOR_TOOLS } from '../
 
 const router = Router()
 
+// Postgres text/jsonb cannot hold U+0000; one NUL in tool output failed this
+// insert with "unsupported Unicode escape sequence" and the reply was lost.
+function withoutNul(value) {
+  if (typeof value === 'string') return value.split('\u0000').join('')
+  if (Array.isArray(value)) return value.map(withoutNul)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, withoutNul(v)]))
+  }
+  return value
+}
+
 // A reply that finished while nobody was watching — the app closed, the phone
 // asleep, the PC off — is written straight into the conversation, so the work
 // is waiting in History instead of being thrown away with the job. Only ever
 // runs for a result the client never collected, so it cannot duplicate one the
 // client already saved itself.
 setRescueHandler(async (job) => {
-  const messages = (job.result?.messages || []).filter((m) => m && m.role && m.role !== 'approval')
+  const messages = withoutNul(job.result?.messages || []).filter((m) => m && m.role && m.role !== 'approval')
   if (!messages.length) return
   const now = Date.now()
   const { error } = await supabaseAdmin.from('conversation_messages').insert(
@@ -273,8 +284,12 @@ router.get('/jobs/:id', (req, res) => {
     return res.status(404).json({ error: 'That request has expired — please resend your message.' })
   }
   if (job.status === 'running') return res.json({ status: 'running', events: job.events })
+  // Two devices watching the same job BOTH collected the result and both saved
+  // it, so the conversation got the reply twice. Only the first collector saves;
+  // any later one is told it is a duplicate and just displays it.
+  const duplicate = Boolean(job.delivered)
   job.delivered = true // the client has it; no need to rescue it later
-  res.json({ status: job.status, result: job.result, error: job.error })
+  res.json({ status: job.status, result: job.result, error: job.error, duplicate })
 })
 
 // POST /api/chat/jobs/:id/cancel — the Stop button.

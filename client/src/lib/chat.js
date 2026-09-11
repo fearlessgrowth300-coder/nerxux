@@ -47,7 +47,8 @@ export async function pollJob(jobId, { signal, onProgress } = {}) {
       if (job.status === 'running') { if (job.events?.length) onProgress?.(job.events); continue }
       if (job.status === 'cancelled') throw new Error('Stopped.')
       if (job.status !== 'done') throw new Error(job.error || 'Chat request failed')
-      return { messages: job.result.messages, routing: job.result.routing || null }
+      // `duplicate`: another device already collected (and saved) this reply.
+      return { messages: job.result.messages, routing: job.result.routing || null, duplicate: Boolean(job.duplicate) }
     }
   } catch (err) {
     throw apiError(err, 'Chat request failed')

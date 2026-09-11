@@ -6,13 +6,16 @@
 //
 // The Python process is spawned DETACHED so it survives Node restarts (e.g. from
 // `node --watch`); ensureModelServer() health-checks first so we never start two.
+import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const MODEL_DIR = path.join(__dirname, '..', '..', 'nexus-model')
-const PY = process.env.PYTHON_BIN || 'python'
+// python3, not python: Ubuntu ships no bare `python`, and the spawn failed with
+// ENOENT on every boot of the VPS.
+const PY = process.env.PYTHON_BIN || 'python3'
 const PORT = process.env.NEXUS_MODEL_PORT || '4500'
 const MODEL_URL = process.env.NEXUS_MODEL_URL || `http://127.0.0.1:${PORT}`
 
@@ -33,6 +36,13 @@ export async function ensureModelServer() {
   if (await isUp()) {
     console.log(`[nexus-ai] model server already up at ${MODEL_URL}`)
     return true
+  }
+  // serve.py loads its weights from out/. The from-scratch model is trained on
+  // the user's PC and its weights are gitignored, so a machine without out/ has
+  // nothing to serve — trying anyway logged a failure on every single boot.
+  if (!fs.existsSync(path.join(MODEL_DIR, 'out'))) {
+    console.log(`[nexus-ai] no trained checkpoint in ${path.join(MODEL_DIR, 'out')} — not starting the from-scratch model server`)
+    return false
   }
   console.log(`[nexus-ai] starting model server: ${PY} -u serve.py (cwd ${MODEL_DIR})`)
   try {

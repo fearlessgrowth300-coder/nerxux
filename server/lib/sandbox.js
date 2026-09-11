@@ -261,7 +261,9 @@ exit $BWRAP_EXIT
   // Tool output is stored in the conversation and rendered in the chat, so a
   // credential printed here is published, not just displayed. The live git
   // token is passed explicitly because it will not always match a pattern.
-  const clean = (text) => redactSecrets(text, gitToken ? [gitToken] : [])
+  // Postgres cannot store U+0000, and a command that prints a binary file puts
+  // NULs in its output — which then failed the save of the whole reply.
+  const clean = (text) => redactSecrets(text, gitToken ? [gitToken] : [])?.split('\u0000').join('')
 
   return new Promise((resolve) => {
     let stdout = ''

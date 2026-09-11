@@ -131,7 +131,15 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   let parseRetries = 0
   let tunnelRetries = 0
 
+  // Set when the loop ends on a real answer. If it instead runs out of rounds or
+  // wall-clock while still working, nothing has summarised the turn — the reply
+  // was an empty card over dozens of tool actions. See the wrap-up after the loop.
+  let finished = false
+
   for (let step = 0; step < MAX_STEPS; step++) {
+    // The budget check used to live only on the text-answer path, so a model
+    // that kept calling tools ran straight past it — one turn went 84 minutes.
+    if (Date.now() - requestStart > WALL_CLOCK_BUDGET_MS) break
     let resp
     try {
       resp = await fetch(`${targetUrl}/api/chat`, {
@@ -247,6 +255,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       const textKey = rawContent.trim().slice(0, 300)
       if (toolSteps.length && looksUnfinished(rawContent) && seenTexts.has(textKey)) {
         finalContent += '\n\n*(stopped — the agent kept repeating this same step without making progress. Check what was actually written and tell it exactly what to do next.)*'
+        finished = true
         break
       }
       seenTexts.add(textKey)
@@ -263,9 +272,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       const truncated = data.done_reason === 'length'
       if (truncated && (!hasBudget || step === MAX_STEPS - 1)) {
         finalContent += '\n\n*(stopped here — this turn ran out of time; send "continue" and it will pick up where it left off)*'
+        finished = true
         break
       }
-      if (!truncated) break
+      if (!truncated) {
+        finished = true
+        break
+      }
       messages.push({ role: 'assistant', content: rawContent })
       // In an agentic turn the thing that got truncated is almost always an
       // oversized tool call (one command writing many files). Continuing the
@@ -356,6 +369,41 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         })
       }
     }
+  }
+
+  // The turn ran out of rounds or time while still working. Its last message
+  // was a tool call, so there was no reply at all — the chat showed a bare
+  // "Model Executed 76 Tool Actions" card and the user could not tell whether
+  // anything had been done. Ask for a short account of the state, without
+  // tools, and always say plainly that the turn was cut off.
+  if (!finished && !signal?.aborted) {
+    let summary = ''
+    try {
+      const r = await fetch(`${targetUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: model || 'nexus-mine',
+          messages: fitMessages([
+            ...messages,
+            {
+              role: 'user',
+              content:
+                'This turn has used its whole step budget and must stop NOW. Do not call any tools. ' +
+                'In a few short lines tell the user: what you completed (name the files you changed), ' +
+                'what you verified and how, and what is still left to do.',
+            },
+          ], promptBudget).messages,
+          stream: false,
+          options: { num_predict: 1500, num_ctx: numCtx },
+        }),
+        signal,
+      })
+      if (r.ok) summary = String((await r.json()).message?.content || '').trim()
+    } catch {}
+    const n = toolSteps.length
+    const note = `*(stopped after ${n} tool action${n === 1 ? '' : 's'} — the limit for one turn was reached before the work was finished. Send "continue" and it will pick up from here.)*`
+    finalContent = [summary || finalContent.trim(), note].filter(Boolean).join('\n\n')
   }
 
   return {
