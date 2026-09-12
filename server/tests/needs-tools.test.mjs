@@ -8,6 +8,10 @@ import { needsAgentTools, shouldAttachAgentTools } from '../lib/needsTools.js'
 test('real work gets the tools', () => {
   for (const t of [
     'build me a next.js landing page',
+    'continue',
+    'resume from where you stopped',
+    'inspect_execution',
+    'verify_work',
     'create a file called notes.txt with my todo list',
     'fix the bug in src/app.js',
     'run the tests and tell me what fails',

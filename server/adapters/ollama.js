@@ -4,7 +4,8 @@
 // Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
-import { toOpenAITools, AGENT_TOOL_NAMES, observationText } from '../lib/agentTools.js'
+import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
+import { agentStatePrompt, verificationFooter } from '../lib/agentState.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages } from '../lib/fitContext.js'
 import { getComputeStatus, ensureTurboReady } from '../lib/computeManager.js'
@@ -142,6 +143,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     // The budget check used to live only on the text-answer path, so a model
     // that kept calling tools ran straight past it — one turn went 84 minutes.
     if (Date.now() - requestStart > WALL_CLOCK_BUDGET_MS) break
+    messages[0].content = system + '\n\n' + await agentStatePrompt(userId, sessionId)
     let resp
     try {
       resp = await fetch(`${targetUrl}/api/chat`, {
@@ -342,16 +344,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           chatText: messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n'),
         })
 
-        const step = {
-          tool: call.name,
-          args: call.args,
-          ok: result.ok,
-          exitCode: result.exitCode,
-          durationMs: result.durationMs,
-          stdout: result.stdout || '',
-          stderr: result.stderr || '',
-          target: result.target || 'sandbox',
-        }
+        const step = toStep(call.name, call.args, result)
         toolSteps.push(step)
         onProgress({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
 
@@ -407,6 +400,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     finalContent = [summary || finalContent.trim(), note].filter(Boolean).join('\n\n')
   }
 
+  if (toolSteps.some(s => AGENT_TOOL_NAMES.has(s.tool) && s.tool !== 'web_search')) {
+    finalContent += await verificationFooter(userId, sessionId)
+  }
   return {
     ok: true,
     provider: 'ollama',

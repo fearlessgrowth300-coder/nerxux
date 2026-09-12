@@ -921,13 +921,20 @@ function ToolStepsCard({ steps = [] }) {
                     {st.tool}
                   </span>
                   <span className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-[10px] text-nexus-accent2">
-                    {st.target === 'pod' ? '⚡ Runpod Pod' : '🔒 Local Sandbox'}
+                    {st.target === 'pod' || st.context?.environment === 'pod' ? '⚡ RunPod' : '🔒 Server sandbox'}
                   </span>
                 </div>
                 <span className={`text-[10px] font-mono ${st.ok ? 'text-emerald-400' : 'text-red-400'}`}>
-                  exit: {st.exitCode ?? 0} {st.durationMs ? `(${st.durationMs}ms)` : ''}
+                  exit: {st.exitCode ?? 'unknown'} {st.durationMs ? `(${st.durationMs}ms)` : ''}
                 </span>
               </div>
+              {st.context && (
+                <div className="mb-1 break-all text-[10px] text-gray-500">
+                  Evidence #{st.evidenceId} · {st.machine || st.context.machine} · cwd: {st.context.cwd || 'unknown'}
+                  {st.context.projectPath ? ` · project: ${st.context.projectPath}` : ''}
+                  {st.context.diagnosticRequired ? ' · Diagnosis required' : ''}
+                </div>
+              )}
               {st.args?.command && (
                 <div className="font-mono text-[11px] text-gray-300 bg-black/40 px-2 py-1 rounded">
                   $ {st.args.command}

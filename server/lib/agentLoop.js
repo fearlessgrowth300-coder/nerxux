@@ -1,8 +1,10 @@
+import { controlledAgentTool } from './agentControl.js'
+import { transferAgentFile } from './agentTransfer.js'
 import { executeInSandbox } from './sandbox.js'
 import { runOnPod } from './pod.js'
 import { getProviderKey } from './vault.js'
 import { runWebSearchTool } from './webSearch.js'
-import { AGENT_TOOL_DEFS, toOpenAITools, fileToolCommand } from './agentTools.js'
+import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, toOpenAITools, fileToolCommand } from './agentTools.js'
 
 // How to work — shared by every model that gets the agent tools (Claude,
 // GPT-4o, Gemini, Groq, the local models).
@@ -14,6 +16,17 @@ You have access to:
 
 When the user asks you to write, test, run, clone, build, inspect, or execute code or terminal commands, DO NOT just describe what to do. ACTUALLY EXECUTE IT by calling a tool.
 
+Execution controls (enforced by Nexus, shared by every model):
+- At the start of resumed work call inspect_execution. Its machine, project and evidence IDs are authoritative; quoted history is not proof of current filesystem state.
+- Turbo/Always On selects where the MODEL runs. Project tools remain in the VPS sandbox unless set_execution_context explicitly selects pod. A mounted VPS path and /workspace/project refer to the same files, not two deployments.
+- The project location persists across turns/restarts. Changing or clearing it requires set_execution_context with a reason; this never transfers files.
+- Use transfer_file for any necessary VPS-to-pod source copy. Wait for verified size/SHA-256/destination before running it; never paste chunked base64 transfers into shell commands.
+- write_file/edit_file check Python, JS, shell and JSON syntax before replacing a file. JSX/TS and other languages still require the project checker/build.
+- After two failed actions Nexus pauses changes. Read current source and run a small read-only execute_command with purpose="diagnostic". Then call diagnose_failure with both evidence IDs, the observed cause and the next check. Do not disguise edits as diagnostics.
+- Use verify_work for tests/builds/deployments, with output assertions that prove the specific requirement. For positive numeric counts use json_number with min=1 and make the test emit a final JSON line. Exit zero or a printed PASS is not evidence of functionality by itself. Never invent success text with echo or a mock for a live check.
+- After further changes old checks become stale. Re-run the relevant checks. Keep implemented, tested, and deployed separate; claim only the scope of successful current checks.
+- Use record_progress before a pause to save the exact next step or blocker. Tool evidence is saved automatically even when the turn stops at its limit.
+
 How to work (this is how good engineers use these tools):
 - Look before you act: list_files / read_file the relevant parts of the project before changing it.
 - Write files with write_file (whole file) or edit_file (small change) — NEVER via shell heredocs or echo.
@@ -24,7 +37,7 @@ How to work (this is how good engineers use these tools):
 - After an edit_file mismatch, read_file the current section before trying another exact replacement; never reuse a stale or truncated snippet.
 - Preserve failing exit codes. Shell pipelines use pipefail; do not hide failures with trailing successful commands or unconditional success. A test script must exit nonzero when its checks fail, even if it catches and prints exceptions.
 - After a batch of changes, prove it: run the relevant build/tests and the original reproduction, and read stdout AND stderr. Report which checks passed and which remain unverified. Never claim a deployment, connection, or runtime works just because files were written or a command was attempted.
-- Keep a short plan in your head and finish every item on it.
+- Track remaining work with record_progress and finish each requirement with evidence.
 
 WORK AUTONOMOUSLY. When given a task, carry it all the way to completion in this
 turn: plan briefly, then execute step after step until it is actually done and
@@ -146,35 +159,15 @@ export function harvestGithubToken(text = '') {
   return matches ? matches[matches.length - 1] : null
 }
 
-// Once a chat mounts a local project folder, every later call in that same
-// chat should keep using it without the model re-stating the path on every
-// single tool call (it will forget, especially deep into a long build).
-// Session-scoped, not global — a different chat working on a different
-// folder is unaffected. Cleared by giving `projectPath: null`/`""` explicitly.
-const lastProjectPath = new Map() // sessionId -> path
-export const _lastProjectPathForTest = lastProjectPath // tests only
+// All providers share these controls; state lives outside the writable sandbox.
+export async function executeAgentTool(input) {
+  return controlledAgentTool({ ...input, args: normalizeToolArgs(input.name, input.args) }, executeRawAgentTool, transferAgentFile)
+}
 
-// Executes a single tool call against the local sandbox or Runpod pod.
-// `chatText` = the conversation so far, scanned for pasted credentials.
-export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '' }) {
-  const args = normalizeToolArgs(name, rawArgs)
+async function executeRawAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '', executionEnvironment = 'sandbox' }) {
   const cleanSession = sessionId || 'default'
-  // An explicit projectPath (even "" / null, to unmount) updates what this
-  // chat remembers; omitting the field just reuses whatever was set before.
-  if ('projectPath' in args) {
-    // Only a real path is worth remembering. A stray true/{}/number used to be
-    // stored and then reused on every later call, so one malformed argument
-    // broke the whole session.
-    const raw = args.projectPath
-    const clean = typeof raw === 'string' ? raw.trim()
-      : raw && typeof raw === 'object' && typeof raw.path === 'string' ? raw.path.trim()
-      : ''
-    args.projectPath = clean || null
-    if (clean) lastProjectPath.set(cleanSession, clean)
-    else lastProjectPath.delete(cleanSession)
-  }
-  const targetProj = args.projectPath || projectPath || lastProjectPath.get(cleanSession) || null
-
+  const targetProj = projectPath
+  const onPod = executionEnvironment === 'pod'
   if (name === 'web_search') {
     // Reshaped to match the sandbox result shape ({stdout,...}) that the
     // caller (ollama.js) already knows how to turn into a tool observation.
@@ -189,10 +182,11 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
   // is bind-mounted for this call, /workspace otherwise — matching where
   // execute_command/run_code actually start (see sandbox.js's targetDir).
   const fileCmd = fileToolCommand(name, args, {
-    base: targetProj ? '/workspace/project' : '/workspace',
+    base: onPod ? targetProj : targetProj ? '/workspace/project' : '/workspace',
     hostRoot: targetProj,
   })
   if (fileCmd) {
+    if (onPod) return runOnPod(fileCmd, { cwd: targetProj })
     const r = await executeInSandbox({
       code: fileCmd, language: 'bash', sessionId: cleanSession, profile: 'none', projectPath: targetProj,
     })
@@ -200,6 +194,7 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
   }
 
   if (name === 'run_code') {
+    if (onPod) throw new Error('run_code uses the VPS sandbox. On a selected pod, use write_file then execute_command.')
     return executeInSandbox({
       code: args.code || '',
       language: args.language || 'python',
@@ -210,8 +205,8 @@ export async function executeAgentTool({ name, args: rawArgs = {}, sessionId = '
     })
   }
 
-  if (name === 'run_on_pod' || (name === 'execute_command' && args.target === 'pod')) {
-    return runOnPod(args.command || '')
+  if (name === 'run_on_pod' || (name === 'execute_command' && onPod)) {
+    return runOnPod(args.command || '', { cwd: targetProj })
   }
 
   if (name === 'execute_command') {
@@ -252,41 +247,37 @@ export function extractToolCallsFromText(text) {
   if (!text || typeof text !== 'string') return []
   const calls = []
 
-  // 1. Check for JSON blocks: {"tool": "...", ...}
-  const jsonRegex = /\{[\s\r\n]*"tool"[\s\r\n]*:[\s\r\n]*"([^"]+)"[\s\S]*?\}/g
-  let match
-  while ((match = jsonRegex.exec(text)) !== null) {
+  // Balanced JSON scanning: verification assertions and quoted source can
+  // contain nested braces. A non-greedy brace regex truncates those calls.
+  let start = -1, depth = 0, quoted = false, escaped = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (start < 0) {
+      if (ch === '{') { start = i; depth = 1; quoted = false; escaped = false }
+      continue
+    }
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') quoted = false
+      continue
+    }
+    if (ch === '"') { quoted = true; continue }
+    if (ch === '{') depth++
+    if (ch !== '}') continue
+    depth--
+    if (depth !== 0) continue
     try {
-      const parsed = JSON.parse(match[0])
-      if (parsed.tool) {
-        if (parsed.tool === 'run_code') {
-          calls.push({
-            name: 'run_code',
-            args: {
-              language: parsed.language || 'python',
-              code: parsed.code || '',
-              profile: parsed.profile || 'none',
-              projectPath: parsed.projectPath,
-            },
-          })
-        } else if (parsed.tool === 'execute_command' || parsed.tool === 'run_on_pod') {
-          calls.push({
-            name: parsed.tool === 'run_on_pod' ? 'run_on_pod' : 'execute_command',
-            args: {
-              command: parsed.command || parsed.code || '',
-              target: parsed.target || (parsed.tool === 'run_on_pod' ? 'pod' : 'sandbox'),
-              profile: parsed.profile || 'full',
-              projectPath: parsed.projectPath,
-            },
-          })
-        } else if (parsed.tool === 'web_search') {
-          calls.push({ name: 'web_search', args: { query: parsed.query || parsed.q || '' } })
-        } else if (['write_file', 'read_file', 'edit_file', 'list_files', 'search_files'].includes(parsed.tool)) {
-          const { tool, ...rest } = parsed
-          calls.push({ name: tool, args: rest })
-        }
+      const parsed = JSON.parse(text.slice(start, i + 1))
+      if (AGENT_TOOL_NAMES.has(parsed.tool)) {
+        const { tool, ...rest } = parsed
+        const args = normalizeToolArgs(tool, rest)
+        if (['execute_command', 'run_on_pod'].includes(tool) && !args.command) args.command = args.code || ''
+        if (tool === 'web_search' && !args.query) args.query = args.q || ''
+        calls.push({ name: tool, args })
       }
     } catch {}
+    start = -1
   }
 
   if (calls.length > 0) return calls
@@ -307,7 +298,7 @@ export function extractToolCallsFromText(text) {
     if (runMatch) {
       calls.push({
         name: 'execute_command',
-        args: { command: runMatch[1].trim(), target: 'sandbox', profile: 'full' },
+        args: { command: runMatch[1].trim(), profile: 'full' },
       })
     }
   }

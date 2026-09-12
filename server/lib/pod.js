@@ -1,4 +1,5 @@
-import { exec } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import { redactSecrets } from './redact.js'
 import os from 'node:os'
 import path from 'node:path'
 import { fetchPodDetails } from './computeManager.js'
@@ -39,38 +40,23 @@ export async function runOnPod(command, { timeoutMs = 45000, cwd } = {}) {
     }
   }
   const { host, port } = endpoint
-  const cleanCmd = cwd ? `cd ${cwd} && ${command}` : command
-
-  // Safely escape the remote command
-  const b64 = Buffer.from(cleanCmd, 'utf-8').toString('base64')
-  const remoteExec = `echo "${b64}" | base64 -d | bash`
-
-  const sshCmd = `ssh -p ${port} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -i "${SSH_KEY_PATH}" ${RUNPOD_USER}@${host} "${remoteExec}"`
-
+  const quote = (v) => "'" + String(v).replace(/'/g, "'\\''") + "'"
+  const script = (cwd ? `cd -- ${quote(cwd)} || exit $?\n` : '') + command + '\n'
   return new Promise((resolve) => {
-    exec(sshCmd, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
-      const durationMs = Date.now() - startTime
-      if (err) {
-        resolve({
-          ok: false,
-          stdout: stdout || '',
-          stderr: stderr || err.message,
-          exitCode: err.code || 1,
-          durationMs,
-          target: 'pod',
-          host: `${RUNPOD_USER}@${host}:${port}`,
-        })
-      } else {
-        resolve({
-          ok: true,
-          stdout: stdout || '',
-          stderr: stderr || '',
-          exitCode: 0,
-          durationMs,
-          target: 'pod',
-          host: `${RUNPOD_USER}@${host}:${port}`,
-        })
-      }
-    })
+    let stdout = '', stderr = '', timedOut = false, settled = false
+    const proc = spawn('ssh', ['-p', String(port), '-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-i', SSH_KEY_PATH, `${RUNPOD_USER}@${host}`, 'bash -o pipefail -s'], { windowsHide: true })
+    const timer = setTimeout(() => { timedOut = true; proc.kill() }, timeoutMs)
+    const finish = (code, error = '') => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ ok: !timedOut && code === 0, stdout: redactSecrets(stdout), stderr: redactSecrets(stderr + error + (timedOut ? '\nSSH command timed out' : '')), exitCode: timedOut ? 124 : code ?? 1, durationMs: Date.now() - startTime, target: 'pod', host: `${RUNPOD_USER}@${host}:${port}`, cwd: cwd || '(remote default)' })
+    }
+    proc.stdout.on('data', d => { stdout += d; if (stdout.length > 500000) { stdout = stdout.slice(0, 500000); proc.kill() } })
+    proc.stderr.on('data', d => { stderr += d; if (stderr.length > 500000) { stderr = stderr.slice(0, 500000); proc.kill() } })
+    proc.on('error', e => finish(1, e.message))
+    proc.on('close', code => finish(code))
+    proc.stdin.on('error', () => {}) // an early SSH failure is reported by close
+    proc.stdin.end(script)
   })
 }

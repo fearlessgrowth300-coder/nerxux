@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { randomUUID } from 'node:crypto'
+import { agentStatePrompt, verificationFooter } from '../lib/agentState.js'
 import { requireAuth } from '../lib/auth.js'
 import { getModelById } from '../../shared/models.js'
 import { routeIntent } from '../lib/router.js'
@@ -210,6 +212,7 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
   const hasAgentTools = !localAgent && tools.some((t) => handNames.has(t.name))
   const fullSystem = [
     hasAgentTools ? AGENT_GUIDANCE : null,
+    hasAgentTools ? await agentStatePrompt(userId, sessionId) : null,
     mcp?.skillIndex || null,
     systemPrompt,
   ].filter(Boolean).join('\n\n')
@@ -233,6 +236,9 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
   // Surface the agent's tool actions in the reply card for the API models
   // (the local adapters report their own toolSteps).
   if (result && !result.toolSteps?.length && mcp?.steps?.length) result.toolSteps = mcp.steps.slice()
+  if (!localAgent && result?.toolSteps?.some(s => AGENT_TOOL_NAMES.has(s.tool) && s.tool !== 'web_search')) {
+    result.content = (result.content || '') + await verificationFooter(userId, sessionId)
+  }
   return { result, label: info.label }
 }
 
@@ -311,10 +317,11 @@ async function handleChat(userId, body, signal, onProgress = () => {}) {
     attachments = [],
     webSearch = false,
     connectorIds = null,
-    sessionId = null,
+    sessionId: suppliedSessionId = null,
     projectPath = null,
     agentTools = 'auto',
   } = body || {}
+  const sessionId = suppliedSessionId || randomUUID()
 
   const lastUser = [...history].reverse().find((m) => m.role === 'user')
   const userText = lastUser?.content?.trim() || ''

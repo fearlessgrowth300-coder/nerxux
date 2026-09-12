@@ -20,7 +20,7 @@ const TARGET = /\b(file|files|folder|directory|dir|path|repo|repository|project|
 const HARD = /\b(git|github|npm|npx|yarn|pnpm|pip|python|node|bash|sh|curl|docker|vite|next\.?js|react|tsx?|jsx?|\.env|package\.json|requirements\.txt|dockerfile|makefile)\b|```|\.(js|ts|jsx|tsx|py|go|rs|java|rb|php|html|css|json|ya?ml|toml|md|sh)\b|(^|\s)[~/.]?\/[\w.-]+\/|[A-Za-z]:\\/i
 
 // Explicit tool names — if someone names one, they want it.
-const NAMED = /\b(write_file|read_file|edit_file|list_files|search_files|execute_command|run_code|run_on_pod|web_search)\b/i
+const NAMED = /\b(write_file|read_file|edit_file|list_files|search_files|execute_command|run_code|run_on_pod|web_search|inspect_execution|set_execution_context|diagnose_failure|verify_work|record_progress|transfer_file)\b/i
 
 /**
  * @param {string} text  the latest user message
@@ -32,6 +32,8 @@ export function needsAgentTools(text = '', { projectPath = null } = {}) {
   if (projectPath) return true
   const t = String(text || '')
   if (!t.trim()) return false
+  // A continuation must retain hands even when it does not repeat "project".
+  if (/^\s*(continue|resume|carry on|keep going|retry)\b/i.test(t)) return true
   if (NAMED.test(t) || HARD.test(t)) return true
   return ACTION.test(t) && TARGET.test(t)
 }

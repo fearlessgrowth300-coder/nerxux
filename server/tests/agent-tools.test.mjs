@@ -13,8 +13,8 @@ test('tool defs convert to OpenAI function format and the name set covers them a
 })
 
 test('a relative path resolves against the given base — /workspace/project when a local folder is mounted, /workspace otherwise', () => {
-  assert.match(fileToolCommand('write_file', { path: 'a.js', content: 'x' }, { base: '/workspace/project' }), /> '\/workspace\/project\/a\.js'/)
-  assert.match(fileToolCommand('write_file', { path: 'a.js', content: 'x' }), /> '\/workspace\/a\.js'/) // default base, unchanged
+  assert.match(fileToolCommand('read_file', { path: 'a.js' }, { base: '/workspace/project' }), /'\/workspace\/project\/a\.js'/)
+  assert.match(fileToolCommand('read_file', { path: 'a.js' }), /'\/workspace\/a\.js'/) // default base, unchanged
   assert.match(fileToolCommand('list_files', {}, { base: '/workspace/project' }), /cd '\/workspace\/project'/) // empty path -> the base itself
   assert.match(fileToolCommand('read_file', { path: '/abs/x.js' }, { base: '/workspace/project' }), /'\/abs\/x\.js'/) // absolute path ignores base
 })
@@ -35,19 +35,20 @@ test('file tool commands never embed model text as shell syntax', () => {
 
 // bash is available on this machine (Git Bash on Windows / native elsewhere):
 // run the real recipes against a temp dir to prove they round-trip content.
-const bashAvailable = (() => { try { execFileSync('bash', ['-c', 'true']); return true } catch { return false } })()
+const bashAvailable = process.platform !== 'win32' && (() => { try { execFileSync('bash', ['-c', 'true']); return true } catch { return false } })()
 test('write/read/edit/list/search round-trip real content through bash', { skip: !bashAvailable }, () => {
   // A POSIX temp dir stands in for /workspace (the recipes are the same
   // strings the sandbox runs; only the root differs).
   const ws = execFileSync('bash', ['-c', 'mktemp -d'], { encoding: 'utf8' }).trim()
-  const run = (cmd) => execFileSync('bash', ['-c', cmd.replace(/\/workspace/g, ws)], { encoding: 'utf8' })
-  const content = 'line one\nconst s = "it\'s `tricky` $HOME";\n// done\n'
-  assert.match(run(fileToolCommand('write_file', { path: 't/a.js', content })), /wrote .*t\/a\.js/)
-  assert.match(run(fileToolCommand('read_file', { path: 't/a.js' })), /2\s+const s = "it's `tricky` \$HOME";/)
-  assert.match(run(fileToolCommand('edit_file', { path: 't/a.js', old: '// done', new: '// finished' })), /edited/)
-  assert.match(run(fileToolCommand('search_files', { pattern: 'finished', path: 't' })), /a\.js:3:\/\/ finished/)
-  assert.match(run(fileToolCommand('list_files', { path: 't' })), /a\.js/)
-  assert.throws(() => run(fileToolCommand('edit_file', { path: 't/a.js', old: 'nope', new: 'x' })))
+  const run = (cmd) => execFileSync('bash', ['-c', cmd], { encoding: 'utf8' })
+  const recipe = (name, args) => fileToolCommand(name, args, { base: ws })
+  const content = '// line one\nconst s = "it\'s `tricky` $HOME";\n// done\n'
+  assert.match(run(recipe('write_file', { path: 't/a.js', content })), /wrote .*t\/a\.js/)
+  assert.match(run(recipe('read_file', { path: 't/a.js' })), /2\s+const s = "it's `tricky` \$HOME";/)
+  assert.match(run(recipe('edit_file', { path: 't/a.js', old: '// done', new: '// finished' })), /edited/)
+  assert.match(run(recipe('search_files', { pattern: 'finished', path: 't' })), /a\.js:3:\/\/ finished/)
+  assert.match(run(recipe('list_files', { path: 't' })), /a\.js/)
+  assert.throws(() => run(recipe('edit_file', { path: 't/a.js', old: 'nope', new: 'x' })))
 })
 
 test('observations read naturally for file tools and like a terminal for commands', () => {

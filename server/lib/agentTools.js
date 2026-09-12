@@ -6,6 +6,7 @@
 // builds. write_file/edit_file take the content as a plain argument and we
 // deliver it to the sandbox base64-encoded, so no quoting can go wrong.
 import { WEB_SEARCH_TOOL } from './webSearch.js'
+import { fileMutationCommand } from './fileMutation.js'
 
 const str = (description) => ({ type: 'string', description })
 // Set once (on any tool call) to bind-mount a real local folder on the host
@@ -13,7 +14,7 @@ const str = (description) => ({ type: 'string', description })
 // they're running Nexus locally — at the project root instead of the
 // throwaway per-chat sandbox dir. Sticky: it's remembered for every later
 // call in this same chat, so it only needs to be given once.
-const PROJECT_PATH_FIELD = str('Absolute path on the host machine to work in instead of the throwaway sandbox (e.g. an existing local project). Sticky for the rest of this chat once set; pass "" to unmount it.')
+const PROJECT_PATH_FIELD = str('Absolute Linux path on the Nexus host. Persisted for this conversation. Changing or clearing an established project requires set_execution_context.')
 
 export const AGENT_TOOL_DEFS = [
   {
@@ -51,6 +52,7 @@ export const AGENT_TOOL_DEFS = [
         target: { type: 'string', enum: ['sandbox', 'pod'], description: 'Where to run (default sandbox)' },
         profile: { type: 'string', enum: ['none', 'full'], description: 'Network: "full" (default) or "none"' },
         projectPath: PROJECT_PATH_FIELD,
+        purpose: { type: 'string', enum: ['work', 'diagnostic'], description: 'diagnostic means a read-only inspection or minimal probe; allowed during a diagnostic checkpoint. Never edit files in a diagnostic command.' },
       },
       required: ['command'],
     },
@@ -71,8 +73,32 @@ export const AGENT_TOOL_DEFS = [
   },
   {
     name: 'run_on_pod',
-    description: 'Run a shell command directly on the RunPod GPU pod via SSH.',
+    description: 'Run a command on the GPU pod only after set_execution_context explicitly selects pod. Turbo inference does not move execution there.',
     input_schema: { type: 'object', properties: { command: str('Command to run on the pod') }, required: ['command'] },
+  },
+  {
+    name: 'inspect_execution', description: 'Read the durable machine, project, diagnostic checkpoint, recent evidence IDs, verification checks and next step. Use at the start of resumed work.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'set_execution_context', description: 'Explicitly change execution machine or project. Does not transfer files. Keep application work on the VPS; select pod only for a task that needs execution there, never merely because Turbo is selected.',
+    input_schema: { type: 'object', properties: { environment: { type: 'string', enum: ['sandbox', 'pod'] }, projectPath: str('Absolute directory; empty string resets to the conversation sandbox'), reason: str('Why this task requires a different machine or project') }, required: ['environment', 'projectPath', 'reason'] },
+  },
+  {
+    name: 'diagnose_failure', description: 'Release a diagnostic checkpoint only after fresh source inspection and a diagnostic command. Cite their server evidence IDs, explain the observed cause and the next check. This does not mark the repair verified.',
+    input_schema: { type: 'object', properties: { evidenceIds: { type: 'array', items: { type: 'integer' } }, cause: str('Observed cause supported by the cited results'), nextCheck: str('Targeted repair and original failing check to rerun') }, required: ['evidenceIds', 'cause', 'nextCheck'] },
+  },
+  {
+    name: 'verify_work', description: 'Run a read-only test/build/deployment check and assert actual stdout outcomes. Exit zero alone is insufficient. Use json_number min=1 for counts that must be positive; emit a final JSON object from the test. Checks become stale after further changes. Each label describes only the requirement checked; do not use echo to invent evidence.',
+    input_schema: { type: 'object', properties: { command: str('Real check command; preserve failures, do not change project source'), label: str('Specific acceptance requirement being tested'), kind: { type: 'string', enum: ['test', 'build', 'deployment'] }, assertions: { type: 'array', minItems: 1, items: { type: 'object', properties: { type: { type: 'string', enum: ['contains', 'json_number'] }, value: str('Required stdout text for contains'), field: str('Dotted JSON numeric field for json_number'), min: { type: 'number' } }, required: ['type'] } } }, required: ['command', 'label', 'kind', 'assertions'] },
+  },
+  {
+    name: 'record_progress', description: 'Persist the concrete next step or blocker for later turns. Completed changes, failures and checks are recorded automatically; this note cannot declare verification.',
+    input_schema: { type: 'object', properties: { nextStep: str('Concrete next action or unresolved blocker; omit secrets') }, required: ['nextStep'] },
+  },
+  {
+    name: 'transfer_file', description: 'Copy one file from the current VPS project/sandbox to an absolute pod path. Verifies byte count, SHA-256 and supported syntax before atomic replacement. Returns destination evidence; does not execute or change the project context. Pod must already be running.',
+    input_schema: { type: 'object', properties: { path: str('Source file in current project'), destination: str('Absolute destination file on pod') }, required: ['path', 'destination'] },
   },
 ]
 
@@ -86,11 +112,12 @@ export function toOpenAITools(defs) {
 export function observationText(name, result) {
   const out = (result.stdout || '').trim()
   const err = (result.stderr || '').trim()
+  const context = result.context ? `[Execution #${result.evidenceId}: machine=${result.machine || result.context.machine}; environment=${result.context.environment}; initial cwd=${result.context.cwd}; project=${result.context.projectPath || '(conversation workspace)'}; exit=${result.exitCode}; revision=${result.context.revision}; diagnosisRequired=${result.context.diagnosticRequired}]\n` : ''
   if (['write_file', 'read_file', 'edit_file', 'list_files', 'search_files', 'web_search'].includes(name)) {
-    return result.ok ? (out || '(ok)') : `Error: ${err || out || 'failed'}`
+    return context + (result.ok ? (out || '(ok)') : `Error: ${err || out || 'failed'}`)
   }
   const body = out ? out : err ? `(Error: ${err})` : result.ok ? '(command succeeded with no stdout)' : '(command failed with no output)'
-  return `[Tool Execution: ${name} on ${result.target || 'sandbox'}]\nExit Code: ${result.exitCode}\nOutput:\n${body}${out && err ? `\nStderr:\n${err}` : ''}`
+  return context + `[Tool Execution: ${name} on ${result.target || 'sandbox'}]\nExit Code: ${result.exitCode}\nOutput:\n${body}${out && err ? `\nStderr:\n${err}` : ''}`
 }
 
 // A step record for the UI's tool card / live progress.
@@ -104,6 +131,9 @@ export function toStep(name, args, result) {
     stdout: result.stdout || '',
     stderr: result.stderr || '',
     target: result.target || 'sandbox',
+    evidenceId: result.evidenceId,
+    context: result.context,
+    machine: result.machine,
   }
 }
 
@@ -146,9 +176,9 @@ export function fileToolCommand(name, args = {}, { base = '/workspace', hostRoot
       // regardless of what .gitignore (if any) the model wrote itself.
       const isSecretFile = /^\.env(\..+)?$/i.test(fileName) || /\.(pem|key|p12|pfx)$/i.test(fileName) || /^id_(rsa|ed25519|ecdsa)$/.test(fileName)
       const guard = isSecretFile
-        ? ` ; D="$(dirname ${q(p)})"; GI="$D/.gitignore"; grep -qxF '.env*' "$GI" 2>/dev/null || printf '%s\n' '.env*' >> "$GI"`
+        ? ` && { D="$(dirname ${q(p)})"; GI="$D/.gitignore"; grep -qxF '.env*' "$GI" 2>/dev/null || printf '%s\n' '.env*' >> "$GI"; }`
         : ''
-      return `mkdir -p "$(dirname ${q(p)})" && printf '%s' ${q(b64(args.content ?? ''))} | base64 -d > ${q(p)} && echo "wrote ${p} ($(wc -c < ${q(p)}) bytes)"${guard}`
+      return fileMutationCommand(name, args, p) + guard
     }
     case 'read_file': {
       const p = absPath(args.path, base, hostRoot)
@@ -158,20 +188,7 @@ export function fileToolCommand(name, args = {}, { base = '/workspace', hostRoot
     }
     case 'edit_file': {
       const p = absPath(args.path, base, hostRoot)
-      const py = [
-        'import sys, base64',
-        'p = sys.argv[1]',
-        `old = base64.b64decode(${JSON.stringify(b64(args.old ?? ''))}).decode()`,
-        `new = base64.b64decode(${JSON.stringify(b64(args.new ?? ''))}).decode()`,
-        'src = open(p, encoding="utf-8").read()',
-        'n = src.count(old)',
-        'if n != 1:',
-        '    sys.stderr.write(f"old text must appear exactly once in {p}, found {n}. No changes made. Read the current section with read_file, then use a unique exact snippet without line-number prefixes.\\n"); sys.exit(1)',
-        'open(p, "w", encoding="utf-8").write(src.replace(old, new, 1))',
-        'print(f"edited {p}")',
-      ].join('\n')
-      // Pick a Python that actually runs (Windows ships a `python3` stub that only prints an install hint).
-      return `PY=""; for c in python3 python; do "$c" -c pass >/dev/null 2>&1 && PY="$c" && break; done; [ -n "$PY" ] || { echo "python not available" >&2; exit 1; }; printf '%s' ${q(b64(py))} | base64 -d | "$PY" - ${q(p)}`
+      return fileMutationCommand(name, args, p)
     }
     case 'list_files': {
       const p = absPath(args.path, base, hostRoot)

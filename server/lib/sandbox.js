@@ -14,6 +14,7 @@ import { redactSecrets } from './redact.js'
 // `spawn('wsl', ...)` here — it silently fails with ENOENT on every Linux
 // deployment (bwrap must be installed there: `apt install bubblewrap`).
 const IS_WINDOWS = process.platform === 'win32'
+const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`
 
 // Real project work (npm install, create-next-app, a build) routinely runs
 // well past 30s; killing it there left half-scaffolded projects and made the
@@ -114,7 +115,7 @@ export async function executeInSandbox({
     } else {
       wslProjectPath = trimmed.replace(/\\/g, '/')
     }
-    projectBindMount = `--bind "${wslProjectPath}" /workspace/project`
+    projectBindMount = `--bind ${shellQuote(wslProjectPath)} /workspace/project`
     // Also expose the project at its REAL path. The user names the folder by
     // its host path ("work on /root/viewe-account"), the model repeats that
     // path, and inside the sandbox it did not exist — so a perfectly correct
@@ -122,7 +123,7 @@ export async function executeInSandbox({
     // means an absolute host path works in shell commands too, not just in
     // the file tools. Skipped for system directories, which are already bound.
     if (/^\/(root|home|srv|opt|data|mnt|var\/www|workspace)\//.test(wslProjectPath + '/')) {
-      projectBindMount += ` --bind "${wslProjectPath}" "${wslProjectPath}"`
+      projectBindMount += ` --bind ${shellQuote(wslProjectPath)} ${shellQuote(wslProjectPath)}`
     }
   }
 
@@ -173,7 +174,7 @@ SESSION_DIR="/tmp/nexus_sandbox/${cleanSession}"
 WORK_DIR="$SESSION_DIR/work"
 HARNESS_DIR="$SESSION_DIR/.harness"
 mkdir -p "$WORK_DIR" "$HARNESS_DIR/hooks"
-${wslProjectPath ? `mkdir -p "${wslProjectPath}"` : ''}
+${wslProjectPath ? `test -d ${shellQuote(wslProjectPath)} || { echo 'Project directory does not exist; inspect the host path before selecting it.' >&2; exit 1; }` : ''}
 
 # Sessions that predate the split kept their files at the session root; move
 # them into work/ so nobody loses what they were in the middle of.
@@ -222,7 +223,7 @@ bwrap \\
   --bind "$WORK_DIR" /workspace \
   --ro-bind "$HARNESS_DIR" /nexus \\
   ${projectBindMount} \\
-  --chdir "${targetDir}" \\
+  --chdir ${shellQuote(targetDir)} \\
   --unshare-pid \\
   --unshare-ipc \\
   --unshare-uts \\
