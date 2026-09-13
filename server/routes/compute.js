@@ -11,6 +11,7 @@ import {
   listPods,
   setPodId,
   terminateRunpodPod,
+  getRunpodBilling,
 } from '../lib/computeManager.js'
 
 const router = Router()
@@ -24,6 +25,15 @@ router.get('/status', async (req, res) => {
   try {
     const status = await getLiveComputeStatus()
     res.json(status)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/compute/billing — RunPod balance, spend rate and the pod's cost/uptime.
+router.get('/billing', async (req, res) => {
+  try {
+    res.json(await getRunpodBilling())
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

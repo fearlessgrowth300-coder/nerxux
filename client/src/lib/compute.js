@@ -45,3 +45,8 @@ export async function terminatePod(podId) {
   const { data } = await api.post('/api/compute/pod/terminate', { podId })
   return data
 }
+
+export async function getBilling() {
+  const { data } = await api.get('/api/compute/billing')
+  return data
+}

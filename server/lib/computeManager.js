@@ -224,6 +224,47 @@ export async function resolvePodId() {
   return pick.id
 }
 
+// Account balance + spend rate from RunPod's GraphQL API (the REST API has
+// no balance endpoint), plus the current pod's cost and uptime, so the app
+// can show what Turbo is costing without a trip to runpod.io.
+export function runpodGraphql(query) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({ query })
+    const req = https.request('https://api.runpod.io/graphql', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getApiKey()}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload), 'User-Agent': 'curl/8.4.0' },
+    }, (res) => {
+      let data = ''
+      res.on('data', (c) => { data += c })
+      res.on('end', () => {
+        if (res.statusCode >= 400) return reject(new Error(`RunPod GraphQL ${res.statusCode}: ${data.slice(0, 200)}`))
+        try {
+          const j = JSON.parse(data)
+          if (j.errors?.length) return reject(new Error(j.errors[0].message))
+          resolve(j.data)
+        } catch (e) { reject(e) }
+      })
+    })
+    req.setTimeout(20000, () => req.destroy(new Error('RunPod API timed out')))
+    req.on('error', reject)
+    req.write(payload)
+    req.end()
+  })
+}
+
+export async function getRunpodBilling() {
+  const data = await runpodGraphql('{ myself { clientBalance currentSpendPerHr spendLimit } }')
+  const me = data?.myself || {}
+  let pod = null
+  try {
+    const p = await fetchPodDetails()
+    pod = { id: p.id, name: p.name, status: p.status || p.desiredStatus, costPerHr: Number(p.cost) || 0, uptimeSeconds: Number(p.runtime?.uptime) || 0, startedAt: p.startedAt || null, gpu: p.gpu?.id || null }
+  } catch {
+    pod = null // no pod is not an error for the balance panel
+  }
+  return { balance: Number(me.clientBalance) || 0, spendPerHr: Number(me.currentSpendPerHr) || 0, spendLimit: me.spendLimit ?? null, pod, fetchedAt: Date.now() }
+}
+
 // Fetch live pod status from Runpod REST v2 API
 export async function fetchPodDetails(podId) {
   return runpodRequest(`/pods/${podId || (await resolvePodId())}`)

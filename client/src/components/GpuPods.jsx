@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import Modal from './Modal'
 import { apiError } from '../lib/api'
 import {
-  getComputeStatus, switchComputeMode, listPods, selectPod, terminatePod,
+  getComputeStatus, switchComputeMode, listPods, selectPod, terminatePod, getBilling,
 } from '../lib/compute'
+import { projectBilling, formatMoney, formatDuration } from '../lib/billing'
 
 // The whole GPU pod lifecycle in one place. Recovering from a lost pod used to
 // mean editing the server over SSH; a pod can now be terminated here, and its
@@ -14,6 +15,9 @@ export default function GpuPods() {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [confirmKill, setConfirmKill] = useState(null)
+  const [billing, setBilling] = useState(null)
+  const [billingError, setBillingError] = useState('')
+  const [now, setNow] = useState(Date.now())
 
   async function refresh() {
     try {
@@ -23,6 +27,12 @@ export default function GpuPods() {
     } catch (err) {
       setError(apiError(err).message)
     }
+    try {
+      setBilling(await getBilling())
+      setBillingError('')
+    } catch (err) {
+      setBillingError(apiError(err).message)
+    }
   }
 
   // While a pod installs its model, keep the progress line moving.
@@ -31,6 +41,14 @@ export default function GpuPods() {
     const timer = setInterval(refresh, 15000)
     return () => clearInterval(timer)
   }, [])
+
+  // The balance and the session cost tick every second between refreshes,
+  // projected from the last snapshot — the same arithmetic RunPod bills by.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const bill = projectBilling(billing, now)
 
   async function act(label, fn) {
     setBusy(label)
@@ -99,6 +117,43 @@ export default function GpuPods() {
             </div>
           </div>
         )}
+
+        {/* What Turbo is costing, live, without opening runpod.io. */}
+        <div className="rounded-xl border border-nexus-border bg-nexus-bg/60 p-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-300">RunPod balance</span>
+            {bill && (
+              <span className="text-lg font-semibold text-gray-100">{formatMoney(bill.balanceNow)}</span>
+            )}
+          </div>
+          {billingError && !bill && <p className="mt-1 text-amber-300">{billingError}</p>}
+          {!bill && !billingError && <p className="mt-1 text-gray-500">Loading…</p>}
+          {bill && (
+            <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-gray-400 sm:grid-cols-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">Spend rate</p>
+                <p className="text-gray-200">{bill.spendPerHr > 0 ? `${formatMoney(bill.spendPerHr, 3)}/hr` : 'nothing running'}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">Balance lasts</p>
+                <p className={bill.secondsLeft !== null && bill.secondsLeft < 3600 ? 'text-red-300' : 'text-gray-200'}>
+                  {bill.secondsLeft === null ? '—' : formatDuration(bill.secondsLeft)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">This session</p>
+                <p className="text-gray-200">{bill.running ? `${formatDuration(bill.uptimeSeconds)} · ${formatMoney(bill.sessionCost, 3)}` : 'pod stopped'}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">Pod rate</p>
+                <p className="text-gray-200">{bill.costPerHr > 0 ? `${formatMoney(bill.costPerHr, 3)}/hr` : '—'}{billing?.pod?.gpu ? ` · ${billing.pod.gpu}` : ''}</p>
+              </div>
+            </div>
+          )}
+          {bill && bill.secondsLeft !== null && bill.secondsLeft < 3600 && (
+            <p className="mt-2 text-red-300">Less than an hour of balance left at this spend rate. Top up on runpod.io or stop the pod.</p>
+          )}
+        </div>
 
         <div className="space-y-1">
           <div className="flex items-center justify-between">
