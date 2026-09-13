@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
+import { logErrorSummary } from '../lib/safeErrors.js'
 import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
 import { agentStatePrompt } from '../lib/agentState.js'
 import { requireAuth } from '../lib/auth.js'
@@ -54,7 +55,7 @@ setRescueHandler(async (job) => {
       created_at: new Date(now + i).toISOString(),
     }))
   )
-  if (error) console.error('[nexus-ai] could not rescue an uncollected reply:', error.message)
+  if (error) logErrorSummary('rescueReply', error)
 })
 router.use(requireAuth)
 

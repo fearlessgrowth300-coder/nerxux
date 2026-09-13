@@ -14,7 +14,7 @@ const PATTERNS = [
   [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_***'], // GitHub fine-grained
   [/\bvcp_[A-Za-z0-9]{20,}/g, 'vcp_***'],            // Vercel
   [/\bsk-ant-[A-Za-z0-9_-]{20,}/g, 'sk-ant-***'],    // Anthropic
-  [/\bsk-[A-Za-z0-9]{32,}/g, 'sk-***'],              // OpenAI
+  [/\bsk-(?:(?:proj|admin|svcacct)-)?[A-Za-z0-9_-]{20,}/g, 'sk-***'], // OpenAI
   [/\bgsk_[A-Za-z0-9]{20,}/g, 'gsk_***'],            // Groq
   [/\bAIza[A-Za-z0-9_-]{30,}/g, 'AIza***'],          // Google
   [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, 'xox*-***'],   // Slack
@@ -25,7 +25,12 @@ const PATTERNS = [
   [/(https?:\/\/)[^/@\s:]+:[^/@\s]+@/g, '$1***:***@'],
   // https://x-access-token:TOKEN@github.com, which the git rewrite uses
   [/(https?:\/\/)[^/@\s]+@/g, '$1***@'],
+  // Header dumps, including credentials without a provider-specific prefix.
+  [/\b((?:proxy-)?authorization\s*[:=]\s*)(?:Bearer|Basic)\s+[^\s"',;]+/gi, '$1***'],
+  [/\b(x-api-key\s*[:=][ \t]*)[^\s"',;]+/gi, '$1***'],
 ]
+
+const SECRET_FIELD = /^(?:[a-z0-9]+[_-])*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|service[_-]?role[_-]?key|encryption[_-]?key|private[_-]?key|cookie|set[_-]?cookie)$/i
 
 /**
  * Replaces credential-shaped strings in text destined for the transcript.
@@ -43,7 +48,8 @@ export function redactSecrets(text, extra = []) {
   }
   for (const [re, replacement] of PATTERNS) out = out.replace(re, replacement)
   // Structured config dumps also contain passwords with no recognizable prefix.
-  out = out.replace(/(["'](?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization)["']\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/gi, '$1"***"')
+  out = out.replace(/(["']([^"']+)["']\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/g,
+    (match, prefix, key) => SECRET_FIELD.test(key) ? `${prefix}"***"` : match)
   out = out.replace(/^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_TOKEN|REFRESH_TOKEN|ENCRYPTION_KEY)[A-Z0-9_]*\s*=).+$/gm, '$1***')
   return out
 }
@@ -51,6 +57,6 @@ export function redactSecrets(text, extra = []) {
 export function redactToolData(value) {
   if (typeof value === 'string') return redactSecrets(value)
   if (Array.isArray(value)) return value.map(redactToolData)
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, /^(password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization)$/i.test(k) ? '***' : redactToolData(v)]))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, SECRET_FIELD.test(k) ? '***' : redactToolData(v)]))
   return value
 }

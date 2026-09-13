@@ -8,10 +8,10 @@ const ALGO = 'aes-256-gcm'
 
 function getKey() {
   const hex = process.env.VAULT_ENCRYPTION_KEY || ''
-  if (hex.length !== 64) {
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
     throw new Error(
-      'VAULT_ENCRYPTION_KEY must be 64 hex chars (32 bytes). Generate one with: ' +
-        'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+      'VAULT_ENCRYPTION_KEY must be exactly 64 hexadecimal characters (32 bytes). ' +
+        'Check the configured key; replacing an existing key makes stored credentials unreadable.'
     )
   }
   return Buffer.from(hex, 'hex')

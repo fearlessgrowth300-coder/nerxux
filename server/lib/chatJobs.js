@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { safeErrorMessage } from './safeErrors.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const GRAVEYARD_FILE = path.join(__dirname, '../.chat-jobs-graveyard.json')
@@ -92,7 +93,7 @@ export function completeJob(job, result, now = Date.now()) {
 export function failJob(job, err, now = Date.now()) {
   if (job.status !== 'running') return
   job.status = err?.name === 'AbortError' ? 'cancelled' : 'error'
-  job.error = err?.name === 'AbortError' ? 'The request was cancelled.' : (err?.message || 'Chat request failed')
+  job.error = err?.name === 'AbortError' ? 'The request was cancelled.' : safeErrorMessage(err, 'Chat request failed')
   job.finishedAt = now
 }
 

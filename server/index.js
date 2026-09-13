@@ -18,14 +18,15 @@ import computeRouter from './routes/compute.js'
 import { ensureModelServer } from './lib/modelServer.js'
 import { restoreComputeMode } from './lib/computeManager.js'
 import { saveGraveyard } from './lib/chatJobs.js'
+import { errorStatus, logErrorSummary, safeErrorMessage } from './lib/safeErrors.js'
 
 // Never let a stray async error from a third-party transport (e.g. an MCP
 // socket erroring after close) take down the whole server — log and continue.
 process.on('unhandledRejection', (reason) => {
-  console.error('[nexus-ai] unhandledRejection:', reason)
+  logErrorSummary('unhandledRejection', reason)
 })
 process.on('uncaughtException', (err) => {
-  console.error('[nexus-ai] uncaughtException:', err)
+  logErrorSummary('uncaughtException', err)
 })
 
 // A deploy (pm2 restart) sends this, not a crash — but it still drops any
@@ -108,9 +109,8 @@ app.use('/api/compute', computeRouter)
 // Every route added in later steps should `next(err)` so errors land here
 // with a consistent JSON shape and proper status codes.
 app.use((err, req, res, next) => {
-  console.error('[nexus-ai] error:', err.message)
-  const status = err.status || 500
-  res.status(status).json({ error: err.message || 'Internal server error' })
+  logErrorSummary('requestFailed', err)
+  res.status(errorStatus(err)).json({ error: safeErrorMessage(err, 'Internal server error') })
 })
 
 app.listen(PORT, () => {
@@ -118,9 +118,9 @@ app.listen(PORT, () => {
   // Auto-start the local Python model server so "Nexus (your model)" is online
   // without a separate terminal. Non-fatal if Python/deps are missing.
   ensureModelServer().catch((e) =>
-    console.error('[nexus-ai] ensureModelServer error:', e.message)
+    logErrorSummary('ensureModelServer', e)
   )
   restoreComputeMode().catch((e) =>
-    console.error('[nexus-ai] restoreComputeMode error:', e.message)
+    logErrorSummary('restoreComputeMode', e)
   )
 })
