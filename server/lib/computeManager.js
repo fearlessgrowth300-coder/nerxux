@@ -262,11 +262,12 @@ export async function getRunpodBilling() {
   } catch {
     pod = null // no pod is not an error for the balance panel
   }
-  // Observed: the balance sits still and then drops by exactly ten minutes of
-  // spend at once, so RunPod deducts in 10-minute chunks measured from the
-  // pod's start. Override here if RunPod changes it; the client counts down
-  // to the next chunk from this.
-  const cycleSeconds = Number(process.env.RUNPOD_BILLING_CYCLE_SECONDS) || 600
+  // Measured on 2026-09-13 by watching the balance: it sits still and then
+  // drops by exactly five minutes of spend, at uptime 41:21 and 46:17 — so
+  // RunPod deducts in 5-minute chunks from the pod's start (landing a
+  // minute or so after each boundary). Override if RunPod changes it; the
+  // client counts down to the next chunk from this.
+  const cycleSeconds = Number(process.env.RUNPOD_BILLING_CYCLE_SECONDS) || 300
   return { balance: Number(me.clientBalance) || 0, spendPerHr: Number(me.currentSpendPerHr) || 0, spendLimit: me.spendLimit ?? null, pod, cycleSeconds, fetchedAt: Date.now() }
 }
 

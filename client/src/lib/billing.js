@@ -34,10 +34,10 @@ export function formatDuration(seconds) {
 
 // RunPod deducts a running pod's cost in chunks rather than per second: the
 // balance sat unchanged for minutes at a time while the pod ran. The cycle is
-// measured from the pod's start time. Observed to be 10 minutes (the balance
-// dropped by exactly ten minutes of spend at once); the server's
-// billing.cycleSeconds overrides the default.
-export function chargeCycle(snapshot, nowMs = Date.now(), cycleSeconds = 600) {
+// measured from the pod's start time. Measured at 5 minutes (two consecutive
+// deductions of exactly five minutes of spend, five minutes apart); the
+// server's billing.cycleSeconds overrides the default.
+export function chargeCycle(snapshot, nowMs = Date.now(), cycleSeconds = 300) {
   const pod = snapshot?.pod
   if (!pod || pod.status !== 'RUNNING' || !pod.startedAt) return null
   const started = Date.parse(pod.startedAt)
