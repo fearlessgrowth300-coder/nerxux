@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { MenuIcon, LogoutIcon } from './icons'
+import BalanceBadge from './BalanceBadge'
 
 // Derive up-to-two-letter initials from an email for the avatar.
 function initialsFromEmail(email = '') {
@@ -39,6 +40,8 @@ export default function TopBar({ onMenuClick }) {
         <span className="text-sm font-semibold text-gray-200">Nexus AI</span>
       </div>
 
+      <div className="flex items-center gap-3">
+      <BalanceBadge />
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen((v) => !v)}
@@ -65,6 +68,7 @@ export default function TopBar({ onMenuClick }) {
             </button>
           </div>
         )}
+      </div>
       </div>
     </header>
   )

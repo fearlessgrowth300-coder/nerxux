@@ -33,3 +33,22 @@ test('formatting', () => {
   assert.equal(formatDuration(69_762), '19h 22m 42s')
   assert.equal(formatDuration(200_000), '2d 7h 33m')
 })
+
+import { chargeCycle } from '../src/lib/billing.js'
+
+test('the charge countdown runs from the pod start in fixed cycles', () => {
+  const startedAt = '2026-09-13T13:39:05.944Z'
+  const start = Date.parse(startedAt)
+  const snap = { pod: { status: 'RUNNING', startedAt, costPerHr: 0.49 } }
+  const c = chargeCycle(snap, start + 1531 * 1000)
+  assert.equal(c.chargesSoFar, 2, '1531 s in = two 10-minute chunks taken')
+  assert.equal(Math.round(c.secondsToNext), 1800 - 1531)
+  assert.ok(Math.abs(c.chargeAmount - 0.49 / 6) < 1e-9, 'each chunk is ten minutes of the hourly rate')
+  const later = chargeCycle(snap, start + (600 * 2 + 5) * 1000)
+  assert.equal(later.chargesSoFar, 2)
+  assert.equal(Math.round(later.secondsToNext), 595)
+  assert.equal(later.nextChargeAt, start + 3 * 600 * 1000)
+  // a measured cycle from the server wins over the default
+  assert.equal(chargeCycle({ ...snap, cycleSeconds: 3600 }, start + 100_000).cycleSeconds, 3600)
+  assert.equal(chargeCycle({ pod: { status: 'EXITED', startedAt } }, start), null)
+})
