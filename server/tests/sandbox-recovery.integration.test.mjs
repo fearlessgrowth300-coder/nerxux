@@ -46,6 +46,8 @@ test('real sandbox failures, reads, patches and reruns reach the model faithfull
     assert.equal(result.toolSteps.length, calls.length)
     assert.equal(result.toolSteps[1].exitCode, 1, 'tail must not hide Python failure')
     const observations = bodies.flatMap((b) => b.messages).map((m) => m.content).join('\n')
+    assert.ok(bodies.some(b => b.messages.some(m => m.role === 'tool' && m.tool_name === 'execute_command')))
+    assert.ok(bodies.some(b => b.messages.some(m => m.role === 'assistant' && m.tool_calls?.length)))
     assert.match(observations, /starting check[\s\S]*Stderr:\n[\s\S]*ValueError: first/)
     assert.match(observations, /Diagnostic checkpoint/)
     assert.equal(result.toolSteps.filter((s) => s.tool === 'read_file' && s.ok).length, 4)

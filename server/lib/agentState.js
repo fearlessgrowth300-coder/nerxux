@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { redactSecrets } from './redact.js'
+import { redactSecrets, redactToolData } from './redact.js'
 
 const queues = new Map()
 const digest = (v) => createHash('sha256').update(String(v)).digest('hex')
@@ -14,7 +14,7 @@ export async function readAgentState(userId, sessionId) {
   try {
     const s = JSON.parse(await fs.readFile(stateFile(userId, sessionId), 'utf8'))
     if (s.version !== 1 || !Array.isArray(s.events)) throw new Error('Invalid agent state')
-    return s
+    return redactToolData(s)
   } catch (e) {
     if (e.code !== 'ENOENT') throw e
     return { version: 1, environment: 'sandbox', projectPath: null, revision: 0, sequence: 0, failures: 0, gateAfter: null, events: [], changes: [], checks: [], nextStep: '', inFlight: null }
@@ -69,6 +69,7 @@ export function stateSummary(s) {
     projectPath: s.projectPath, cwd: s.environment === 'pod' ? s.projectPath : s.projectPath ? '/workspace/project' : '/workspace',
     revision: s.revision, diagnosticRequired: s.gateAfter !== null,
     interruptedAction: s.inFlight, nextStep: s.nextStep,
+    jobs: (s.jobs || []).slice(-10),
     checks: s.checks.filter(c => c.revision === s.revision).slice(-8),
     changedFiles: (s.changes || []).slice(-10),
     recentEvidence: s.events.slice(-6).map(e => ({ ...e, detail: e.detail.slice(0, 250) })),

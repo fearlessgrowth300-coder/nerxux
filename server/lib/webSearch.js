@@ -34,6 +34,7 @@ export async function braveSearch(query, count = 5) {
 
   const resp = await fetch(url, {
     headers: { Accept: 'application/json', 'X-Subscription-Token': key },
+    signal: AbortSignal.timeout(15000),
   })
   if (!resp.ok) {
     if (resp.status === 401) throw new Error('Brave Search rejected the API key (BRAVE_SEARCH_API_KEY).')
@@ -57,8 +58,8 @@ export async function runWebSearchTool({ query } = {}) {
     const text = results
       .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description}`)
       .join('\n\n')
-    return { content: `Web search results for "${query}":\n\n${text}` }
+    return { ok: true, content: `Search snippets only; these are not full-page verification.\nWeb search results for "${query}":\n\n${text}` }
   } catch (e) {
-    return { content: `Web search failed: ${e.message}` }
+    return { ok: false, content: `Web search failed: ${e.message}` }
   }
 }

@@ -16,7 +16,7 @@ const TOKENS_PER_IMAGE = 1300
 
 export function estimateTokens(message) {
   if (typeof message === 'string') return Math.ceil(message.length / CHARS_PER_TOKEN)
-  const text = Math.ceil(String(message?.content || '').length / CHARS_PER_TOKEN)
+  const text = Math.ceil((String(message?.content || '').length + (message?.tool_calls ? JSON.stringify(message.tool_calls).length : 0)) / CHARS_PER_TOKEN)
   const images = (message?.images?.length || 0) * TOKENS_PER_IMAGE
   return text + images
 }
@@ -59,6 +59,10 @@ export function fitMessages(messages, budget) {
     break
   }
 
+  // Orphaned tool observations become explicit historical data.
+  for (let i = 0; i < kept.length && kept[i].role === 'tool'; i++) {
+    kept[i] = { role: 'user', content: '[Earlier tool observation] ' + String(kept[i].content || '') }
+  }
   const dropped = rest.length - kept.length
   const out = system ? [system] : []
   if (dropped > 0) {

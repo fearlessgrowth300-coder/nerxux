@@ -7,6 +7,7 @@
 // stops the harness from re-publishing them on the user's behalf.
 
 const PATTERNS = [
+  [/\brpa_[A-Za-z0-9_-]{16,}/g, 'rpa_***'],
   [/\bghp_[A-Za-z0-9]{20,}/g, 'ghp_***'],            // GitHub personal access
   [/\bgho_[A-Za-z0-9]{20,}/g, 'gho_***'],            // GitHub OAuth
   [/\bghs_[A-Za-z0-9]{20,}/g, 'ghs_***'],            // GitHub server-to-server
@@ -41,5 +42,15 @@ export function redactSecrets(text, extra = []) {
     }
   }
   for (const [re, replacement] of PATTERNS) out = out.replace(re, replacement)
+  // Structured config dumps also contain passwords with no recognizable prefix.
+  out = out.replace(/(["'](?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization)["']\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/gi, '$1"***"')
+  out = out.replace(/^(\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_TOKEN|REFRESH_TOKEN|ENCRYPTION_KEY)[A-Z0-9_]*\s*=).+$/gm, '$1***')
   return out
+}
+
+export function redactToolData(value) {
+  if (typeof value === 'string') return redactSecrets(value)
+  if (Array.isArray(value)) return value.map(redactToolData)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, /^(password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization)$/i.test(k) ? '***' : redactToolData(v)]))
+  return value
 }

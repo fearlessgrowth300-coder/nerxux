@@ -1,8 +1,10 @@
 import os from 'node:os'
+import { sandboxJob } from './sandboxJobs.js'
+import { redactToolData } from './redact.js'
 import path from 'node:path'
 import { withAgentState, addEvidence, stateSummary, safeNote, evaluateAssertions } from './agentState.js'
 
-const inspections = new Set(['read_file', 'list_files', 'search_files', 'web_search'])
+const inspections = new Set(['read_file', 'list_files', 'search_files', 'web_search', 'read_web_page'])
 const executions = new Set(['execute_command', 'run_code', 'run_on_pod', 'verify_work'])
 const ok = (stdout) => ({ ok: true, exitCode: 0, stdout, stderr: '', durationMs: 0 })
 const fail = (stderr) => ({ ok: false, exitCode: 1, stdout: '', stderr, durationMs: 0 })
@@ -17,11 +19,19 @@ export async function controlledAgentTool(input, execute, transfer) {
   const { userId, sessionId, name, args = {} } = input
   return withAgentState(userId, sessionId, async (s, persist) => {
     const finish = (r) => {
+      r = redactToolData(r)
       const event = addEvidence(s, name, args, r)
       return { ...r, evidenceId: event.id, context: { ...stateSummary(s), recentEvidence: undefined, checks: undefined } }
     }
     try {
       if (name === 'inspect_execution') return finish(ok(JSON.stringify(stateSummary(s), null, 2)))
+      if (name === 'job_status' || name === 'stop_job') {
+        const job = (s.jobs || []).find(j => j.id === args.jobId)
+        if (!job) return finish(fail('Unknown job for this conversation. Use inspect_execution to find its job ID.'))
+        const result = await sandboxJob({ sessionId, jobId: job.id, stop: name === 'stop_job', offset: args.offset })
+        Object.assign(job, result.job)
+        return finish(result)
+      }
       if (name === 'record_progress') {
         s.nextStep = safeNote(args.nextStep)
         return finish(ok('Next step saved. Completed changes and checks are tracked from actual tool results.'))
@@ -47,9 +57,9 @@ export async function controlledAgentTool(input, execute, transfer) {
         // its shape. What the gate is FOR is "look before you patch again" —
         // so any fresh look (a read, or any command that ran) after the
         // failures is enough, and the ids are optional.
-        if (s.gateAfter === null) return finish(ok('No diagnostic checkpoint is active; carry on.'))
+        if (s.gateAfter === null && !s.inFlight) return finish(ok('No diagnostic checkpoint is active; carry on.'))
         const ids = Array.isArray(args.evidenceIds) ? args.evidenceIds : []
-        const fresh = s.events.filter(e => e.id > s.gateAfter && (!ids.length || ids.includes(e.id)))
+        const fresh = s.events.filter(e => e.id > (s.gateAfter ?? 0) && (!ids.length || ids.includes(e.id)))
         const looked = fresh.some(e => (inspections.has(e.tool) && e.ok) || e.diagnostic || executions.has(e.tool))
         if (!looked) {
           return finish(fail('Before diagnosing, look at something fresh: read_file the failing source, or run one execute_command that shows the actual error. Then call diagnose_failure again with the cause.'))
@@ -97,12 +107,25 @@ export async function controlledAgentTool(input, execute, transfer) {
           if (!String(args.label || '').trim() || !['test', 'build', 'deployment'].includes(args.kind)) throw new Error('Verification requires a label and kind (test, build, deployment).')
           // Validate the assertion schema before spending time running a command.
           if (!Array.isArray(args.assertions) || !args.assertions.length) throw new Error('Verification requires output assertions, not just exit code zero.')
-          result = await execute({ ...runInput, name: 'execute_command', args: { ...runInput.args, target: s.environment } })
+          if (args.background) throw new Error('Verification must wait for completion. Start long checks with execute_command background:true, then verify_work with jobId.')
+          if (args.jobId) {
+            const job = (s.jobs || []).find(j => j.id === args.jobId)
+            if (!job || job.revision !== s.revision || job.environment !== s.environment) throw new Error('Unknown or stale job: run the check against the current project revision.')
+            result = await sandboxJob({ sessionId, jobId: job.id })
+            Object.assign(job, result.job)
+            if (result.job.status !== 'completed') result = { ...result, ok: false, stderr: 'Job has not completed. Use job_status before verifying.' }
+          } else {
+            if (!String(args.command || '').trim()) throw new Error('Supply a command or completed jobId.')
+            result = await execute({ ...runInput, name: 'execute_command', args: { ...runInput.args, background: false, target: s.environment } })
+          }
           if (result.ok) {
             try { evaluateAssertions(result.stdout || '', args.assertions) } catch (e) { result = { ...result, ok: false, exitCode: 1, stderr: `${result.stderr || ''}\nVerification failed: ${e.message}` } }
           }
         } else result = await execute(runInput)
       } catch (e) { result = fail(e.message) }
+      if (name === 'execute_command' && result.job) {
+        s.jobs = [...(s.jobs || []), { ...result.job, revision: s.revision, environment: s.environment, projectPath: s.projectPath }].slice(-50)
+      }
       s.inFlight = previousFlight // a diagnostic must not silently erase a crashed action
       if (executions.has(name) || ['write_file', 'edit_file', 'transfer_file'].includes(name)) {
         // Three failures IN A ROW. Two total tripped it on nearly every real

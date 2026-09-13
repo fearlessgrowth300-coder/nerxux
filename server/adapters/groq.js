@@ -104,7 +104,7 @@ export async function run(opts) {
   }
 }
 
-async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch }) {
+async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch, onBeforeFinish }) {
   if (!apiKey) throw new Error('Groq API key is not connected')
 
   const client = new OpenAI({ apiKey, baseURL: GROQ_BASE_URL })
@@ -162,7 +162,12 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
       ...(oaTools ? { tools: oaTools } : {}),
     })
     const msg = completion.choices?.[0]?.message
-    if (!msg?.tool_calls?.length) break
+    if (!msg?.tool_calls?.length) {
+      const check = i > 0 && await onBeforeFinish?.()
+      if (!check) break
+      messages.push({ role: 'assistant', content: msg?.content || 'Checking completion.' }, { role: 'user', content: check })
+      continue
+    }
 
     messages.push(msg) // assistant message carrying tool_calls
     for (const tc of msg.tool_calls) {

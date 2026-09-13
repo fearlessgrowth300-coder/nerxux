@@ -14,7 +14,7 @@ function composeSystem(systemPrompt = '', skills = []) {
 // tool calling (so GPT-4o can use connected MCP / native tools, e.g. Higgsfield
 // image/video generation).
 // { prompt, systemPrompt, skills, apiKey, model, attachments, tools?, onToolCall?, webSearch? }
-export async function run({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch, signal }) {
+export async function run({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch, signal, onBeforeFinish }) {
   if (!apiKey) throw new Error('OpenAI API key is not connected')
 
   const client = new OpenAI({ apiKey })
@@ -82,7 +82,12 @@ export async function run({ prompt, systemPrompt, skills, apiKey, model, attachm
       ...(oaTools ? { tools: oaTools } : {}),
     }, signal ? { signal } : undefined)
     const msg = completion.choices?.[0]?.message
-    if (!msg?.tool_calls?.length) break
+    if (!msg?.tool_calls?.length) {
+      const check = i > 0 && await onBeforeFinish?.()
+      if (!check) break
+      messages.push({ role: 'assistant', content: msg?.content || 'Checking completion.' }, { role: 'user', content: check })
+      continue
+    }
 
     messages.push(msg) // assistant message carrying tool_calls
     for (const tc of msg.tool_calls) {

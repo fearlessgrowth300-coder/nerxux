@@ -4,6 +4,7 @@ import { executeInSandbox } from './sandbox.js'
 import { runOnPod } from './pod.js'
 import { getProviderKey } from './vault.js'
 import { runWebSearchTool } from './webSearch.js'
+import { webPageCode } from './webPage.js'
 import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, toOpenAITools, fileToolCommand } from './agentTools.js'
 
 // How to work — shared by every model that gets the agent tools (Claude,
@@ -23,7 +24,7 @@ Execution controls (enforced by Nexus, shared by every model):
 - Use transfer_file for any necessary VPS-to-pod source copy. Wait for verified size/SHA-256/destination before running it; never paste chunked base64 transfers into shell commands.
 - write_file/edit_file check Python, JS, shell and JSON syntax before replacing a file. JSX/TS and other languages still require the project checker/build.
 - After three failed actions in a row Nexus pauses file edits (commands still run). Read the failing source or run one command that shows the real error, then call diagnose_failure with the observed cause and the check you will rerun. Then edit. Do not disguise edits as diagnostics.
-- Time limits: a foreground execute_command is killed after 5 minutes (timeoutSeconds raises that to 15). Anything longer — a soak test, a server, training, "run for 10 minutes" — MUST use execute_command with background: true. The result names a log file and an .exit file; poll with tail in later calls, and if the job outlasts the turn, say so, record_progress, and read the log next turn.
+- Time limits: a foreground execute_command is killed after 5 minutes (timeoutSeconds raises that to 15). Anything longer — a soak test, a server, training, "run for 10 minutes" — MUST use execute_command with background: true. The result gives a job ID. Use job_status to inspect it and verify_work with jobId only after completion. Use stop_job when a server is no longer needed. Jobs survive individual command calls; a running job is not a completed task.
 - Report only what you observed. A command that timed out did not run for its intended duration; say how long it actually ran. Never present a planned or partial measurement as a completed one, and never write "0 errors" when the output shows an exception.
 - Use verify_work for tests/builds/deployments, with output assertions that prove the specific requirement. For positive numeric counts use json_number with min=1 and make the test emit a final JSON line. Exit zero or a printed PASS is not evidence of functionality by itself. Never invent success text with echo or a mock for a live check.
 - After further changes old checks become stale. Re-run the relevant checks. Keep implemented, tested, and deployed separate; claim only the scope of successful current checks.
@@ -168,14 +169,17 @@ export async function executeAgentTool(input) {
 
 async function executeRawAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '', executionEnvironment = 'sandbox' }) {
   const cleanSession = sessionId || 'default'
+  if (name === 'read_web_page') {
+    return executeInSandbox({ code: webPageCode(args.url), language: 'python', sessionId: cleanSession, profile: 'full', timeoutSeconds: 100 })
+  }
   const targetProj = projectPath
   const onPod = executionEnvironment === 'pod'
   if (name === 'web_search') {
     // Reshaped to match the sandbox result shape ({stdout,...}) that the
     // caller (ollama.js) already knows how to turn into a tool observation.
     const start = Date.now()
-    const { content } = await runWebSearchTool({ query: args.query })
-    return { ok: true, stdout: content, stderr: '', exitCode: 0, durationMs: Date.now() - start, target: 'web_search' }
+    const { content, ok = true } = await runWebSearchTool({ query: args.query })
+    return { ok, stdout: ok ? content : '', stderr: ok ? '' : content, exitCode: ok ? 0 : 1, durationMs: Date.now() - start, target: 'web_search' }
   }
 
   // File tools: a fixed bash recipe per tool, with all model-supplied text
@@ -208,6 +212,7 @@ async function executeRawAgentTool({ name, args = {}, sessionId = 'default', pro
   }
 
   if (name === 'run_on_pod' || (name === 'execute_command' && onPod)) {
+    if (args.background) throw new Error('Managed background jobs run in the VPS sandbox. Keep application work there; pod commands are foreground only.')
     return runOnPod(args.command || '', { cwd: targetProj })
   }
 

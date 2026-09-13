@@ -5,9 +5,11 @@
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
 import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
-import { agentStatePrompt, verificationFooter } from '../lib/agentState.js'
+import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
+import { redactToolData } from '../lib/redact.js'
+import { agentStatePrompt } from '../lib/agentState.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
-import { fitMessages } from '../lib/fitContext.js'
+import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { getComputeStatus, ensureTurboReady } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
@@ -47,6 +49,8 @@ function composeSystem(systemPrompt = '', skills = []) {
 // YouTube, …). Without them the local models were the only ones that couldn't
 // use a connector: the API models got the full toolset and Qwen got none.
 export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments, tools = [], onToolCall = null, onProgress = () => {} }) {
+  const emitProgress = onProgress
+  onProgress = event => emitProgress(redactToolData(event))
   const targetUrl = resolveTargetUrl(model)
   const externalTools = toOpenAITools(tools)
   const externalNames = new Set(tools.map((t) => t.name))
@@ -87,8 +91,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // ~23 tok/s, so a 64k prompt there would be three quarters of an hour.
   const numCtx = isRunpod ? 65536 : 16384
   // What is left for the conversation once the answer's budget is set aside.
-  const promptBudget = numCtx - numPredict - 1500
+  const promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
   const system = composeSystem(systemPrompt, skills)
+  const beforeFinish = createCompletionCheck(userId, sessionId)
   const messages = []
   if (system) messages.push({ role: 'system', content: system })
 
@@ -144,6 +149,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     // that kept calling tools ran straight past it — one turn went 84 minutes.
     if (Date.now() - requestStart > WALL_CLOCK_BUDGET_MS) break
     messages[0].content = system + '\n\n' + await agentStatePrompt(userId, sessionId)
+    if (estimateTokens(messages[0]) + 256 > promptBudget) throw new Error('Instructions and tool definitions exceed this model context. Reduce injected notes/connectors or use a larger context.')
     let resp
     try {
       resp = await fetch(`${targetUrl}/api/chat`, {
@@ -249,6 +255,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     }
 
     if (detectedCalls.length === 0) {
+      const verificationRequest = toolSteps.length ? await beforeFinish() : null
+      if (verificationRequest && data.done_reason !== 'length') {
+        messages.push({ role: 'assistant', content: rawContent || 'Checking completion.' })
+        messages.push({ role: 'user', content: verificationRequest })
+        continue
+      }
       finalContent += rawContent
       const elapsed = Date.now() - requestStart
       const hasBudget = elapsed < WALL_CLOCK_BUDGET_MS - 15000
@@ -299,7 +311,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     // Execute the tool calls
     finalContent = rawContent
     if (rawContent.trim()) onProgress({ type: 'text', text: rawContent })
-    messages.push({ role: 'assistant', content: rawContent })
+    const nativeCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0
+    messages.push({ role: 'assistant', content: rawContent, ...(nativeCalls ? { tool_calls: msg.tool_calls } : {}) })
+    const observe = (name, content) => messages.push(nativeCalls ? { role: 'tool', tool_name: name, content: redactToolData(content) } : { role: 'user', content: redactToolData(content) })
 
     for (const call of detectedCalls) {
       const callKey = call.name + ' ' + JSON.stringify(call.args)
@@ -307,12 +321,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       seenCalls.set(callKey, times)
       // Reads are how the agent recovers from a stale edit. They are bounded
       // by the turn budget, not by a lifetime cap of two reads per file.
-      const isRead = ['read_file', 'list_files', 'search_files'].includes(call.name)
+      const isRead = ['read_file', 'list_files', 'search_files', 'inspect_execution', 'job_status'].includes(call.name)
       if (times > 2 && !isRead) {
         const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: 'Refused: this exact call has already run twice in this turn.', target: 'loop-guard' }
         toolSteps.push(step)
         onProgress({ type: 'tool', ...step })
-        messages.push({ role: 'user', content: `[Tool Execution Refused: ${call.name}]\nYou already ran this exact call twice — it will not be run again. It did not achieve what you expected. Check the actual state with ls/cat, then do the NEXT step differently.` })
+        observe(call.name, `[Tool Execution Refused: ${call.name}] You already ran this call twice. Inspect the current state before changing your approach.`)
         continue
       }
       try {
@@ -331,7 +345,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           const step = { tool: call.name, args: call.args, ok: true, exitCode: 0, stdout: String(res?.content ?? '').slice(0, 4000), stderr: '', target: 'connector' }
           toolSteps.push(step)
           onProgress({ type: 'tool', ...step })
-          messages.push({ role: 'user', content: `[Tool Execution: ${call.name} on connector]\n${res?.content ?? '(no output)'}` })
+          observe(call.name, `[Tool Execution: ${call.name} on connector]\n${res?.content ?? '(no output)'}`)
           continue
         }
         const result = await executeAgentTool({
@@ -352,15 +366,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         if (result.ok && ['write_file', 'edit_file'].includes(call.name)) seenCalls.clear()
         // Always include stderr: a script can print progress before throwing.
         const obs = observationText(call.name, result) + recovery(call.name, result)
-        messages.push({ role: 'user', content: obs })
+        observe(call.name, obs)
       } catch (err) {
         const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: err.message, target: 'error' }
         toolSteps.push(step)
         onProgress({ type: 'tool', ...step })
-        messages.push({
-          role: 'user',
-          content: `[Tool Execution Failed: ${call.name}]\nError: ${err.message}`,
-        })
+        observe(call.name, `[Tool Execution Failed: ${call.name}]\nError: ${err.message}`)
       }
     }
   }
@@ -400,16 +411,16 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     finalContent = [summary || finalContent.trim(), note].filter(Boolean).join('\n\n')
   }
 
-  if (toolSteps.some(s => AGENT_TOOL_NAMES.has(s.tool) && s.tool !== 'web_search')) {
-    finalContent += await verificationFooter(userId, sessionId)
-  }
+  const completion = toolSteps.some(s => AGENT_TOOL_NAMES.has(s.tool) && !['web_search', 'read_web_page'].includes(s.tool))
+    ? await finishAgentResponse(finalContent, userId, sessionId) : { content: finalContent }
   return {
     ok: true,
     provider: 'ollama',
     type: mediaOut.length ? mediaOut[0].type : 'text',
-    content: finalContent,
+    content: redactToolData(completion.content),
+    verificationStatus: completion.verificationStatus,
     model: dataModel(model),
-    toolSteps,
+    toolSteps: redactToolData(toolSteps),
     ...(mediaOut.length ? { media: mediaOut[0], mediaList: mediaOut } : {}),
   }
 }

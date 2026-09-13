@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
-import { agentStatePrompt, verificationFooter } from '../lib/agentState.js'
+import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
+import { agentStatePrompt } from '../lib/agentState.js'
 import { requireAuth } from '../lib/auth.js'
 import { getModelById } from '../../shared/models.js'
 import { routeIntent } from '../lib/router.js'
@@ -224,6 +225,7 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
     model: info.apiModel,
     tools: localAgent ? connectorTools : tools,
     onToolCall: mcp?.onToolCall,
+    onBeforeFinish: hasAgentTools ? createCompletionCheck(userId, sessionId) : undefined,
     attachments,
     webSearch,
     permissionFor,
@@ -237,7 +239,7 @@ async function runChatModel(modelId, userId, { prompt, history, systemPrompt, mc
   // (the local adapters report their own toolSteps).
   if (result && !result.toolSteps?.length && mcp?.steps?.length) result.toolSteps = mcp.steps.slice()
   if (!localAgent && result?.toolSteps?.some(s => AGENT_TOOL_NAMES.has(s.tool) && s.tool !== 'web_search')) {
-    result.content = (result.content || '') + await verificationFooter(userId, sessionId)
+    Object.assign(result, await finishAgentResponse(result.content || '', userId, sessionId))
   }
   return { result, label: info.label }
 }

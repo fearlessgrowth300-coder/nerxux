@@ -34,7 +34,7 @@ function finalText(response) {
 // `resume` = { messages, results } continues a paused run.
 export async function run({
   prompt, systemPrompt, skills, apiKey, model, tools, onToolCall, attachments,
-  webSearch, permissionFor, resume, signal,
+  webSearch, permissionFor, resume, signal, onBeforeFinish,
 }) {
   if (!apiKey) throw new Error('Anthropic API key is not connected')
 
@@ -72,7 +72,12 @@ export async function run({
       messages.push({ role: 'assistant', content: response.content })
       continue
     }
-    if (response.stop_reason !== 'tool_use') break
+    if (response.stop_reason !== 'tool_use') {
+      const check = toolCalls.length && await onBeforeFinish?.()
+      if (!check) break
+      messages.push({ role: 'assistant', content: response.content }, { role: 'user', content: check })
+      continue
+    }
 
     messages.push({ role: 'assistant', content: response.content })
 

@@ -136,7 +136,7 @@ export async function run(opts) {
   }
 }
 
-async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, attachments, tools, onToolCall, webSearch }) {
+async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, attachments, tools, onToolCall, webSearch, onBeforeFinish }) {
   if (!apiKey) throw new Error('Gemini API key is not connected')
 
   const genAI = new GoogleGenerativeAI(apiKey)
@@ -200,7 +200,13 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
 
   for (let i = 0; i < 40; i++) {
     const calls = safeFunctionCalls(result.response)
-    if (!calls.length) break
+    if (!calls.length) {
+      const check = i > 0 && await onBeforeFinish?.()
+      if (!check) break
+      contents.push({ role: 'model', parts: result.response.candidates?.[0]?.content?.parts || [{ text: 'Checking completion.' }] }, { role: 'user', parts: [{ text: check }] })
+      result = await generativeModel.generateContent({ contents })
+      continue
+    }
     const modelParts = result.response.candidates?.[0]?.content?.parts
     contents.push({ role: 'model', parts: modelParts?.length ? modelParts : calls.map((c) => ({ functionCall: c })) })
 

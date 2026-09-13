@@ -240,31 +240,31 @@ exit $BWRAP_EXIT`
   // returned — the model tried exactly that to run a 10-minute test and then
   // reported a duration it never observed. Here the job is started with
   // setsid outside the call's lifetime; its log and exit code land under
-  // .nexus/jobs inside the project, where the model can tail them from any
+  // Private per-session job files outside the project, readable via job_status from any
   // later call or turn. The harness dir is copied because the next call
   // overwrites /nexus/script.sh.
-  const jobRootHost = projectBindMount ? shellQuote(wslProjectPath + '/.nexus') : '"$WORK_DIR/.nexus"'
-  const jobRootSandbox = projectBindMount ? '/workspace/project/.nexus' : '/workspace/.nexus'
   const backgroundScript = `
 JOB_ID="job_$(date +%Y%m%d_%H%M%S)_$RANDOM"
-JOB_ROOT=${jobRootHost}
-JOB_DIR="$JOB_ROOT/jobs"
+JOB_DIR="$SESSION_DIR/.jobs"
 mkdir -p "$JOB_DIR"
-printf '*\n' > "$JOB_ROOT/.gitignore"
+chmod 700 "$JOB_DIR"
 cp -r "$HARNESS_DIR" "$JOB_DIR/$JOB_ID.harness"
 export WORK_DIR JOB_DIR JOB_ID
 export HARNESS_DIR="$JOB_DIR/$JOB_ID.harness"
 cat > "$JOB_DIR/$JOB_ID.sh" <<'NEXUS_JOB_EOF'
 set +e
-timeout -s KILL ${bgTimeoutSec} ${bwrapCommand}
-echo $? > "$JOB_DIR/$JOB_ID.exit"
+timeout --foreground -s KILL ${bgTimeoutSec} ${bwrapCommand}
+STATUS=$?
+printf '%s\\n' "$STATUS" > "$JOB_DIR/$JOB_ID.exit.tmp"
+mv "$JOB_DIR/$JOB_ID.exit.tmp" "$JOB_DIR/$JOB_ID.exit"
 ${gitScrub}
 NEXUS_JOB_EOF
 setsid nohup bash "$JOB_DIR/$JOB_ID.sh" > "$JOB_DIR/$JOB_ID.log" 2>&1 < /dev/null &
-echo "Background job $JOB_ID started; it keeps running after this call returns (limit ${bgTimeoutSec}s)."
-echo "Log: ${jobRootSandbox}/jobs/$JOB_ID.log"
-echo "Done when ${jobRootSandbox}/jobs/$JOB_ID.exit exists (it holds the exit code)."
-echo "Poll with: tail -n 40 ${jobRootSandbox}/jobs/$JOB_ID.log; cat ${jobRootSandbox}/jobs/$JOB_ID.exit 2>/dev/null || echo still-running"
+PID=$!
+echo "$PID" > "$JOB_DIR/$JOB_ID.pid"
+awk '{print $22}' "/proc/$PID/stat" > "$JOB_DIR/$JOB_ID.started" 2>/dev/null || true
+echo "NEXUS_JOB_ID=$JOB_ID"
+echo "Background work started (limit ${bgTimeoutSec}s). Use job_status with this jobId to read progress. A start receipt is not successful completion."
 exit 0`
 
   const bashScript = `
@@ -280,7 +280,7 @@ ${wslProjectPath ? `test -d ${shellQuote(wslProjectPath)} || { echo 'Project dir
 for leftover in "$SESSION_DIR"/* "$SESSION_DIR"/.[!.]*; do
   [ -e "$leftover" ] || continue
   case "$leftover" in
-    "$WORK_DIR"|"$HARNESS_DIR") continue ;;
+    "$WORK_DIR"|"$HARNESS_DIR"|"$SESSION_DIR/.jobs") continue ;;
   esac
   mv "$leftover" "$WORK_DIR"/ 2>/dev/null || true
 done
@@ -316,8 +316,8 @@ ${background ? backgroundScript : foregroundScript}
     let timedOut = false
 
     const proc = IS_WINDOWS
-      ? spawn('wsl', ['bash', '-s'], { windowsHide: true })
-      : spawn('bash', ['-s'], { windowsHide: true })
+      ? spawn('wsl', ['bash', '-s'], { windowsHide: true, env: sandboxEnvironment() })
+      : spawn('bash', ['-s'], { windowsHide: true, env: sandboxEnvironment() })
 
     proc.stdin.write(bashScript)
     proc.stdin.end()
@@ -359,6 +359,7 @@ ${background ? backgroundScript : foregroundScript}
       } else {
         resolve({
           ok: code === 0,
+          ...(background && code === 0 && /NEXUS_JOB_ID=(job_[a-zA-Z0-9_]+)/.test(stdout) ? { job: { id: stdout.match(/NEXUS_JOB_ID=(job_[a-zA-Z0-9_]+)/)[1], status: 'running' } } : {}),
           stdout: clean(stdout),
           stderr: clean(stderr),
           exitCode: code ?? 1,
@@ -387,4 +388,10 @@ ${background ? backgroundScript : foregroundScript}
       })
     })
   })
+}
+
+// Server API keys must never enter the model's shell through inherited env.
+export function sandboxEnvironment(source = process.env) {
+  const allowed = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'USERPROFILE', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT', 'WSL_DISTRO_NAME']
+  return Object.fromEntries(allowed.filter(k => source[k] !== undefined).map(k => [k, source[k]]))
 }
