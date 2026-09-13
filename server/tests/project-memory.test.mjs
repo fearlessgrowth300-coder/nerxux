@@ -23,11 +23,14 @@ test('NEXUS.md at the project root reaches the model, redacted and bounded; abse
 
 test('restart_service only touches allow-listed services and never the Nexus server', async () => {
   assert.deepEqual(restartableServices({ NEXUS_RESTARTABLE_SERVICES: 'viewe-dashboard, nexus-server, other-app' }), ['viewe-dashboard', 'other-app'])
+  assert.equal(restartableServices({}), null, 'unset = any service except nexus-server')
   const calls = []
   const exec = async (cmd, argv) => { calls.push([cmd, ...argv]); return { code: 0, stdout: argv[0] === 'jlist' ? JSON.stringify([{ name: 'viewe-dashboard', pid: 42, pm2_env: { status: 'online', restart_time: 3 } }]) : '[PM2] restarted', stderr: '' } }
   const refused = await restartService('nexus-server', { exec, env: {} })
   assert.equal(refused.ok, false)
   assert.equal(calls.length, 0, 'a refused name must not run anything')
+  const bad = await restartService('x; rm -rf /', { exec, env: {} })
+  assert.equal(bad.ok, false); assert.equal(calls.length, 0, 'a malformed name must not run anything')
   const ok = await restartService('viewe-dashboard', { exec, env: {} })
   assert.equal(ok.ok, true)
   assert.deepEqual(calls[0], ['pm2', 'restart', 'viewe-dashboard', '--update-env'])

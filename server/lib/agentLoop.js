@@ -25,6 +25,7 @@ Execution controls (enforced by Nexus, shared by every model):
 - write_file/edit_file check Python, JS, shell and JSON syntax before replacing a file. JSX/TS and other languages still require the project checker/build.
 - After three failed actions in a row Nexus pauses file edits (commands still run). Read the failing source or run one command that shows the real error, then call diagnose_failure with the observed cause and the check you will rerun. Then edit. Do not disguise edits as diagnostics.
 - Time limits: a foreground execute_command is killed after 5 minutes (timeoutSeconds raises that to 15). Anything longer — a soak test, a server, training, "run for 10 minutes" — MUST use execute_command with background: true. The result gives a job ID. Use job_status to inspect it and verify_work with jobId only after completion. Use stop_job when a server is no longer needed. Jobs survive individual command calls; a running job is not a completed task.
+- Project memory: if the mounted project has no NEXUS.md, create one at its root after your first look (what it is, where it runs, how to run and test it, how it deploys, known limits, rules). Update it whenever any of that changes. It is injected into every later turn, so it is how the next task starts informed instead of from zero.
 - Report only what you observed. A command that timed out did not run for its intended duration; say how long it actually ran. Never present a planned or partial measurement as a completed one, and never write "0 errors" when the output shows an exception.
 - Use verify_work for tests/builds/deployments, with output assertions that prove the specific requirement. For positive numeric counts use json_number with min=1 and make the test emit a final JSON line. Exit zero or a printed PASS is not evidence of functionality by itself. Never invent success text with echo or a mock for a live check.
 - After further changes old checks become stale. Re-run the relevant checks. Keep implemented, tested, and deployed separate; claim only the scope of successful current checks.
@@ -170,16 +171,20 @@ export async function executeAgentTool(input) {
 
 // Allow-listed host services the model may restart. Anything else, including
 // the Nexus server itself, is refused before anything runs.
+// Unset = any PM2 service the user runs on this host, except the Nexus server
+// itself. Set NEXUS_RESTARTABLE_SERVICES to a comma list to narrow it.
 export function restartableServices(env = process.env) {
-  return String(env.NEXUS_RESTARTABLE_SERVICES ?? 'viewe-dashboard').split(',').map((s) => s.trim()).filter(Boolean).filter((s) => s !== 'nexus-server')
+  if (env.NEXUS_RESTARTABLE_SERVICES === undefined || env.NEXUS_RESTARTABLE_SERVICES === '') return null
+  return String(env.NEXUS_RESTARTABLE_SERVICES).split(',').map((s) => s.trim()).filter(Boolean).filter((s) => s !== 'nexus-server')
 }
 
 export async function restartService(name, { exec = null, env = process.env } = {}) {
   const start = Date.now()
   const wanted = String(name || '').trim()
   const allowed = restartableServices(env)
-  if (!allowed.includes(wanted)) {
-    return { ok: false, exitCode: 1, stdout: '', stderr: `restart_service: "${wanted}" is not an allow-listed service. Allowed: ${allowed.join(', ') || '(none)'}.`, durationMs: 0, target: 'host' }
+  const permitted = /^[A-Za-z0-9._-]{1,64}$/.test(wanted) && wanted !== 'nexus-server' && (allowed === null || allowed.includes(wanted))
+  if (!permitted) {
+    return { ok: false, exitCode: 1, stdout: '', stderr: `restart_service: "${wanted}" is not a service you may restart${allowed ? ` (allowed: ${allowed.join(', ') || 'none'})` : ' (the Nexus server itself is never restarted from a chat)'}.`, durationMs: 0, target: 'host' }
   }
   if (process.platform !== 'linux' && !exec) {
     return { ok: false, exitCode: 1, stdout: '', stderr: 'restart_service only works on the Linux Nexus host.', durationMs: 0, target: 'host' }
