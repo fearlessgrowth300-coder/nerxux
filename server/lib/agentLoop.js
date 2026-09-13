@@ -84,13 +84,12 @@ Available Tools:
 - web_search(query): Searches the live web and returns real results (only offered when the user has web search turned on).
 
 Git works in the sandbox (clone, commit, branch, diff all work with no setup).
-git push/pull against a PRIVATE repo is authenticated automatically when the
-user has pasted a GitHub token (ghp_... / github_pat_...) anywhere in this chat,
-or connected one under Connections — this works transparently on EVERY git
-command, so never embed the token yourself: don't put it in a clone URL, don't
-run "git remote set-url" with it, don't write it to .netrc or any file. If a plain
-"https://github.com/..." URL fails to authenticate, that means no token is
-available — ask the user for one, don't work around it by embedding it.
+COMMIT your work as you go on a feature branch, with clear messages — that is
+all you need to do. The VPS is the source of truth, and a host job pushes every
+new commit to GitHub automatically within a few minutes as a backup. So do NOT
+run git push yourself, do not worry about push auth, and never embed a token in
+a URL, remote, .netrc or any file. If you ever must clone a new private repo and
+it fails to authenticate, ask the user — don't work around it by embedding a token.
 
 Credentials the user pastes in the chat (Supabase URL/keys, API keys, DB
 URLs) are meant to be used: put them in the project's .env / config files
