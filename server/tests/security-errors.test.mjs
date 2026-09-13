@@ -25,6 +25,12 @@ test('API error text preserves useful wording while removing known environment s
   assert.equal(safeErrorMessage(new Error('x'.repeat(3000)), 'Failed', {}).length, 2000)
 })
 
+test('malformed JSON errors never echo request-body fragments', () => {
+  const error = Object.assign(new SyntaxError('Unexpected token, "sk-proj-xx"... is not valid JSON'),
+    {type:'entity.parse.failed',status:400,body:'private request content'})
+  assert.equal(safeErrorMessage(error),'The request body is not valid JSON.')
+})
+
 test('polled job failures cannot return provider credentials', () => {
   const job = createJob('privacy-test',new AbortController())
   failJob(job,new Error('Provider rejected Authorization: Bearer private-credential'))

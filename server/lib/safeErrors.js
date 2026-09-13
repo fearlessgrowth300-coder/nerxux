@@ -16,6 +16,9 @@ export function logErrorSummary(event, error, logger = console) {
 }
 
 export function safeErrorMessage(error, fallback = 'Request failed', env = process.env) {
+  // Body parsers may quote only a fragment of a submitted credential, which
+  // cannot reliably be recognized by full-key patterns or exact-value matching.
+  if (error?.type === 'entity.parse.failed') return 'The request body is not valid JSON.'
   const message = typeof error?.message === 'string' && error.message ? error.message : fallback
   const secrets = Object.entries(env)
     .filter(([key]) => /(?:KEY|TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL)/i.test(key))
