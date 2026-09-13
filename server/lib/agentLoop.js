@@ -76,6 +76,7 @@ ls / cat before moving on, and never repeat a step you have already completed.
 Available Tools:
 - write_file(path, content) / edit_file(path, old, new) / read_file(path) / list_files(path) / search_files(pattern, path)
 - execute_command(command, target, profile, projectPath, timeoutSeconds, background): Runs a shell/git command. target can be "sandbox" (default) or "pod". background: true for long-running work.
+- restart_service(name): Restarts an allow-listed PM2 service on the host after you change its code (the sandbox cannot see PM2). Read the project's NEXUS.md for the service name and for how the project is built, tested and deployed — it is injected into your context whenever it exists, and you should keep it current.
 - run_code(language, code, profile, projectPath): Runs a code snippet in the sandbox.
 - run_on_pod(command): Runs a shell command directly on the RunPod GPU pod.
 - web_search(query): Searches the live web and returns real results (only offered when the user has web search turned on).
@@ -167,8 +168,37 @@ export async function executeAgentTool(input) {
   return controlledAgentTool({ ...input, args: normalizeToolArgs(input.name, input.args) }, executeRawAgentTool, transferAgentFile)
 }
 
+// Allow-listed host services the model may restart. Anything else, including
+// the Nexus server itself, is refused before anything runs.
+export function restartableServices(env = process.env) {
+  return String(env.NEXUS_RESTARTABLE_SERVICES ?? 'viewe-dashboard').split(',').map((s) => s.trim()).filter(Boolean).filter((s) => s !== 'nexus-server')
+}
+
+export async function restartService(name, { exec = null, env = process.env } = {}) {
+  const start = Date.now()
+  const wanted = String(name || '').trim()
+  const allowed = restartableServices(env)
+  if (!allowed.includes(wanted)) {
+    return { ok: false, exitCode: 1, stdout: '', stderr: `restart_service: "${wanted}" is not an allow-listed service. Allowed: ${allowed.join(', ') || '(none)'}.`, durationMs: 0, target: 'host' }
+  }
+  if (process.platform !== 'linux' && !exec) {
+    return { ok: false, exitCode: 1, stdout: '', stderr: 'restart_service only works on the Linux Nexus host.', durationMs: 0, target: 'host' }
+  }
+  const { execFile } = await import('node:child_process')
+  const run = exec || ((cmd, argv) => new Promise((resolve) => execFile(cmd, argv, { timeout: 60000 }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout || ''), stderr: String(stderr || '') }))))
+  const r = await run('pm2', ['restart', wanted, '--update-env'])
+  const status = r.code === 0 ? await run('pm2', ['jlist']) : { stdout: '' }
+  let summary = ''
+  try {
+    const p = JSON.parse(status.stdout || '[]').find((x) => x.name === wanted)
+    if (p) summary = `\n${wanted}: ${p.pm2_env?.status}, restarts=${p.pm2_env?.restart_time}, pid=${p.pid}`
+  } catch { /* status is best-effort */ }
+  return { ok: r.code === 0, exitCode: r.code, stdout: (r.stdout || '').trim().slice(-2000) + summary, stderr: (r.stderr || '').trim().slice(-2000), durationMs: Date.now() - start, target: 'host' }
+}
+
 async function executeRawAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '', executionEnvironment = 'sandbox' }) {
   const cleanSession = sessionId || 'default'
+  if (name === 'restart_service') return restartService(args.name)
   if (name === 'read_web_page') {
     return executeInSandbox({ code: webPageCode(args.url), language: 'python', sessionId: cleanSession, profile: 'full', timeoutSeconds: 100 })
   }
