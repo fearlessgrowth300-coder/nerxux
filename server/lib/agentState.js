@@ -102,10 +102,13 @@ export function evaluateAssertions(stdout, assertions) {
       if (typeof a.value !== 'string' || !a.value.trim()) throw new Error('contains needs a nonempty value')
       if (!stdout.includes(a.value)) throw new Error(`Missing expected output: ${clean(a.value, 150)}`)
     } else if (a.type === 'json_number') {
-      if (typeof a.field !== 'string' || !a.field || !Number.isFinite(a.min)) throw new Error('json_number needs field and numeric min')
-      const last = stdout.trim().split('\n').at(-1)
+      if (typeof a.field !== 'string' || !a.field || !Number.isFinite(a.min)) throw new Error('json_number needs "field" (dotted key in the final JSON line, e.g. "passed") and a numeric "min" (e.g. 1)')
+      const last = stdout.trim().split('\n').at(-1) ?? ''
       let data
-      try { data = JSON.parse(last) } catch { throw new Error('Last stdout line must be a JSON object for json_number') }
+      // Say what was seen. A 27B model printed a Python dict ({'status': 'ok'}),
+      // read "must be a JSON object", and burned two 5-minute rounds guessing.
+      try { data = JSON.parse(last) } catch { throw new Error(`Last stdout line must be a JSON object for json_number (print it with json.dumps / JSON.stringify; a single-quoted Python dict is not JSON). Observed last line: ${clean(last, 160) || '(empty)'}`) }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error(`Last stdout line must be a JSON object for json_number; observed: ${clean(last, 160)}`)
       const value = a.field.split('.').reduce((v, k) => v && Object.hasOwn(v, k) ? v[k] : undefined, data)
       if (typeof value !== 'number' || !Number.isFinite(value) || value < a.min) throw new Error(`Outcome ${clean(a.field, 100)} must be a number >= ${a.min}; observed ${clean(value, 100)}`)
     } else throw new Error('Unknown assertion type; use contains or json_number')
