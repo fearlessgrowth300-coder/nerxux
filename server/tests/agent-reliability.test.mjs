@@ -42,8 +42,11 @@ test('completion recovery is bounded, failing or stale checks cannot certify wor
   assert.match(await check(), /verify_work/)
   assert.match(await check(), /verify_work/)
   assert.equal(await check(), null)
+  // Edits after the nudges were spent make the old checks stale: ask again.
+  await withAgentState('test', session, async s => { s.revision = 3; s.changes.push({ path: 'fixture.py' }) })
+  assert.match(await check(), /verify_work/)
   assert.equal((await finishAgentResponse('Done', 'test', session)).verificationStatus, 'unverified')
-  await withAgentState('test', session, async s => { s.checks = [{ revision: 2, ok: true, label: 'real test' }] })
+  await withAgentState('test', session, async s => { s.checks = [{ revision: 3, ok: true, label: 'real test' }] })
   assert.equal((await finishAgentResponse('Done', 'test', session)).verificationStatus, 'checks_passed')
   await withAgentState('test', session, async s => { s.jobs = [{ id: 'job_fixture', status: 'running' }] })
   assert.equal((await finishAgentResponse('Done', 'test', session)).verificationStatus, 'unverified')
