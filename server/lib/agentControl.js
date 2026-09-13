@@ -5,7 +5,7 @@ import path from 'node:path'
 import { withAgentState, addEvidence, stateSummary, safeNote, evaluateAssertions } from './agentState.js'
 
 const inspections = new Set(['read_file', 'list_files', 'search_files', 'web_search', 'read_web_page'])
-const executions = new Set(['execute_command', 'run_code', 'run_on_pod', 'verify_work', 'restart_service'])
+const executions = new Set(['execute_command', 'run_code', 'run_on_pod', 'verify_work', 'restart_service', 'deploy_service', 'expose_site'])
 const ok = (stdout) => ({ ok: true, exitCode: 0, stdout, stderr: '', durationMs: 0 })
 const fail = (stderr) => ({ ok: false, exitCode: 1, stdout: '', stderr, durationMs: 0 })
 const normalizePath = (p) => {

@@ -77,6 +77,7 @@ ls / cat before moving on, and never repeat a step you have already completed.
 Available Tools:
 - write_file(path, content) / edit_file(path, old, new) / read_file(path) / list_files(path) / search_files(pattern, path)
 - execute_command(command, target, profile, projectPath, timeoutSeconds, background): Runs a shell/git command. target can be "sandbox" (default) or "pod". background: true for long-running work.
+- deploy_service(name, command, cwd, env) / expose_site(host, port): make an app keep running under PM2 on the host, then put its port on a public HTTPS subdomain (DNS + Caddy). Order: run the app in the foreground until it works -> deploy_service -> expose_site -> curl the URL -> record the service name, port and URL in NEXUS.md.
 - restart_service(name): Restarts an allow-listed PM2 service on the host after you change its code (the sandbox cannot see PM2). Read the project's NEXUS.md for the service name and for how the project is built, tested and deployed — it is injected into your context whenever it exists, and you should keep it current.
 - run_code(language, code, profile, projectPath): Runs a code snippet in the sandbox.
 - run_on_pod(command): Runs a shell command directly on the RunPod GPU pod.
@@ -204,6 +205,8 @@ export async function restartService(name, { exec = null, env = process.env } = 
 async function executeRawAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '', executionEnvironment = 'sandbox' }) {
   const cleanSession = sessionId || 'default'
   if (name === 'restart_service') return restartService(args.name)
+  if (name === 'deploy_service') return (await import('./hostDeploy.js')).deployService(args)
+  if (name === 'expose_site') return (await import('./hostSite.js')).exposeSite(args)
   if (name === 'read_web_page') {
     return executeInSandbox({ code: webPageCode(args.url), language: 'python', sessionId: cleanSession, profile: 'full', timeoutSeconds: 100 })
   }
