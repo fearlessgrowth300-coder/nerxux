@@ -3,6 +3,7 @@
 // exposes an HTTP API on :11434; no API key is needed (it's local).
 // Use 127.0.0.1 (not "localhost"): on Windows, Node resolves localhost to IPv6
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
+import { Agent } from 'undici'
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
 import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
 import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
@@ -33,6 +34,14 @@ function resolveTargetUrl(model) {
   }
   return status.hostingerUrl || 'http://127.0.0.1:11434'
 }
+
+// Node's fetch gives up if response HEADERS have not arrived within 300 s.
+// Ollama sends nothing until the whole prompt is read, and on the CPU box a
+// cold 27B model plus a 4k-token prompt takes longer than that — so a
+// perfectly healthy request came back as "Can't reach local Ollama /
+// UND_ERR_HEADERS_TIMEOUT". No header timeout here; the turn's own
+// wall-clock budget and the client's abort signal still bound it.
+export const OLLAMA_DISPATCHER = new Agent({ headersTimeout: 0, bodyTimeout: 0 })
 
 function composeSystem(systemPrompt = '', skills = []) {
   const parts = []
@@ -153,6 +162,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     let resp
     try {
       resp = await fetch(`${targetUrl}/api/chat`, {
+        dispatcher: OLLAMA_DISPATCHER,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -385,6 +395,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     let summary = ''
     try {
       const r = await fetch(`${targetUrl}/api/chat`, {
+        dispatcher: OLLAMA_DISPATCHER,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
