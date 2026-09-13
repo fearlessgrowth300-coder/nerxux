@@ -53,6 +53,8 @@ export const AGENT_TOOL_DEFS = [
         profile: { type: 'string', enum: ['none', 'full'], description: 'Network: "full" (default) or "none"' },
         projectPath: PROJECT_PATH_FIELD,
         purpose: { type: 'string', enum: ['work', 'diagnostic'], description: 'diagnostic means a read-only inspection or minimal probe; allowed during a diagnostic checkpoint. Never edit files in a diagnostic command.' },
+        timeoutSeconds: { type: 'integer', description: 'Foreground time limit in seconds (default 300, max 900). For a background job: its total limit (default 3600, max 14400).' },
+        background: { type: 'boolean', description: 'true = start the command as a detached job and return immediately. Use for anything that runs longer than a few minutes (long tests, servers, training). The result tells you the log path to tail and the .exit file that appears when it finishes.' },
       },
       required: ['command'],
     },

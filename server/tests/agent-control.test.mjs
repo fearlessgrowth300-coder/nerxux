@@ -32,18 +32,34 @@ test('project lock persists on disk and cannot silently switch to the pod or ano
   assert.equal((await readAgentState('another-user', f.sessionId)).projectPath, null)
 })
 
-test('two failures block edits until fresh diagnostic evidence is supplied, across reads of disk state', async () => {
+test('three failures in a row block edits until the model has looked at something fresh', async () => {
   const f = fixture()
   await f.run('execute_command', { command: 'fail' })
   await f.run('execute_command', { command: 'fail' })
+  assert.equal((await f.state()).gateAfter, null, 'two failures (a missing module, then a typo) are normal work, not a crisis')
+  await f.run('execute_command', { command: 'fail' })
   assert.notEqual((await f.state()).gateAfter, null)
   assert.equal((await f.run('write_file', { path: 'a.py', content: 'pass' })).ok, false)
+  // Nothing fresh has been looked at since the gate: a diagnosis is speculation.
   assert.equal((await f.run('diagnose_failure', { evidenceIds: [], cause: 'A speculative long cause', nextCheck: 'retry' })).ok, false)
-  const read = await f.run('read_file', { path: 'a.py' })
-  const probe = await f.run('execute_command', { command: 'fail', purpose: 'diagnostic' })
+  // Commands are NOT refused during the checkpoint — they are how evidence is gathered.
+  const probe = await f.run('execute_command', { command: 'fail' })
   assert.equal(probe.ok, false, 'a failing minimal reproduction is still diagnostic evidence')
-  assert.ok((await f.run('diagnose_failure', { evidenceIds: [read.evidenceId, probe.evidenceId], cause: 'The observed exception identifies a wrong input type', nextCheck: 'Correct the type and rerun the original check' })).ok)
+  assert.match(probe.stderr, /actual error/, 'the real error reaches the model, not a refusal')
+  // No evidence ids, no purpose flag: the observed cause alone is enough once something was looked at.
+  assert.ok((await f.run('diagnose_failure', { cause: 'The observed exception identifies a wrong input type', nextCheck: 'Correct the type and rerun the original check' })).ok)
   assert.ok((await f.run('write_file', { path: 'a.py', content: 'pass' })).ok)
+})
+
+test('a success resets the failure count, so alternating fail/fix never trips the gate', async () => {
+  const f = fixture()
+  for (let i = 0; i < 4; i++) {
+    await f.run('execute_command', { command: 'fail' })
+    await f.run('execute_command', { command: 'fail' })
+    assert.ok((await f.run('execute_command', { command: 'pwd' })).ok)
+  }
+  assert.equal((await f.state()).gateAfter, null)
+  assert.equal((await f.state()).failures, 0)
 })
 
 test('an explicit context switch wins over the original request project and a used workspace cannot silently remount', async () => {

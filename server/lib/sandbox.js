@@ -49,8 +49,14 @@ export async function executeInSandbox({
   gitToken = null,    // Optional GitHub token for authenticated git push/clone
   gitUser = 'Nexus AI',
   gitEmail = 'nexus@local.dev',
+  timeoutSeconds = null, // foreground cap; default 5 min, at most 15
+  background = false,    // detach: returns at once, output goes to a log the model polls
 }) {
   const startTime = Date.now()
+  // A turn has a wall-clock budget of its own, so a foreground command longer
+  // than this would eat the whole turn; anything longer runs in the background.
+  const timeoutMs = Math.min(Math.max(Number(timeoutSeconds) || TIMEOUT_MS / 1000, 10), 15 * 60) * 1000
+  const bgTimeoutSec = Math.min(Math.max(Number(timeoutSeconds) || 60 * 60, 60), 4 * 60 * 60)
   const cleanSession = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_')
   const cleanLang = String(language || 'python').toLowerCase().trim()
 
@@ -168,6 +174,99 @@ export async function executeInSandbox({
   // echoed whatever it had just run, changing every call. It burned dozens of
   // tool calls investigating the harness instead of doing the work. Keep them
   // outside /workspace, mounted read-only at /nexus.
+  const bwrapCommand = `bwrap \\
+  --ro-bind /usr /usr \\
+  --ro-bind /lib /lib \\
+  --ro-bind /lib64 /lib64 \\
+  --ro-bind /bin /bin \\
+  --ro-bind /sbin /sbin \\
+  --ro-bind-try /etc/alternatives /etc/alternatives \\
+  --ro-bind-try /etc/resolv.conf /etc/resolv.conf \\
+  --ro-bind-try /etc/ssl /etc/ssl \\
+  --ro-bind-try /etc/ca-certificates /etc/ca-certificates \\
+  --ro-bind-try /usr/share/ca-certificates /usr/share/ca-certificates \\
+  --ro-bind-try /etc/gitconfig /etc/gitconfig \\
+  --ro-bind-try /etc/ssh /etc/ssh \\
+  --ro-bind-try /etc/passwd /etc/passwd \\
+  --ro-bind-try /etc/group /etc/group \\
+  --proc /proc \\
+  --dev /dev \\
+  --tmpfs /tmp \\
+  --bind "$WORK_DIR" /workspace \
+  --ro-bind "$HARNESS_DIR" /nexus \\
+  ${projectBindMount} \\
+  --chdir ${shellQuote(targetDir)} \\
+  --unshare-pid \\
+  --unshare-ipc \\
+  --unshare-uts \\
+  ${netFlag} \\
+  --die-with-parent \\
+  bash -c "${runCommand}"`
+
+  const gitScrub = `# Defense in depth: auth is meant to travel only as GIT_CONFIG_* env (applied
+# fresh on every call, so nothing needs to be written to disk to keep working)
+# — but a model can still run e.g. "git remote set-url ...TOKEN@..." on its
+# own, which git happily writes into .git/config. Scrub any such userinfo
+# unconditionally, regardless of what the command did or how it exited.
+find "$WORK_DIR" -path '*/.git/config' -exec \\
+  sed -i -E 's#(https://)[^/@[:space:]]+@#\\1#g' {} + 2>/dev/null || true
+
+# Same idea for the files themselves: real credentials belong in this
+# workspace (the user pastes them to be used), but never in a git commit.
+# write_file adds a .gitignore for env-shaped files as it writes them; this
+# is the backstop for whatever gets staged anyway (a hand-written
+# .gitignore, execute_command writing a file directly, an already-tracked
+# file later turned into an env file). Unstage, never delete — the model's
+# work stays on disk either way.
+for gitdir in $(find "$WORK_DIR" -maxdepth 6 -name .git -type d 2>/dev/null); do
+  repo="$(dirname "$gitdir")"
+  staged=$(cd "$repo" && git diff --cached --name-only 2>/dev/null | grep -E '(^|/)\\.env(\\..+)?$|\\.(pem|key|p12|pfx)$|(^|/)id_(rsa|ed25519|ecdsa)$' || true)
+  if [ -n "$staged" ]; then
+    (cd "$repo" && echo "$staged" | xargs -r git reset -q HEAD --) 2>/dev/null || true
+    echo "[safety] unstaged (never committed): $staged" | tr '\\n' ' '; echo
+  fi
+done`
+
+  const foregroundScript = `
+set +e
+${bwrapCommand}
+BWRAP_EXIT=$?
+set -e
+${gitScrub}
+exit $BWRAP_EXIT`
+
+  // A detached job. Each call normally gets its own bwrap with its own PID
+  // namespace, so "nohup ... &" inside a command died the moment the call
+  // returned — the model tried exactly that to run a 10-minute test and then
+  // reported a duration it never observed. Here the job is started with
+  // setsid outside the call's lifetime; its log and exit code land under
+  // .nexus/jobs inside the project, where the model can tail them from any
+  // later call or turn. The harness dir is copied because the next call
+  // overwrites /nexus/script.sh.
+  const jobRootHost = projectBindMount ? shellQuote(wslProjectPath + '/.nexus') : '"$WORK_DIR/.nexus"'
+  const jobRootSandbox = projectBindMount ? '/workspace/project/.nexus' : '/workspace/.nexus'
+  const backgroundScript = `
+JOB_ID="job_$(date +%Y%m%d_%H%M%S)_$RANDOM"
+JOB_ROOT=${jobRootHost}
+JOB_DIR="$JOB_ROOT/jobs"
+mkdir -p "$JOB_DIR"
+printf '*\n' > "$JOB_ROOT/.gitignore"
+cp -r "$HARNESS_DIR" "$JOB_DIR/$JOB_ID.harness"
+export WORK_DIR JOB_DIR JOB_ID
+export HARNESS_DIR="$JOB_DIR/$JOB_ID.harness"
+cat > "$JOB_DIR/$JOB_ID.sh" <<'NEXUS_JOB_EOF'
+set +e
+timeout -s KILL ${bgTimeoutSec} ${bwrapCommand}
+echo $? > "$JOB_DIR/$JOB_ID.exit"
+${gitScrub}
+NEXUS_JOB_EOF
+setsid nohup bash "$JOB_DIR/$JOB_ID.sh" > "$JOB_DIR/$JOB_ID.log" 2>&1 < /dev/null &
+echo "Background job $JOB_ID started; it keeps running after this call returns (limit ${bgTimeoutSec}s)."
+echo "Log: ${jobRootSandbox}/jobs/$JOB_ID.log"
+echo "Done when ${jobRootSandbox}/jobs/$JOB_ID.exit exists (it holds the exit code)."
+echo "Poll with: tail -n 40 ${jobRootSandbox}/jobs/$JOB_ID.log; cat ${jobRootSandbox}/jobs/$JOB_ID.exit 2>/dev/null || echo still-running"
+exit 0`
+
   const bashScript = `
 set -e
 SESSION_DIR="/tmp/nexus_sandbox/${cleanSession}"
@@ -201,63 +300,7 @@ echo "${PRE_COMMIT_HOOK_B64}" | base64 -d > "$HARNESS_DIR/hooks/pre-commit"
 chmod +x "$HARNESS_DIR/hooks/pre-commit"
 export GIT_TEMPLATE_DIR=/nexus
 
-set +e
-bwrap \\
-  --ro-bind /usr /usr \\
-  --ro-bind /lib /lib \\
-  --ro-bind /lib64 /lib64 \\
-  --ro-bind /bin /bin \\
-  --ro-bind /sbin /sbin \\
-  --ro-bind-try /etc/alternatives /etc/alternatives \\
-  --ro-bind-try /etc/resolv.conf /etc/resolv.conf \\
-  --ro-bind-try /etc/ssl /etc/ssl \\
-  --ro-bind-try /etc/ca-certificates /etc/ca-certificates \\
-  --ro-bind-try /usr/share/ca-certificates /usr/share/ca-certificates \\
-  --ro-bind-try /etc/gitconfig /etc/gitconfig \\
-  --ro-bind-try /etc/ssh /etc/ssh \\
-  --ro-bind-try /etc/passwd /etc/passwd \\
-  --ro-bind-try /etc/group /etc/group \\
-  --proc /proc \\
-  --dev /dev \\
-  --tmpfs /tmp \\
-  --bind "$WORK_DIR" /workspace \
-  --ro-bind "$HARNESS_DIR" /nexus \\
-  ${projectBindMount} \\
-  --chdir ${shellQuote(targetDir)} \\
-  --unshare-pid \\
-  --unshare-ipc \\
-  --unshare-uts \\
-  ${netFlag} \\
-  --die-with-parent \\
-  bash -c "${runCommand}"
-BWRAP_EXIT=$?
-set -e
-
-# Defense in depth: auth is meant to travel only as GIT_CONFIG_* env (applied
-# fresh on every call, so nothing needs to be written to disk to keep working)
-# — but a model can still run e.g. "git remote set-url ...TOKEN@..." on its
-# own, which git happily writes into .git/config. Scrub any such userinfo
-# unconditionally, regardless of what the command did or how it exited.
-find "$WORK_DIR" -path '*/.git/config' -exec \\
-  sed -i -E 's#(https://)[^/@[:space:]]+@#\\1#g' {} + 2>/dev/null || true
-
-# Same idea for the files themselves: real credentials belong in this
-# workspace (the user pastes them to be used), but never in a git commit.
-# write_file adds a .gitignore for env-shaped files as it writes them; this
-# is the backstop for whatever gets staged anyway (a hand-written
-# .gitignore, execute_command writing a file directly, an already-tracked
-# file later turned into an env file). Unstage, never delete — the model's
-# work stays on disk either way.
-for gitdir in $(find "$WORK_DIR" -maxdepth 6 -name .git -type d 2>/dev/null); do
-  repo="$(dirname "$gitdir")"
-  staged=$(cd "$repo" && git diff --cached --name-only 2>/dev/null | grep -E '(^|/)\\.env(\\..+)?$|\\.(pem|key|p12|pfx)$|(^|/)id_(rsa|ed25519|ecdsa)$' || true)
-  if [ -n "$staged" ]; then
-    (cd "$repo" && echo "$staged" | xargs -r git reset -q HEAD --) 2>/dev/null || true
-    echo "[safety] unstaged (never committed): $staged" | tr '\\n' ' '; echo
-  fi
-done
-
-exit $BWRAP_EXIT
+${background ? backgroundScript : foregroundScript}
 `
 
   // Tool output is stored in the conversation and rendered in the chat, so a
@@ -282,7 +325,7 @@ exit $BWRAP_EXIT
     const timer = setTimeout(() => {
       timedOut = true
       proc.kill('SIGKILL')
-    }, TIMEOUT_MS)
+    }, timeoutMs)
 
     proc.stdout.on('data', (data) => {
       stdout += data.toString()
@@ -307,7 +350,7 @@ exit $BWRAP_EXIT
         resolve({
           ok: false,
           stdout: clean(stdout),
-          stderr: clean((stderr ? stderr + '\n' : '') + `Execution timed out after ${TIMEOUT_MS / 1000}s`),
+          stderr: clean((stderr ? stderr + '\n' : '') + `Execution timed out after ${timeoutMs / 1000}s. For anything longer, run it with background: true and poll its log.`),
           exitCode: 124,
           durationMs,
           isolation: 'OS-level (Landlock/Bubblewrap namespaces)',

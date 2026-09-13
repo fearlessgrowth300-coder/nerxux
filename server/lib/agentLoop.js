@@ -22,7 +22,9 @@ Execution controls (enforced by Nexus, shared by every model):
 - The project location persists across turns/restarts. Changing or clearing it requires set_execution_context with a reason; this never transfers files.
 - Use transfer_file for any necessary VPS-to-pod source copy. Wait for verified size/SHA-256/destination before running it; never paste chunked base64 transfers into shell commands.
 - write_file/edit_file check Python, JS, shell and JSON syntax before replacing a file. JSX/TS and other languages still require the project checker/build.
-- After two failed actions Nexus pauses changes. Read current source and run a small read-only execute_command with purpose="diagnostic". Then call diagnose_failure with both evidence IDs, the observed cause and the next check. Do not disguise edits as diagnostics.
+- After three failed actions in a row Nexus pauses file edits (commands still run). Read the failing source or run one command that shows the real error, then call diagnose_failure with the observed cause and the check you will rerun. Then edit. Do not disguise edits as diagnostics.
+- Time limits: a foreground execute_command is killed after 5 minutes (timeoutSeconds raises that to 15). Anything longer — a soak test, a server, training, "run for 10 minutes" — MUST use execute_command with background: true. The result names a log file and an .exit file; poll with tail in later calls, and if the job outlasts the turn, say so, record_progress, and read the log next turn.
+- Report only what you observed. A command that timed out did not run for its intended duration; say how long it actually ran. Never present a planned or partial measurement as a completed one, and never write "0 errors" when the output shows an exception.
 - Use verify_work for tests/builds/deployments, with output assertions that prove the specific requirement. For positive numeric counts use json_number with min=1 and make the test emit a final JSON line. Exit zero or a printed PASS is not evidence of functionality by itself. Never invent success text with echo or a mock for a live check.
 - After further changes old checks become stale. Re-run the relevant checks. Keep implemented, tested, and deployed separate; claim only the scope of successful current checks.
 - Use record_progress before a pause to save the exact next step or blocker. Tool evidence is saved automatically even when the turn stops at its limit.
@@ -72,7 +74,7 @@ ls / cat before moving on, and never repeat a step you have already completed.
 
 Available Tools:
 - write_file(path, content) / edit_file(path, old, new) / read_file(path) / list_files(path) / search_files(pattern, path)
-- execute_command(command, target, profile, projectPath): Runs a shell/git command. target can be "sandbox" (default) or "pod".
+- execute_command(command, target, profile, projectPath, timeoutSeconds, background): Runs a shell/git command. target can be "sandbox" (default) or "pod". background: true for long-running work.
 - run_code(language, code, profile, projectPath): Runs a code snippet in the sandbox.
 - run_on_pod(command): Runs a shell command directly on the RunPod GPU pod.
 - web_search(query): Searches the live web and returns real results (only offered when the user has web search turned on).
@@ -217,6 +219,8 @@ async function executeRawAgentTool({ name, args = {}, sessionId = 'default', pro
       sessionId: cleanSession,
       profile: args.profile || 'full',
       projectPath: targetProj,
+      timeoutSeconds: args.timeoutSeconds,
+      background: args.background === true || args.background === 'true',
       ...(await gitCreds(userId, chatText)),
     })
   }

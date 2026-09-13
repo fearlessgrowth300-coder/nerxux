@@ -22,10 +22,11 @@ test('real sandbox failures, reads, patches and reruns reach the model faithfull
     // Leave stderr separate on the first failure to exercise the adapter bug.
     { name: 'execute_command', args: { command: 'python3 probe.py | tail -20', profile: 'none' } },
     check,
+    check, // third failure in a row trips the checkpoint
     { name: 'edit_file', args: { path: 'probe.py', old: "ValueError('first')", new: "TypeError('second')" } }, // refused by the gate
     { name: 'read_file', args: { path: 'probe.py' } },
     { name: 'execute_command', args: { command: 'python3 probe.py', purpose: 'diagnostic', profile: 'none' } },
-    { name: 'diagnose_failure', args: { evidenceIds: [5, 6], cause: 'The inspected fixture deliberately raises ValueError after its progress print', nextCheck: 'Remove that fixture exception and rerun the same Python check' } },
+    { name: 'diagnose_failure', args: { evidenceIds: [6, 7], cause: 'The inspected fixture deliberately raises ValueError after its progress print', nextCheck: 'Remove that fixture exception and rerun the same Python check' } },
     { name: 'edit_file', args: { path: 'probe.py', old: "raise ValueError('first')", new: "print('passed')" } },
     ...Array.from({ length: 3 }, () => ({ name: 'read_file', args: { path: 'probe.py' } })),
     { name: 'verify_work', args: { command: check.args.command, label: 'Fixture reaches final output', kind: 'test', assertions: [{ type: 'contains', value: 'passed' }] } },
@@ -49,7 +50,7 @@ test('real sandbox failures, reads, patches and reruns reach the model faithfull
     assert.match(observations, /Diagnostic checkpoint/)
     assert.equal(result.toolSteps.filter((s) => s.tool === 'read_file' && s.ok).length, 4)
     assert.ok(result.toolSteps.every((s) => s.target !== 'loop-guard'))
-    assert.equal(result.toolSteps[3].ok, false, 'speculative patch must be refused')
+    assert.equal(result.toolSteps[4].ok, false, 'speculative patch must be refused')
     assert.match(result.content, /Nexus verification record/)
     assert.equal(result.toolSteps.at(-1).exitCode, 0)
     assert.match(result.toolSteps.at(-1).stdout, /passed/)

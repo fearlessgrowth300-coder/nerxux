@@ -40,12 +40,22 @@ export async function controlledAgentTool(input, execute, transfer) {
         return finish(ok(`Execution context changed explicitly: ${args.environment}, ${project || '/workspace'}. Files have not been moved.`))
       }
       if (name === 'diagnose_failure') {
+        // The first version of this gate demanded a precise form: a read_file
+        // AND a command flagged purpose="diagnostic", both cited by evidence
+        // id. A 27B model does not fill in forms: one turn spent 8 of 46
+        // actions submitting the same correct diagnosis and being refused for
+        // its shape. What the gate is FOR is "look before you patch again" —
+        // so any fresh look (a read, or any command that ran) after the
+        // failures is enough, and the ids are optional.
+        if (s.gateAfter === null) return finish(ok('No diagnostic checkpoint is active; carry on.'))
         const ids = Array.isArray(args.evidenceIds) ? args.evidenceIds : []
-        const evidence = s.events.filter(e => ids.includes(e.id) && e.id > (s.gateAfter ?? 0))
-        const read = evidence.some(e => e.tool === 'read_file' && e.ok)
-        const probe = evidence.some(e => e.diagnostic)
-        if (!read || !probe || String(args.cause || '').trim().length < 20 || String(args.nextCheck || '').trim().length < 5) {
-          return finish(fail('Diagnosis needs a fresh successful source inspection AND diagnostic command after the failures, their evidenceIds, a specific cause, and nextCheck.'))
+        const fresh = s.events.filter(e => e.id > s.gateAfter && (!ids.length || ids.includes(e.id)))
+        const looked = fresh.some(e => (inspections.has(e.tool) && e.ok) || e.diagnostic || executions.has(e.tool))
+        if (!looked) {
+          return finish(fail('Before diagnosing, look at something fresh: read_file the failing source, or run one execute_command that shows the actual error. Then call diagnose_failure again with the cause.'))
+        }
+        if (String(args.cause || '').trim().length < 20 || String(args.nextCheck || '').trim().length < 5) {
+          return finish(fail('State the observed cause in at least one full sentence (cause) and what you will run to confirm the fix (nextCheck).'))
         }
         s.gateAfter = null
         s.failures = 0
@@ -61,9 +71,13 @@ export async function controlledAgentTool(input, execute, transfer) {
       }
       const requestedEnv = name === 'run_on_pod' ? 'pod' : args.target || s.environment
       if (requestedEnv !== s.environment) return finish(fail(`Execution is locked to ${s.environment}. Turbo changes inference, not where project files live. Use set_execution_context explicitly before changing machines.`))
-      const diagnostic = args.purpose === 'diagnostic' && name === 'execute_command'
-      if ((s.gateAfter !== null || s.inFlight) && !inspections.has(name) && !diagnostic && name !== 'verify_work') {
-        return finish(fail('Diagnostic checkpoint: changes are paused. Read the current source, run a small diagnostic command with purpose="diagnostic", then diagnose_failure with both evidence IDs and the cause.'))
+      // During a checkpoint only EDITS are paused. Commands still run and count
+      // as the fresh look the checkpoint asks for — refusing them left the model
+      // unable to gather the very evidence it was being told to gather.
+      const paused = s.gateAfter !== null || s.inFlight
+      const diagnostic = name === 'execute_command' && (args.purpose === 'diagnostic' || paused)
+      if (paused && ['write_file', 'edit_file', 'transfer_file'].includes(name)) {
+        return finish(fail('Diagnostic checkpoint: file changes are paused after repeated failures. Read the failing source or run a command that shows the real error, then call diagnose_failure with the cause and the check you will rerun. Then edit.'))
       }
       // Commands are arbitrary code. Treat ordinary commands as possible edits;
       // diagnostic and verification commands are explicitly scoped read-only.
@@ -91,8 +105,12 @@ export async function controlledAgentTool(input, execute, transfer) {
       } catch (e) { result = fail(e.message) }
       s.inFlight = previousFlight // a diagnostic must not silently erase a crashed action
       if (executions.has(name) || ['write_file', 'edit_file', 'transfer_file'].includes(name)) {
-        if (!result.ok) { s.failures++; if (s.failures >= 2 && s.gateAfter === null) s.gateAfter = s.sequence + 1 }
-        else if (name === 'verify_work') { s.failures = 0 }
+        // Three failures IN A ROW. Two total tripped it on nearly every real
+        // turn (a missing module, then a typo) and each trip cost several
+        // actions to clear. A success of any kind means the model is not
+        // stuck, so it resets the count.
+        if (!result.ok) { s.failures++; if (s.failures >= 3 && s.gateAfter === null) s.gateAfter = s.sequence + 1 }
+        else s.failures = 0
       }
       const decorated = finish(result)
       const event = s.events.at(-1)
