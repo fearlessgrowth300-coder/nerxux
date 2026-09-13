@@ -32,5 +32,9 @@ export function createCompletionCheck(userId, sessionId) {
 export async function finishAgentResponse(content, userId, sessionId) {
   const status = await completionStatus(userId, sessionId)
   const heading = status.needsVerification ? '**Work is not verified complete.** The model’s report below has not passed the required checks.\n\n' : ''
-  return { content: redactSecrets(heading + content + await verificationFooter(userId, sessionId)), verificationStatus: status.verified ? 'checks_passed' : status.changed ? 'unverified' : 'not_applicable' }
+  // A read-only turn (orientation, a question answered with ls/cat) changed
+  // nothing, so "Deployment is unverified" under it is noise. The footer is
+  // for turns that changed files.
+  const footer = status.changed ? await verificationFooter(userId, sessionId) : ''
+  return { content: redactSecrets(heading + content + footer), verificationStatus: status.verified ? 'checks_passed' : status.changed ? 'unverified' : 'not_applicable' }
 }

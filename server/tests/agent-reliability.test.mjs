@@ -52,6 +52,14 @@ test('completion recovery is bounded, failing or stale checks cannot certify wor
   assert.equal((await finishAgentResponse('Done', 'test', session)).verificationStatus, 'unverified')
 })
 
+test('a read-only turn gets no verification footer', async () => {
+  const session = randomUUID()
+  await withAgentState('test', session, async s => { s.events.push({ id: 1, tool: 'execute_command', ok: true, detail: 'ls' }) })
+  const r = await finishAgentResponse('Here is the layout.', 'test', session)
+  assert.equal(r.verificationStatus, 'not_applicable')
+  assert.doesNotMatch(r.content, /verification record/)
+})
+
 test('unregistered jobs and background start receipts cannot pass verification', async () => {
   let executed = false
   const input = { userId: 'test', sessionId: randomUUID() }
