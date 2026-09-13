@@ -81,6 +81,7 @@ export default function Chat() {
 
   const scrollRef = useRef(null)
   const followBottomRef = useRef(true)
+  const [showLatest, setShowLatest] = useState(false)
   const fileInputRef = useRef(null)
   const taRef = useRef(null)
   const abortRef = useRef(null) // aborts the in-flight turn (Stop button)
@@ -219,6 +220,7 @@ export default function Chat() {
 
   useEffect(() => {
     followBottomRef.current = true
+    setShowLatest(false)
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [conversationId])
 
@@ -594,6 +596,7 @@ export default function Chat() {
             onScroll={(e) => {
               const el = e.currentTarget
               followBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
+              setShowLatest(!followBottomRef.current)
             }}
             className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-3 py-4 sm:px-4">
             <div className="mx-auto w-full max-w-3xl space-y-5">
@@ -612,6 +615,17 @@ export default function Chat() {
           </div>
           <div className="shrink-0 border-t border-nexus-border px-3 py-2 sm:px-4">
             <div className="mx-auto w-full max-w-3xl">
+              {showLatest && (
+                <div className="mb-2 flex justify-center">
+                  <button type="button" onClick={() => {
+                    followBottomRef.current = true
+                    setShowLatest(false)
+                    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+                  }} className="rounded-full border border-nexus-border bg-nexus-panel px-3 py-1 text-xs text-gray-200 hover:bg-white/10">
+                    ↓ Jump to latest
+                  </button>
+                </div>
+              )}
               {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
               {pipelineActive && (
                 <p className="mb-2 text-xs text-nexus-accent2">
@@ -897,6 +911,7 @@ function ToolStepsCard({ steps = [] }) {
     <div className="mb-3 overflow-hidden rounded-xl border border-nexus-border bg-nexus-bg/70 text-xs">
       <button
         type="button"
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between px-3 py-2 text-left text-gray-300 hover:bg-white/5 transition"
       >
@@ -912,7 +927,8 @@ function ToolStepsCard({ steps = [] }) {
       </button>
 
       {open && (
-        <div className="divide-y divide-nexus-border/50 border-t border-nexus-border/50 p-2 space-y-2">
+        <div role="region" aria-label="Tool history" tabIndex={0}
+          className="max-h-[30dvh] overflow-y-auto overscroll-contain divide-y divide-nexus-border/50 border-t border-nexus-border/50 p-2 space-y-2">
           {steps.map((st, i) => (
             <div key={i} className="pt-2">
               <div className="flex items-center justify-between mb-1">
@@ -972,7 +988,7 @@ function Message({ message, sessionId, onEdit, disabled, retryOnly = false }) {
     <div className={isUser ? 'flex min-w-0 justify-end' : 'flex min-w-0 justify-start'}>
       {/* min-w-0 + overflow-wrap: long tokens (URLs, keys, hashes) wrap inside
           the bubble instead of pushing the whole row off-screen on phones. */}
-      <div className={isUser ? 'min-w-0 max-w-[85%]' : 'w-full min-w-0 max-w-[85%]'}>
+      <div className={isUser ? 'min-w-0 max-w-[85%]' : 'w-full min-w-0 sm:max-w-[85%]'}>
         {!isUser && (
           <div className="mb-1 flex items-center gap-2">
             <span className={['rounded-full px-2 py-0.5 text-[10px] font-medium', message.error ? 'bg-red-500/10 text-red-400' : 'bg-nexus-accent/15 text-nexus-accent2'].join(' ')}>
@@ -994,7 +1010,7 @@ function Message({ message, sessionId, onEdit, disabled, retryOnly = false }) {
               {editing ? (
                 <div className="space-y-2">
                   <textarea aria-label="Edit message" autoFocus value={editedText} onChange={e => setEditedText(e.target.value)} rows={4}
-                    className="w-full min-w-[240px] rounded-lg bg-black/20 p-2 text-sm text-white outline-none" />
+                    className="w-full min-w-0 rounded-lg bg-black/20 p-2 text-sm text-white outline-none" />
                   <p className="text-xs text-white/80">
                     {retryOnly
                       ? 'Retries in this chat — the failed reply is replaced.'
@@ -1155,6 +1171,7 @@ function CardField({ label, value }) {
 // far and what it said in between — the same trail a terminal agent prints —
 // instead of three dots for minutes.
 function WorkingCard({ label, events = [] }) {
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const tools = events.filter((e) => e.type === 'tool')
   const lastText = [...events].reverse().find((e) => e.type === 'text')?.text
   const recent = events.slice(-8)
@@ -1168,7 +1185,7 @@ function WorkingCard({ label, events = [] }) {
   const idle = now - lastAt
   return (
     <div className="flex justify-start">
-      <div className="w-full min-w-0 max-w-[85%]">
+      <div className="w-full min-w-0 sm:max-w-[85%]">
         <div className="mb-1"><span className="rounded-full bg-nexus-accent/15 px-2 py-0.5 text-[10px] font-medium text-nexus-accent2">{label}</span></div>
         <div className="min-w-0 rounded-2xl border border-nexus-border bg-nexus-panel px-4 py-3 text-sm">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-gray-300">
@@ -1176,11 +1193,18 @@ function WorkingCard({ label, events = [] }) {
             <span>{tools.length ? `Working — ${tools.length} tool action${tools.length === 1 ? '' : 's'} so far` : 'Thinking…'}</span>
             <span className="text-xs text-gray-500">· {fmt(now - startRef.current)} elapsed</span>
             <span className={['text-xs', idle > 90000 ? 'text-amber-400' : 'text-gray-500'].join(' ')}>
-              · {idle < 3000 ? 'active now' : `model generating for ${fmt(idle)}`}
+              · {idle < 3000 ? 'activity received' : `no new activity for ${fmt(idle)}`}
             </span>
           </div>
           {recent.length > 0 && (
-            <div className="mt-2 space-y-1 border-t border-nexus-border/50 pt-2 font-mono text-[11px]">
+            <button type="button" aria-expanded={detailsOpen} onClick={() => setDetailsOpen(v => !v)}
+              className="mt-2 rounded px-1 py-1 text-xs text-gray-300 hover:bg-white/5">
+              {detailsOpen ? 'Hide activity' : 'View activity'}
+            </button>
+          )}
+          {detailsOpen && recent.length > 0 && (
+            <div role="region" aria-label="Live activity" tabIndex={0}
+              className="mt-2 max-h-[25dvh] overflow-y-auto overscroll-contain space-y-1 border-t border-nexus-border/50 pt-2 font-mono text-[11px]">
               {recent.map((ev, i) => ev.type === 'tool' ? (
                 <div key={i} className="flex min-w-0 items-start gap-2 text-gray-400">
                   <span className={ev.ok ? 'text-emerald-400' : 'text-red-400'}>{ev.ok ? '✓' : '✗'}</span>
@@ -1193,8 +1217,8 @@ function WorkingCard({ label, events = [] }) {
               ))}
             </div>
           )}
-          {lastText && recent[recent.length - 1]?.type !== 'text' && (
-            <p className="mt-2 break-words text-xs text-gray-500">{String(lastText).slice(0, 200)}</p>
+          {lastText && (!detailsOpen || recent[recent.length - 1]?.type !== 'text') && (
+            <p className="mt-2 line-clamp-2 break-words text-xs text-gray-400">{String(lastText).slice(0, 200)}</p>
           )}
         </div>
       </div>

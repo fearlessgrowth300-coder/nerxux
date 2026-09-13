@@ -140,3 +140,35 @@ test('legacy local drafts remain readable and edits preserve attachments', () =>
   assert.throws(()=>editedHistory(messages,'bad','content'))
 })
 
+test('reading older messages offers a way back to the latest reply', async () => {
+  const r = await mount(fixture(snapshot()))
+  const conversation = r.root.findByProps({'aria-label':'Conversation'})
+  assert.equal(button(r,'↓ Jump to latest'), undefined)
+  await act(async () => conversation.props.onScroll({currentTarget:{scrollHeight:2000,scrollTop:100,clientHeight:400}}))
+  assert.ok(button(r,'↓ Jump to latest'))
+  await act(async () => button(r,'↓ Jump to latest').props.onClick())
+  assert.equal(button(r,'↓ Jump to latest'), undefined)
+  await act(async () => r.unmount())
+})
+
+test('live activity can be expanded and collapsed without hiding the current status', async () => {
+  const f = fixture(snapshot(), {pending:true})
+  const r = await mount(f)
+  let sending
+  await act(async () => { sending = button(r,'Send').props.onClick(); await Promise.resolve() })
+  await act(async () => f.calls.sends[0].onProgress([
+    {type:'text',text:'Checking the sample calculation.',at:Date.now()-10000},
+    {type:'tool',tool:'read_file',args:{path:'sample.txt'},ok:true,at:Date.now()-10000},
+  ]))
+  assert.match(words(r.root), /no new activity for/)
+  assert.doesNotMatch(words(r.root), /model generating for/)
+  assert.equal(r.root.findAllByProps({'aria-label':'Live activity'}).length, 0)
+  await act(async () => button(r,'View activity').props.onClick())
+  assert.equal(r.root.findAllByProps({'aria-label':'Live activity'}).length, 1)
+  await act(async () => button(r,'Hide activity').props.onClick())
+  assert.match(words(r.root), /Checking the sample calculation/)
+  await act(async () => { f.resolveReply({messages:[{role:'assistant',content:'The sample result is 4.'}]}); await sending })
+  assert.match(words(r.root), /The sample result is 4/)
+  assert.equal(button(r,'View activity'), undefined)
+  await act(async () => r.unmount())
+})
