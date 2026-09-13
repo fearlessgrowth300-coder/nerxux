@@ -11,14 +11,15 @@ def safe_print(text):
     sys.stdout.buffer.write(b'\n')
     sys.stdout.buffer.flush()
 
-env = require(
+CODE_ONLY = '--code-only' in sys.argv
+env = require('HOSTINGER_HOST', 'HOSTINGER_USER', 'HOSTINGER_SSH_KEY_PATH') if CODE_ONLY else require(
     "HOSTINGER_HOST", "HOSTINGER_USER", "HOSTINGER_SSH_KEY_PATH",
     "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "VAULT_ENCRYPTION_KEY",
     "RUNPOD_API_KEY", "RUNPOD_POD_ID", "HOSTINGER_OLLAMA_URL", "CLIENT_ORIGINS",
 )
 brave_key = os.environ.get('BRAVE_SEARCH_API_KEY', '')
 
-ENV_CONTENT = f"""PORT=4000
+ENV_CONTENT = None if CODE_ONLY else f"""PORT=4000
 CLIENT_ORIGINS={env['CLIENT_ORIGINS']}
 
 SUPABASE_URL={env['SUPABASE_URL']}
@@ -59,6 +60,11 @@ def main():
     ssh.connect(env["HOSTINGER_HOST"], username=env["HOSTINGER_USER"], key_filename=env["HOSTINGER_SSH_KEY_PATH"])
     safe_print("Connected!")
 
+    if CODE_ONLY:
+        # A code release must not overwrite the live vault key or drop provider
+        # credentials added since the local deployment configuration was saved.
+        run(ssh, "test -s /root/nerxux/server/.env")
+
     # 1. Clone or pull repo
     # fetch + reset, not pull: the server is a deploy target, not a place to
     # edit. Anything left in its working tree (a file hand-copied while
@@ -75,11 +81,14 @@ def main():
     safe_print(f"Deployed commit: {landed[:8]}")
 
     # 2. Write server/.env
-    safe_print("Writing server/.env...")
-    sftp = ssh.open_sftp()
-    with sftp.file("/root/nerxux/server/.env", "w") as f:
-        f.write(ENV_CONTENT)
-    sftp.close()
+    if CODE_ONLY:
+        safe_print("Preserving existing server/.env (code-only release).")
+    else:
+        safe_print("Writing server/.env...")
+        sftp = ssh.open_sftp()
+        with sftp.file("/root/nerxux/server/.env", "w") as f:
+            f.write(ENV_CONTENT)
+        sftp.close()
 
     # 3. Install dependencies
     safe_print("Installing npm packages in server...")

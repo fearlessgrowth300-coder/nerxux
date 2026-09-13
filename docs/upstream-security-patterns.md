@@ -23,6 +23,12 @@ environment values before returning bounded text. Redaction is not a guarantee
 that every possible secret encoding or free-form sensitive text will be detected.
 Other logging sites and successful provider response paths are outside this patch.
 
+The existing Hostinger deployment script accepts `--code-only` for releases that
+preserve the VPS `.env`. This avoids replacing its vault key or dropping newer
+provider credentials from an older local configuration. The default provisioning
+mode still writes configuration as before. A code-only release still restarts the
+API process, so it interrupts any running chat jobs.
+
 Regression tests exercise log-field exclusion, key/header redaction, poll responses,
 vault key validation, encryption round trips and ciphertext tamper detection.
 
