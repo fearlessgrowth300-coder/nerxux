@@ -289,6 +289,25 @@ async function gitCreds(userId, chatText = '') {
 }
 
 // Parses freeform model text for JSON tool calls or "run: <command>" patterns
+// Weak local models emit tool calls as almost-JSON: single quotes, Python
+// True/False/None, trailing commas. Strict JSON.parse drops those silently, so
+// the model "just talks" instead of acting. Try strict first, then a small,
+// bounded set of repairs — only ever as a fallback, never on valid JSON.
+// (The tolerant-parse / structured-output idea comes from OpenAI Agents JS and
+// Codex; it improves tool RELIABILITY, it does not change the model's weights.)
+export function parseToolObject(slice) {
+  try { return JSON.parse(slice) } catch {}
+  let t = slice
+    .replace(/\bTrue\b/g, 'true').replace(/\bFalse\b/g, 'false').replace(/\bNone\b/g, 'null')
+    .replace(/,(\s*[}\]])/g, '$1') // trailing commas
+  try { return JSON.parse(t) } catch {}
+  // Single-quoted object, only when there are no double quotes to corrupt.
+  if (!t.includes('"') && t.includes("'")) {
+    try { return JSON.parse(t.replace(/'/g, '"')) } catch {}
+  }
+  return null
+}
+
 export function extractToolCallsFromText(text) {
   if (!text || typeof text !== 'string') return []
   const calls = []
@@ -313,16 +332,14 @@ export function extractToolCallsFromText(text) {
     if (ch !== '}') continue
     depth--
     if (depth !== 0) continue
-    try {
-      const parsed = JSON.parse(text.slice(start, i + 1))
-      if (AGENT_TOOL_NAMES.has(parsed.tool)) {
-        const { tool, ...rest } = parsed
-        const args = normalizeToolArgs(tool, rest)
-        if (['execute_command', 'run_on_pod'].includes(tool) && !args.command) args.command = args.code || ''
-        if (tool === 'web_search' && !args.query) args.query = args.q || ''
-        calls.push({ name: tool, args })
-      }
-    } catch {}
+    const parsed = parseToolObject(text.slice(start, i + 1))
+    if (parsed && typeof parsed === 'object' && AGENT_TOOL_NAMES.has(parsed.tool)) {
+      const { tool, ...rest } = parsed
+      const args = normalizeToolArgs(tool, rest)
+      if (['execute_command', 'run_on_pod'].includes(tool) && !args.command) args.command = args.code || ''
+      if (tool === 'web_search' && !args.query) args.query = args.q || ''
+      calls.push({ name: tool, args })
+    }
     start = -1
   }
 
