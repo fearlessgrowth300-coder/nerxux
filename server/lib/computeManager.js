@@ -157,18 +157,23 @@ export async function getLiveComputeStatus() {
     // Turbo selected, pod up, but no tunnel — a restarted server or an SSH
     // connection that dropped. Nothing used to rebuild it, so Turbo stayed
     // selected and every message failed with "can't reach the tunnel".
-    if (currentMode === 'turbo' && running && !tunnel.ready && !switching && !provisioning) {
+    // A finished provisioning (done, incl. a stale failure) must NOT block the
+    // reconnect — otherwise a past failure strands Turbo forever even after the
+    // model is fixed. Only an actively-running provisioning should hold it off.
+    if (currentMode === 'turbo' && running && !tunnel.ready && !switching && !(provisioning && !provisioning.done)) {
       reconnectTunnelIfNeeded(podIdOf(pod))
     }
 
+    // Don't show a failed-setup banner once the model is actually installed.
     const setup = getProvisioningState()
+    const showSetup = setup && !(setup.done && setup.failed)
     return {
       ...getComputeStatus(),
       switching,
       runpodStatus: pod.status || 'UNKNOWN',
       runpodRunning: running,
-      ...(setup ? { provisioning: setup } : {}),
-      ...(setup?.message ? { notice: setup.message } : notice ? { notice } : {}),
+      ...(showSetup ? { provisioning: setup } : {}),
+      ...(showSetup?.message ? { notice: showSetup.message } : notice ? { notice } : {}),
     }
   } catch (err) {
     // Can't reach RunPod at all — don't claim Turbo is live.
@@ -362,6 +367,15 @@ function watchProvisioning(podId, host, port, firstMessage) {
     // The installer stopped without finishing — say so, with its last output,
     // rather than counting minutes at a process that is already dead.
     if (p.failed) {
+      // The installer's log can end on a transient error even though the model
+      // finished (e.g. a network-volume close error that ollama then re-pulled).
+      // Believe the actual state: if the model is present, this is a success.
+      if (await tunnel.podHasModel(host, port)) {
+        finish({ done: true })
+        try { await switchToTurbo({ podId }); provisioning.message = 'Your model is installed — Turbo is live.' }
+        catch (err) { provisioning.message = `The model is installed, but Turbo could not connect: ${err.message}` }
+        return
+      }
       return finish({ done: true, failed: true, message: `Pod setup failed: ${p.line || 'the installer stopped'}. Press Turbo to try again.` })
     }
     if (!p.done) return
@@ -396,14 +410,18 @@ function reconnectTunnelIfNeeded(podId) {
 }
 
 async function autoProvisionIfNeeded(podId, pod) {
-  if (provisioning || switchPromise || tunnel.ready) return
+  // A finished provisioning (done/failed) must not block this — otherwise a
+  // stale failure is never cleared even after the model is installed.
+  if ((provisioning && !provisioning.done) || switchPromise || tunnel.ready) return
   const last = autoTried.get(podId) || 0
   if (Date.now() - last < 5 * 60_000) return
   autoTried.set(podId, Date.now())
 
   const endpoint = podSshEndpoint(pod)
   if (!endpoint) return
-  if (await tunnel.podHasModel(endpoint.host, endpoint.port)) return
+  // Model is already there (e.g. a transient download error self-healed, or it
+  // was fixed by hand): clear any stale provisioning banner and stop.
+  if (await tunnel.podHasModel(endpoint.host, endpoint.port)) { provisioning = null; return }
 
   const message = await tunnel.provision(endpoint.host, tunnel.sshCommon(endpoint.port))
   watchProvisioning(podId, endpoint.host, endpoint.port, message)
@@ -428,8 +446,8 @@ export async function ensureTurboReady() {
 
 export function getProvisioningState() {
   if (!provisioning) return null
-  const { podId, startedAt, line, done, message } = provisioning
-  return { podId, startedAt, line, done, message: message || null, minutes: Math.round((Date.now() - startedAt) / 60000) }
+  const { podId, startedAt, line, done, failed, message } = provisioning
+  return { podId, startedAt, line, done, failed: !!failed, message: message || null, minutes: Math.round((Date.now() - startedAt) / 60000) }
 }
 
 export function switchToTurbo({ podId } = {}) {
