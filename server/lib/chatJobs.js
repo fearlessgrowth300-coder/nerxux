@@ -26,7 +26,7 @@ const GRAVEYARD_FILE = path.join(__dirname, '../.chat-jobs-graveyard.json')
 export const STALE_MS = 70 * 60_000
 export const RESULT_TTL_MS = 10 * 60_000
 // Hard ceiling on one job, watched or not. The model adapters bound their own
-// turns (25 min Always On, 60 min Turbo), but anything that awaits without a
+// turns (60 min on both Always On and Turbo), but anything that awaits without a
 // timeout used to leave the chat on "Thinking…" indefinitely while nothing was
 // running — the user sent "continue" and waited hours. Past this the job is
 // ended with a plain message, so the client always gets an answer.

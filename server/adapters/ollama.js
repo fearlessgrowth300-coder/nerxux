@@ -63,6 +63,18 @@ export function estimateReadSeconds(tokens, isRunpod) {
 // sent when it can be read in about this long.
 export const WRAPUP_MAX_READ_S = 480
 
+// Time kept free for the model to WRITE its answer after reading. A step is
+// only started when reading + this fits in what is left of the turn; a step
+// that the limit cuts off mid-way throws away everything it read.
+// Qwen3.6 35B-A3B writes ~15 tok/s on the VPS, so this covers ~2,700 tokens.
+export const ALWAYS_ON_ANSWER_S = 180
+
+// Most Always On sends in tokens (excluding tool definitions). The agent's
+// fixed parts are ~7.8k (rules 3,048 + NEXUS.md 2,874 + record 1,592 + 256),
+// leaving ~6k for recent conversation. Was the whole 32k window (~25k), which
+// made every step on a long chat re-read ~24k tokens (~12 min).
+export const ALWAYS_ON_PROMPT_TOKENS = 14000
+
 // Always On runs a faster model than Turbo. The dense 27B needs up to an hour
 // per agent step on the VPS CPU; a mixture-of-experts model with ~3B active
 // parameters does each step with a fraction of the compute. Turbo keeps the
@@ -150,7 +162,11 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // A real build (install + write dozens of files + run it) is a long turn.
   // On the GPU the cap is only a backstop against a runaway loop — the user
   // has a Stop button and abandoned jobs get aborted — so it's generous.
-  const WALL_CLOCK_BUDGET_MS = (isRunpod ? 60 : 25) * 60 * 1000
+  // Always On was 25 min, but with each step re-reading the whole chat
+  // (~12 min on a 22k-token chat, 2026-09-15) that allowed ONE step per
+  // "continue" and cut the second one off at 88% read — pure waste. The step
+  // pre-check below stops a turn cleanly instead of letting the limit cut it.
+  const WALL_CLOCK_BUDGET_MS = 60 * 60 * 1000
   // This model tends to produce long hidden "thinking" before its actual
   // answer. num_predict bounds a single call so one runaway generation can't
   // eat the whole budget; Turbo (30-65 tok/s) gets a much higher ceiling.
@@ -179,7 +195,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const ALWAYS_ON_CTX = 32768
   let numCtx = isRunpod ? 65536 : ALWAYS_ON_CTX
   // What is left for the conversation once the answer's budget is set aside.
-  let promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
+  const toolTokens = estimateTokens(JSON.stringify(agentTools))
+  // Always On re-reads everything it is sent on every step, so what it is sent
+  // is capped well below the window: the fixed parts (rules, NEXUS.md, the
+  // execution record) always go in, and older conversation is trimmed first.
+  // Continuity comes from the record and the files, not from old chat turns.
+  const budgetFor = () => Math.min(numCtx - numPredict - toolTokens - 512, isRunpod ? Infinity : ALWAYS_ON_PROMPT_TOKENS)
+  let promptBudget = budgetFor()
   // Set when the budget shrinks mid-turn, so the system prompt is re-checked
   // against the new, smaller window on the next step.
   let rewriteSystem = false
@@ -192,7 +214,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     isRunpod = false
     numPredict = 3000
     numCtx = ALWAYS_ON_CTX
-    promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
+    promptBudget = budgetFor()
     rewriteSystem = true
     onProgress({ type: 'text', text: fallbackNote() })
   }
@@ -287,11 +309,11 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     const remainingMs = WALL_CLOCK_BUDGET_MS - (Date.now() - requestStart)
     // Don't start a step that cannot even be read in the time left: it would
     // run for up to an hour and then be thrown away. Say why, plainly.
-    if (!isRunpod && readSeconds * 1000 > remainingMs) {
+    if (!isRunpod && (readSeconds + ALWAYS_ON_ANSWER_S) * 1000 > remainingMs) {
       const n = toolSteps.length
       finalContent = [
         finalContent.trim(),
-        `*(stopped — on Always On this chat is about ${Math.round(promptTokens / 1000)}k tokens, which takes the CPU about ${fmtMinutes(readSeconds)} to read before it can reply, ` +
+        `*(stopped — on Always On this chat is about ${Math.round(promptTokens / 1000)}k tokens, which takes the CPU about ${fmtMinutes(readSeconds)} to read (plus up to ${fmtMinutes(ALWAYS_ON_ANSWER_S)} to answer), ` +
         `and only ${fmtMinutes(Math.max(0, remainingMs / 1000))} of this turn's ${WALL_CLOCK_BUDGET_MS / 60000}-minute limit is left` +
         `${n ? ` (${n} tool action${n === 1 ? '' : 's'} done so far)` : ''}. ` +
         'Switch to Turbo (it reads this in under a minute), or start a new chat with a shorter request.)*',

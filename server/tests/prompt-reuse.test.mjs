@@ -52,6 +52,13 @@ test('Always On has room for the agent, and oversized notes degrade instead of f
   const fixed = 3048 + 3865 + 2874 + 1592 + 256
   const budget = ctx - 3000 - 512
   assert.ok(budget - fixed >= 10000, `only ${budget - fixed} tokens left for the conversation`)
+  // What Always On actually SENDS is capped lower (it re-reads all of it every
+  // step); tool definitions are budgeted separately. The fixed parts must still
+  // fit with real room for recent conversation.
+  const cap = Number(src.match(/export const ALWAYS_ON_PROMPT_TOKENS = (\d+)/)[1])
+  const fixedInPrompt = 3048 + 2874 + 1592 + 256
+  assert.ok(cap - fixedInPrompt >= 5000, `Always On cap leaves only ${cap - fixedInPrompt} tokens for the conversation`)
+  assert.ok(cap <= 16000, 'and stays small enough to re-read quickly')
 })
 
 test('the execution record is the changing half, and is not in the notes', () => {

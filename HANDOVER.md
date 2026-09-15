@@ -124,6 +124,12 @@ VPS: reads 64 tok/s cold / 218 warm (27B: ~15), writes 15.4 tok/s (27B: 4.9), an
 time (31 GB); the 27B is still on disk. Read-time estimates learn per model from Ollama's
 `prompt_eval_count`/`prompt_eval_duration`.
 
+Measured on a real 22k-token chat (2026-09-15): this model ALSO logs "forcing full prompt
+re-processing", so each step re-read the whole chat (~12 min). Since then Always On sends at
+most `ALWAYS_ON_PROMPT_TOKENS` (14k, older turns trimmed; rules, NEXUS.md and the execution
+record always kept), the turn limit is 60 min like Turbo, and a step is only started when
+reading + `ALWAYS_ON_ANSWER_S` (180 s) fits in the time left.
+
 The numbers below are the 27B's.
 
 **Always On** — Ollama on the VPS itself, CPU only, `http://127.0.0.1:11434`.

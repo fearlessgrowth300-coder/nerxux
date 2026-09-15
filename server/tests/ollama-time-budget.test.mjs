@@ -18,12 +18,16 @@ test('the read-time estimate matches what the Always On box measured', () => {
   assert.ok(estimateReadSeconds(21196, true) < 60, 'Turbo reads the same prompt in well under a minute')
 })
 
-const big = 'x'.repeat(3.2 * 40_000) // ~40k tokens: far more than Always On can read in 25 min
+const big = 'x'.repeat(3.2 * 40_000) // ~40k tokens, trimmed to the Always On cap
 
 test('Always On refuses a step it cannot read in the time left, instead of hanging for an hour', async () => {
   const realFetch = globalThis.fetch
   let calls = 0
   globalThis.fetch = async () => { calls++; throw new Error('must not be called') }
+  // A model measured at 3x slower than the 27B fit: even the capped prompt
+  // cannot be read and answered inside the turn.
+  resetReadSpeeds()
+  learnReadSpeed(DENSE, false, 4000, { prompt_eval_count: 3900, prompt_eval_duration: 3 * estimateReadSeconds(4000, false) * 1e9 })
   try {
     const events = []
     const res = await run({ prompt: big, model: DENSE, onProgress: (e) => events.push(e) })
@@ -33,6 +37,7 @@ test('Always On refuses a step it cannot read in the time left, instead of hangi
     assert.match(res.content, /min to read/)
   } finally {
     globalThis.fetch = realFetch
+    resetReadSpeeds()
   }
 })
 
@@ -126,4 +131,29 @@ test('the faster model is not held to the 27B read times, and speed is learned f
   resetReadSpeeds()
   learnReadSpeed(DENSE, false, 4000, { prompt_eval_count: 40, prompt_eval_duration: 1e9 })
   assert.equal(readSecondsFor(DENSE, false, 4000), estimateReadSeconds(4000, false))
+})
+
+test('Always On sends a capped prompt, and never starts a step it cannot read AND answer in time', async () => {
+  const { ALWAYS_ON_PROMPT_TOKENS, ALWAYS_ON_ANSWER_S } = await import('../adapters/ollama.js')
+  const { estimateTokens } = await import('../lib/fitContext.js')
+  const realFetch = globalThis.fetch
+  let sentTokens = 0
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    sentTokens = body.messages.reduce((n, m) => n + estimateTokens(m), 0)
+    return { ok: true, json: async () => ({ message: { content: 'ok' }, done_reason: 'stop' }) }
+  }
+  try {
+    // A long chat: 30 turns of ~1.5k tokens each.
+    const history = Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ` + 'z'.repeat(3.2 * 1500) }))
+    history.push({ role: 'user', content: 'continue' })
+    await run({ history })
+    assert.ok(sentTokens <= ALWAYS_ON_PROMPT_TOKENS + 600, `sent ${sentTokens} tokens, cap is ${ALWAYS_ON_PROMPT_TOKENS}`)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+  assert.ok(ALWAYS_ON_ANSWER_S >= 120, 'time is kept free to write the answer')
+  const src = await import('node:fs').then((fs) => fs.promises.readFile('./adapters/ollama.js', 'utf8'))
+  assert.match(src, /\(readSeconds \+ ALWAYS_ON_ANSWER_S\) \* 1000 > remainingMs/, 'the pre-check counts reading + answering')
+  assert.match(src, /const WALL_CLOCK_BUDGET_MS = 60 \* 60 \* 1000/, 'Always On gets the same 60-minute turn as Turbo')
 })
