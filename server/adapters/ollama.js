@@ -11,7 +11,7 @@ import { redactToolData } from '../lib/redact.js'
 import { agentStatePrompt } from '../lib/agentState.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
-import { getComputeStatus, ensureTurboReady } from '../lib/computeManager.js'
+import { getComputeStatus, ensureTurboReady, takeFallbackReason } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
 
@@ -60,17 +60,23 @@ function composeSystem(systemPrompt = '', skills = []) {
 export async function run({ prompt, history, systemPrompt, skills, model, sessionId, projectPath, userId, signal, webSearch, attachments, tools = [], onToolCall = null, onProgress = () => {} }) {
   const emitProgress = onProgress
   onProgress = event => emitProgress(redactToolData(event))
-  const targetUrl = resolveTargetUrl(model)
+  let targetUrl = resolveTargetUrl(model)
   const externalTools = toOpenAITools(tools)
   const externalNames = new Set(tools.map((t) => t.name))
   const agentTools = [
     ...(webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS),
     ...externalTools,
   ]
-  const isRunpod = targetUrl.includes('11435')
   // Rebuild a dead tunnel BEFORE sending, rather than discovering it is dead
   // by waiting out a five-minute timeout on a request that could never land.
-  if (isRunpod) await ensureTurboReady()
+  // If the pod itself is gone (out of credit, exited), ensureTurboReady has
+  // already switched to Always On: run the turn there instead of failing it.
+  const fallbackNote = () => `(Turbo is unavailable — ${takeFallbackReason() || 'the GPU pod is not running'}. Continuing on Always On, which is slower.)`
+  if (targetUrl.includes('11435') && !(await ensureTurboReady())) {
+    targetUrl = resolveTargetUrl(model)
+    onProgress({ type: 'text', text: fallbackNote() })
+  }
+  let isRunpod = targetUrl.includes('11435')
   // Chat requests run as background jobs the client polls (routes/chat.js),
   // so there's no proxy timeout to squeeze under any more. This budget is
   // purely about not leaving someone staring at a spinner forever on the
@@ -92,15 +98,27 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // too small above. A write_file carrying a real file cannot fit in 900
   // tokens, so the call was cut mid-emission and Ollama's tool parser
   // rejected the fragment ("XML syntax error ... unexpected end element").
-  const numPredict = isRunpod ? 12000 : 3000
+  let numPredict = isRunpod ? 12000 : 3000
   // The model supports far more, but Ollama defaults it to 32,768 — which a
   // build conversation crosses, after which EVERY message in that chat fails
   // with "exceeds the available context size". 64k is verified to fit on the
   // A40 alongside the weights. The CPU box stays small on purpose: it reads at
   // ~23 tok/s, so a 64k prompt there would be three quarters of an hour.
-  const numCtx = isRunpod ? 65536 : 16384
+  let numCtx = isRunpod ? 65536 : 16384
   // What is left for the conversation once the answer's budget is set aside.
-  const promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
+  let promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
+  // The pod can die in the middle of a long build. Move the rest of the turn to
+  // Always On with that box's limits instead of discarding the work done so far.
+  // The wall-clock budget is kept as it was: shrinking it mid-turn would end a
+  // turn that was already past 25 minutes on the spot.
+  const fallBackToAlwaysOn = () => {
+    targetUrl = resolveTargetUrl(model)
+    isRunpod = false
+    numPredict = 3000
+    numCtx = 16384
+    promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
+    onProgress({ type: 'text', text: fallbackNote() })
+  }
   const system = composeSystem(systemPrompt, skills)
   const beforeFinish = createCompletionCheck(userId, sessionId)
   const messages = []
@@ -189,6 +207,11 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         onProgress({ type: 'text', text: `(reconnecting to the GPU — attempt ${tunnelRetries})` })
         const back = await ensureTurboReady()
         if (back) {
+          step--
+          continue
+        }
+        if (getComputeStatus().mode !== 'turbo') {
+          fallBackToAlwaysOn()
           step--
           continue
         }

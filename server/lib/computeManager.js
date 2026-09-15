@@ -432,16 +432,47 @@ async function autoProvisionIfNeeded(podId, pod) {
 // open, but nothing flows to the pod — the request then hangs until undici
 // gives up with UND_ERR_HEADERS_TIMEOUT, minutes later. A 2-second probe
 // catches that and rebuilds the tunnel before the user waits at all.
+// Called by a chat turn before (and during) a Turbo request. The dashboard's
+// status poll is what used to notice a dead pod and fall back to Always On, but
+// a chat job doesn't poll: with the dashboard closed, a pod exited for lack of
+// credit left every turn aimed at a tunnel that could never come back, and
+// this tried to START the pod — which fails with no balance. Reconnect only to
+// a pod that is actually RUNNING; otherwise fall back to Always On so the turn
+// still runs. Returns true only when Turbo is usable.
 export async function ensureTurboReady() {
-  if (currentMode !== 'turbo') return true
+  if (currentMode !== 'turbo') return false
   if (await tunnel.health()) return true
-  if (switchPromise) return false // a switch is already under way
-  try {
-    await switchToTurbo()
-    return tunnel.ready
-  } catch {
-    return false
+  if (switchPromise) {
+    // A switch someone started is under way — let it finish rather than race it.
+    try { await switchPromise } catch {}
+    if (currentMode === 'turbo' && (await tunnel.health())) return true
+    if (currentMode !== 'turbo') return false
   }
+  let reason
+  try {
+    const pod = await fetchPodDetails()
+    if (pod.status === 'RUNNING') {
+      await switchToTurbo({ podId: podIdOf(pod) })
+      if (tunnel.ready) return true
+      reason = 'the GPU tunnel did not come back'
+    } else {
+      reason = `the RunPod pod is ${String(pod.status || 'not running').toLowerCase()}`
+    }
+  } catch (err) {
+    reason = `RunPod could not be reached (${err.message})`
+  }
+  await tunnel.stop().catch(() => {})
+  setCurrentMode('always_on')
+  lastFallbackReason = reason
+  return false
+}
+
+let lastFallbackReason = null
+// The reason for the most recent automatic Turbo -> Always On fallback, once.
+export function takeFallbackReason() {
+  const r = lastFallbackReason
+  lastFallbackReason = null
+  return r
 }
 
 export function getProvisioningState() {
