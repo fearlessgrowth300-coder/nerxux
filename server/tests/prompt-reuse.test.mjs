@@ -33,9 +33,24 @@ test('a conversation that fits is still sent untouched', () => {
 
 test('the Ollama adapter fixes the system prompt once and appends the live record last', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
-  assert.match(src, /if \(step === 0\) messages\[0\]\.content = system \+ state\.notes/, 'system prompt is written on step 0 only')
+  assert.match(src, /if \(step === 0 \|\| rewriteSystem\) \{\s*rewriteSystem = false\s*messages\[0\]\.content = system \+ state\.notes/, 'system prompt is written on step 0 (or after the window shrinks) only')
   assert.doesNotMatch(src, /messages\[0\]\.content = system \+ '\\n\\n' \+ await agentStatePrompt/, 'the per-step record no longer goes into the system prompt')
   assert.match(src, /messages: \[\.\.\.fitMessages\(messages, promptBudget - recordTokens\)\.messages, record\]/, 'the record is the final message and is budgeted for')
+})
+
+// Measured on the viewe-account chat: rules 3,048 + tools 3,865 + NEXUS.md
+// 2,874 + record 1,592 + reply 3,000 against a 16k window left ~700 tokens, and
+// a message that pulled in connector tools failed outright.
+test('Always On has room for the agent, and oversized notes degrade instead of failing', async () => {
+  const src = await fs.readFile('./adapters/ollama.js', 'utf8')
+  const ctx = Number(src.match(/const ALWAYS_ON_CTX = (\d+)/)[1])
+  assert.ok(ctx >= 32768, `Always On context ${ctx} cannot hold the agent's ~12k fixed tokens plus a conversation`)
+  assert.match(src, /let numCtx = isRunpod \? 65536 : ALWAYS_ON_CTX/)
+  assert.match(src, /numCtx = ALWAYS_ON_CTX/, 'mid-turn fallback uses the same window')
+  assert.match(src, /messages\[0\]\.content = system \+ NOTES_POINTER/, 'notes that do not fit become a pointer to NEXUS.md')
+  const fixed = 3048 + 3865 + 2874 + 1592 + 256
+  const budget = ctx - 3000 - 512
+  assert.ok(budget - fixed >= 10000, `only ${budget - fixed} tokens left for the conversation`)
 })
 
 test('the execution record is the changing half, and is not in the notes', () => {

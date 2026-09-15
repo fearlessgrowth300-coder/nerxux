@@ -24,6 +24,9 @@ function errorText(value) {
   return String(value)
 }
 
+// Sent instead of the full project notes when they do not fit the context.
+export const NOTES_POINTER = '\n\n# Project notes\nThis project has a NEXUS.md at its root (too large to include here). Read it with read_file before changing how the project is built, run or deployed.'
+
 // Ollama's own wording when the tool call it received will not parse.
 const MALFORMED_TOOL_CALL = /XML syntax error|unexpected end element|invalid character|unmarshal|failed to parse tool/i
 
@@ -102,11 +105,21 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // The model supports far more, but Ollama defaults it to 32,768 — which a
   // build conversation crosses, after which EVERY message in that chat fails
   // with "exceeds the available context size". 64k is verified to fit on the
-  // A40 alongside the weights. The CPU box stays small on purpose: it reads at
-  // ~23 tok/s, so a 64k prompt there would be three quarters of an hour.
-  let numCtx = isRunpod ? 65536 : 16384
+  // A40 alongside the weights. The CPU box was held at 16k, but the agent's fixed
+  // parts alone (rules ~3k, tool definitions ~4k, NEXUS.md ~3k, execution record
+  // ~1.5k, reply 3k) left ~700 tokens for the conversation, and any message that
+  // pulled in connector tools failed with "Instructions and tool definitions
+  // exceed this model context". 32k fits in RAM with the box's Ollama set to
+  // flash attention + q8_0 KV cache (~4 GB beside the 17 GB weights). Reading
+  // that much at ~23 tok/s is slow only once: the prompt prefix is reused
+  // between steps (see the system prompt handling in the loop).
+  const ALWAYS_ON_CTX = 32768
+  let numCtx = isRunpod ? 65536 : ALWAYS_ON_CTX
   // What is left for the conversation once the answer's budget is set aside.
   let promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
+  // Set when the budget shrinks mid-turn, so the system prompt is re-checked
+  // against the new, smaller window on the next step.
+  let rewriteSystem = false
   // The pod can die in the middle of a long build. Move the rest of the turn to
   // Always On with that box's limits instead of discarding the work done so far.
   // The wall-clock budget is kept as it was: shrinking it mid-turn would end a
@@ -115,8 +128,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     targetUrl = resolveTargetUrl(model)
     isRunpod = false
     numPredict = 3000
-    numCtx = 16384
+    numCtx = ALWAYS_ON_CTX
     promptBudget = numCtx - numPredict - estimateTokens(JSON.stringify(agentTools)) - 512
+    rewriteSystem = true
     onProgress({ type: 'text', text: fallbackNote() })
   }
   const system = composeSystem(systemPrompt, skills)
@@ -182,9 +196,17 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     // system prompt now holds only the stable parts (rules + project notes,
     // read once per turn); the live record rides at the END as its own message.
     const state = await agentStateParts(userId, sessionId)
-    if (step === 0) messages[0].content = system + state.notes
     const record = { role: 'user', content: state.record }
     const recordTokens = estimateTokens(record)
+    if (step === 0 || rewriteSystem) {
+      rewriteSystem = false
+      messages[0].content = system + state.notes
+      // NEXUS.md can be ~3k tokens. If the fixed parts would not fit this
+      // window, send a pointer to the file instead of failing the message.
+      if (state.notes && estimateTokens(messages[0]) + recordTokens + 256 > promptBudget) {
+        messages[0].content = system + NOTES_POINTER
+      }
+    }
     if (estimateTokens(messages[0]) + recordTokens + 256 > promptBudget) throw new Error('Instructions and tool definitions exceed this model context. Reduce injected notes/connectors or use a larger context.')
     let resp
     try {
