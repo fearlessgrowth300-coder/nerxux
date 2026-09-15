@@ -14,6 +14,7 @@ import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { getComputeStatus, ensureTurboReady, takeFallbackReason } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
+import { watchReadProgress } from '../lib/ollamaReadProgress.js'
 
 // Some Ollama-fronting proxies return `error` as an object ({message, type})
 // instead of a plain string. `new Error(object)` stringifies it to the
@@ -117,6 +118,62 @@ export function learnReadSpeed(model, isRunpod, estimatedTokens, data) {
   readScale.set(key, prev ? (prev + scale) / 2 : scale)
 }
 export function resetReadSpeeds() { readScale.clear() }
+
+// Reads an Ollama /api/chat reply. Requests stream, so the chat can show the
+// model writing (tokens, its thinking) as it happens instead of minutes of
+// silence; a single JSON body (test doubles, older proxies) still works.
+// `onChunk({ content, thinking, chunks })` fires for every streamed piece.
+export async function readChatResponse(resp, onChunk = () => {}) {
+  if (!resp.body || typeof resp.body.getReader !== 'function') return resp.json()
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let content = ''
+  let thinking = ''
+  let chunks = 0
+  const toolCalls = []
+  let last = {}
+  let error = null
+  const take = (line) => {
+    if (!line.trim()) return
+    let j
+    try { j = JSON.parse(line) } catch { return }
+    if (j.error) { error = j.error; return }
+    const m = j.message || {}
+    if (m.content) content += m.content
+    if (m.thinking) thinking += m.thinking
+    if (Array.isArray(m.tool_calls)) toolCalls.push(...m.tool_calls)
+    chunks++
+    last = j
+    onChunk({ content, thinking, chunks })
+  }
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop()
+    for (const line of lines) take(line)
+    if (error) break
+  }
+  if (!error) take(buf + decoder.decode())
+  if (error) {
+    reader.cancel().catch(() => {})
+    return { error }
+  }
+  return {
+    ...last,
+    message: {
+      ...(last.message || {}),
+      role: 'assistant',
+      content,
+      ...(thinking ? { thinking } : {}),
+      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+    },
+  }
+}
+
+const tail = (text, n = 280) => { const t = String(text || '').trim(); return t.length > n ? '…' + t.slice(-n) : t }
 
 const fmtMinutes = (s) => (s < 90 ? `${Math.max(1, Math.round(s))} s` : `${Math.round(s / 60)} min`)
 
@@ -326,7 +383,36 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     }
     // The budget also bounds the request itself, not only the gap between requests.
     const deadline = AbortSignal.timeout(Math.max(1000, remainingMs))
+    // Live status for the chat card: what the model is doing right now. It
+    // replaces the previous status rather than piling up in the activity log.
+    const target = isRunpod ? 'Turbo' : 'Always On'
+    const readStart = Date.now()
+    const status = (extra) => onProgress({ type: 'status', target, step: step + 1, promptTokens, ...extra })
+    status({ phase: 'reading', startedAt: readStart, estSeconds: readSeconds })
+    // Always On: the real read progress from Ollama's own log (see ollamaReadProgress.js).
+    const stopWatch = isRunpod ? () => {} : watchReadProgress((p) => {
+      status({ phase: 'reading', startedAt: readStart, estSeconds: readSeconds, read: { ...p, at: Date.now() } })
+    })
+    let writeStart = 0
+    let lastStatusAt = 0
+    const onChunk = ({ content, thinking, chunks }) => {
+      const now = Date.now()
+      if (!writeStart) { writeStart = now; stopWatch() }
+      if (now - lastStatusAt < 1000) return
+      lastStatusAt = now
+      const secs = (now - writeStart) / 1000
+      status({
+        phase: 'writing',
+        startedAt: writeStart,
+        readSeconds: Math.round((writeStart - readStart) / 1000),
+        tokens: chunks,
+        tokPerSec: secs > 0.5 ? Math.round((chunks / secs) * 10) / 10 : null,
+        thinking: content ? '' : tail(thinking),
+        text: tail(content),
+      })
+    }
     let resp
+    let data
     try {
       resp = await fetch(`${targetUrl}/api/chat`, {
         dispatcher: OLLAMA_DISPATCHER,
@@ -336,12 +422,14 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           model: sendModel,
           messages: stepMessages,
           tools: agentTools,
-          stream: false,
+          stream: true,
           options: { num_predict: numPredict, num_ctx: numCtx },
         }),
         signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       })
+      if (resp.ok) data = await readChatResponse(resp, onChunk)
     } catch (e) {
+      stopWatch()
       if (signal?.aborted) throw e // client disconnected — stop, don't burn CPU on a dead request
       if (deadline.aborted) { timedOut = true; break }
       const cause = e.cause?.code || e.cause?.message || ''
@@ -370,12 +458,15 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       )
     }
 
-    if (!resp.ok) {
-      let msg = `Ollama returned ${resp.status}`
-      try {
-        const j = await resp.json()
-        if (j.error) msg = errorText(j.error)
-      } catch {}
+    stopWatch()
+    if (!resp.ok || data?.error) {
+      let msg = data?.error ? errorText(data.error) : `Ollama returned ${resp.status}`
+      if (!data?.error) {
+        try {
+          const j = await resp.json()
+          if (j.error) msg = errorText(j.error)
+        } catch {}
+      }
       // Ollama could not parse the tool call the model emitted — almost always
       // a call cut off part-way, leaving an unclosed element. Losing the whole
       // turn to that is wrong when asking for a smaller call usually works.
@@ -413,7 +504,6 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       )
     }
 
-    const data = await resp.json()
     learnReadSpeed(sendModel, isRunpod, promptTokens, data)
     const msg = data.message || {}
     const rawContent = msg.content || ''
@@ -498,6 +588,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     const observe = (name, content) => messages.push(nativeCalls ? { role: 'tool', tool_name: name, content: redactToolData(content) } : { role: 'user', content: redactToolData(content) })
 
     for (const call of detectedCalls) {
+      status({ phase: 'tool', tool: call.name, args: Object.fromEntries(Object.entries(call.args || {}).map(([k, v]) => [k, String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 200)])), startedAt: Date.now() })
       const callKey = call.name + ' ' + JSON.stringify(call.args)
       const times = (seenCalls.get(callKey) || 0) + 1
       seenCalls.set(callKey, times)

@@ -44,7 +44,7 @@ export async function pollJob(jobId, { signal, onProgress } = {}) {
         if (err?.response?.status === 404 || ++failures >= MAX_POLL_FAILURES) throw err
         continue
       }
-      if (job.status === 'running') { if (job.events?.length) onProgress?.(job.events); continue }
+      if (job.status === 'running') { if (job.events?.length || job.live) onProgress?.(job.events || [], job.live ? { ...job.live, clockOffset: job.now ? Date.now() - job.now : 0 } : null); continue }
       if (job.status === 'cancelled') throw new Error('Stopped.')
       if (job.status !== 'done') throw new Error(job.error || 'Chat request failed')
       // `duplicate`: another device already collected (and saved) this reply.

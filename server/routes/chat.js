@@ -264,7 +264,12 @@ router.post('/', async (req, res, next) => {
     // The conversation id travels as sessionId, so an uncollected reply can
     // still be written to the right chat.
     const job = createJob(req.user.id, controller, Date.now(), req.body?.sessionId || null)
-    const onProgress = (event) => { job.events.push({ ...event, at: Date.now() }) }
+    // `status` events are the model's live state (reading 62%, writing, running
+    // a tool) — only the latest matters, so it replaces rather than piles up.
+    const onProgress = (event) => {
+      if (event?.type === 'status') job.live = { ...event, at: Date.now() }
+      else job.events.push({ ...event, at: Date.now() })
+    }
     handleChat(req.user.id, req.body, controller.signal, onProgress)
       .then((result) => completeJob(job, result))
       .catch((err) => failJob(job, err))
@@ -294,7 +299,7 @@ router.get('/jobs/:id', (req, res) => {
   if (!job) {
     return res.status(404).json({ error: 'That request has expired — please resend your message.' })
   }
-  if (job.status === 'running') return res.json({ status: 'running', events: job.events })
+  if (job.status === 'running') return res.json({ status: 'running', events: job.events, live: job.live || null, now: Date.now() })
   // Two devices watching the same job BOTH collected the result and both saved
   // it, so the conversation got the reply twice. Only the first collector saves;
   // any later one is told it is a duplicate and just displays it.

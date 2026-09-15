@@ -86,6 +86,9 @@ export default function Chat() {
   const taRef = useRef(null)
   const abortRef = useRef(null) // aborts the in-flight turn (Stop button)
   const [liveEvents, setLiveEvents] = useState([]) // what the agent is doing right now
+  const [liveStatus, setLiveStatus] = useState(null) // reading / writing / running a tool, right now
+  const showLive = (events, status) => { setLiveEvents(events || []); setLiveStatus(status || null) }
+  const clearLive = () => { setLiveEvents([]); setLiveStatus(null) }
   // The server job for the reply in flight — persisted so that closing or
   // reloading the app (or a phone suspending the page) re-attaches to it
   // instead of losing a long build's result.
@@ -98,9 +101,9 @@ export default function Chat() {
     setError('')
     const controller = new AbortController()
     abortRef.current = controller
-    setLiveEvents([])
+    clearLive()
     try {
-      const { messages: replies, routing, duplicate } = await pollJob(job.jobId, { signal: controller.signal, onProgress: setLiveEvents })
+      const { messages: replies, routing, duplicate } = await pollJob(job.jobId, { signal: controller.signal, onProgress: showLive })
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
@@ -128,7 +131,7 @@ export default function Chat() {
     } finally {
       setPendingJob(null)
       abortRef.current = null
-      setLiveEvents([])
+      clearLive()
       busyRef.current = false
       setSending(false)
     }
@@ -308,7 +311,7 @@ export default function Chat() {
 
     const controller = new AbortController()
     abortRef.current = controller
-    setLiveEvents([])
+    clearLive()
     try {
       const systemPrompt = await buildSystemPrompt()
       const { messages: replies, routing, duplicate } = await sendChat({
@@ -320,7 +323,7 @@ export default function Chat() {
         connectorIds: [...activeConnectors],
         sessionId: convId,
         signal: controller.signal,
-        onProgress: setLiveEvents,
+        onProgress: showLive,
         onJob: (jobId) => setPendingJob({ jobId, conversationId: convId, model: modelA }),
       })
       setPendingJob(null)
@@ -351,7 +354,7 @@ export default function Chat() {
     } finally {
       setPendingJob(null)
       abortRef.current = null
-      setLiveEvents([])
+      clearLive()
       busyRef.current = false
       setSending(false)
     }
@@ -431,7 +434,7 @@ export default function Chat() {
       abortRef.current = null // Stop must never cancel a job you have left
       busyRef.current = false
       setSending(false)
-      setLiveEvents([])
+      clearLive()
       setPendingJob(null)
     }
     busyRef.current = true
@@ -609,7 +612,7 @@ export default function Chat() {
                           onEdit={(content) => handleSend({ id: m.id, content })} disabled={sending || opening || !ready || uploading} />
               )}
               {sending && (
-                <WorkingCard events={liveEvents} label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
+                <WorkingCard events={liveEvents} status={liveStatus} label={pipelineActive ? `${getModelById(modelA)?.label} → ${getModelById(modelB)?.label}` : getModelById(modelA)?.label} />
               )}
             </div>
           </div>
@@ -1170,7 +1173,7 @@ function CardField({ label, value }) {
 // Live view of the turn in progress: every tool action the agent has run so
 // far and what it said in between — the same trail a terminal agent prints —
 // instead of three dots for minutes.
-function WorkingCard({ label, events = [] }) {
+function WorkingCard({ label, events = [], status = null }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const tools = events.filter((e) => e.type === 'tool')
   const lastText = [...events].reverse().find((e) => e.type === 'text')?.text
@@ -1183,6 +1186,7 @@ function WorkingCard({ label, events = [] }) {
   const lastAt = events.length ? events[events.length - 1].at || now : startRef.current
   const fmt = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s` }
   const idle = now - lastAt
+  const live = describeStatus(status, now, fmt)
   return (
     <div className="flex justify-start">
       <div className="w-full min-w-0 sm:max-w-[85%]">
@@ -1190,12 +1194,17 @@ function WorkingCard({ label, events = [] }) {
         <div className="min-w-0 rounded-2xl border border-nexus-border bg-nexus-panel px-4 py-3 text-sm">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-gray-300">
             <span className="inline-flex items-center gap-1"><Dot delay="0ms" /><Dot delay="150ms" /><Dot delay="300ms" /></span>
-            <span>{tools.length ? `Working — ${tools.length} tool action${tools.length === 1 ? '' : 's'} so far` : 'Thinking…'}</span>
+            <span>{live?.headline || (tools.length ? `Working — ${tools.length} tool action${tools.length === 1 ? '' : 's'} so far` : 'Thinking…')}</span>
             <span className="text-xs text-gray-500">· {fmt(now - startRef.current)} elapsed</span>
-            <span className={['text-xs', idle > 90000 ? 'text-amber-400' : 'text-gray-500'].join(' ')}>
-              · {idle < 3000 ? 'activity received' : `no new activity for ${fmt(idle)}`}
-            </span>
+            {live
+              ? tools.length > 0 && <span className="text-xs text-gray-500">· {tools.length} tool action{tools.length === 1 ? '' : 's'} so far</span>
+              : (
+                <span className={['text-xs', idle > 90000 ? 'text-amber-400' : 'text-gray-500'].join(' ')}>
+                  · {idle < 3000 ? 'activity received' : `no new activity for ${fmt(idle)}`}
+                </span>
+              )}
           </div>
+          {live && <LiveStatus live={live} />}
           {recent.length > 0 && (
             <button type="button" aria-expanded={detailsOpen} onClick={() => setDetailsOpen(v => !v)}
               className="mt-2 rounded px-1 py-1 text-xs text-gray-300 hover:bg-white/5">
@@ -1222,6 +1231,73 @@ function WorkingCard({ label, events = [] }) {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+// Turns the adapter's live status into what the card shows. Times come from
+// the server clock; `clockOffset` lines them up with this device's clock.
+function describeStatus(status, now, fmt) {
+  if (!status?.phase) return null
+  const serverNow = now - (status.clockOffset || 0)
+  const since = Math.max(0, serverNow - (status.startedAt || serverNow))
+  const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)))
+  const who = status.target ? `${status.target} · ` : ''
+  const stepNote = status.step > 1 ? ` · step ${status.step}` : ''
+  if (status.phase === 'reading') {
+    const r = status.read
+    if (r?.totalTokens) {
+      // Ollama logs every ~1k tokens; fill the gap between log lines at the
+      // measured speed, never past the next line it will print.
+      const gap = Math.max(0, serverNow - r.at) / 1000
+      const tokens = Math.min(r.tokens + gap * r.tokPerSec, r.tokens + 1024, r.totalTokens)
+      const pct = Math.min(99, Math.floor((tokens / r.totalTokens) * 100))
+      const left = r.tokPerSec > 0 ? Math.max(0, (r.totalTokens - tokens) / r.tokPerSec) * 1000 : null
+      return {
+        headline: `Reading your chat — ${pct}%`,
+        pct,
+        detail: `${who}${k(tokens)} of ${k(r.totalTokens)} tokens · ${Math.round(r.tokPerSec)} tok/s${left != null ? ` · about ${fmt(left)} left` : ''}${stepNote}`,
+      }
+    }
+    const est = (status.estSeconds || 0) * 1000
+    const pct = est > 0 ? Math.min(95, Math.floor((since / est) * 100)) : null
+    return {
+      headline: pct != null ? `Reading your chat — ~${pct}%` : 'Reading your chat…',
+      pct,
+      detail: `${who}about ${k(status.promptTokens || 0)} tokens · ${fmt(since)} so far${est ? (since < est ? ` · about ${fmt(est - since)} left (estimate)` : ' · taking longer than estimated') : ''}${stepNote}`,
+    }
+  }
+  if (status.phase === 'writing') {
+    const thinking = Boolean(status.thinking) && !status.text
+    return {
+      headline: thinking ? 'Thinking it through…' : 'Writing…',
+      detail: `${who}${status.tokens || 0} tokens${status.tokPerSec ? ` · ${status.tokPerSec} tok/s` : ''}${status.readSeconds > 5 ? ` · read the chat in ${fmt(status.readSeconds * 1000)}` : ''}${stepNote}`,
+      stream: thinking ? status.thinking : status.text,
+      streamKind: thinking ? 'thinking' : 'text',
+    }
+  }
+  if (status.phase === 'tool') {
+    return {
+      headline: `Running ${status.tool}`,
+      detail: `${summarizeArgs(status.args || {})} · ${fmt(since)}${stepNote}`,
+      mono: true,
+    }
+  }
+  return null
+}
+function LiveStatus({ live }) {
+  return (
+    <div className="mt-2 space-y-1.5">
+      {live.pct != null && (
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/5" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={live.pct}>
+          <div className="h-full rounded-full bg-nexus-accent transition-[width] duration-1000 ease-linear" style={{ width: `${live.pct}%` }} />
+        </div>
+      )}
+      <p className={['break-words text-xs text-gray-400', live.mono ? 'font-mono' : ''].join(' ')}>{live.detail}</p>
+      {live.stream && (
+        <p className={['line-clamp-3 whitespace-pre-wrap break-words rounded-lg bg-black/20 px-2 py-1.5 text-xs', live.streamKind === 'thinking' ? 'italic text-gray-500' : 'text-gray-300'].join(' ')}>
+          {live.stream}
+        </p>
+      )}
     </div>
   )
 }
