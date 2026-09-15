@@ -61,12 +61,13 @@ export async function deleteConversation(id) {
 export async function listMessages(conversationId) {
   const { data, error } = await supabase
     .from('conversation_messages')
-    .select('data')
+    .select('id, data')
     .eq('conversation_id', conversationId)
     .order('created_at', { ascending: true })
   if (error) throw error
-  // Each row's `data` is the original message object.
-  return (data ?? []).map((r) => r.data).filter(Boolean)
+  // Each row's `data` is the original message object. Replies the server saved
+  // on its own used to be stored without an id; fall back to the row's id.
+  return (data ?? []).filter((r) => r.data).map((r) => (r.data.id ? r.data : { ...r.data, id: r.id }))
 }
 
 // Postgres text/jsonb cannot hold U+0000, and tool output sometimes contains it

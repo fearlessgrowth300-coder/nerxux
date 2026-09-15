@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  createJob, completeJob, failJob, touchJob, sweepJobs, saveGraveyard, loadGraveyard, setRescueHandler, listRunningJobs, STALE_MS, RESULT_TTL_MS,
+  createJob, completeJob, failJob, touchJob, sweepJobs, saveGraveyard, loadGraveyard, setRescueHandler, listRunningJobs, STALE_MS, RESULT_TTL_MS, SAVED_TTL_MS,
 } from '../lib/chatJobs.js'
 
 const GRAVEYARD_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../.chat-jobs-graveyard.json')
@@ -106,6 +106,18 @@ test('a reply nobody collected is handed somewhere durable before it is dropped'
   sweepJobs(1000 + RESULT_TTL_MS + 1)
   assert.equal(rescued.length, 1, 'the uncollected result must be saved, not binned')
   assert.equal(rescued[0].conversationId, 'conv-1')
+  setRescueHandler(null)
+})
+
+test('polling a reply that was saved to history says so instead of "expired"', () => {
+  setRescueHandler(() => {})
+  const job = createJob('u1', { abort() {} }, 0, 'conv-1')
+  completeJob(job, { messages: [{ role: 'assistant', content: 'the finished work' }] }, 1000)
+  sweepJobs(1000 + RESULT_TTL_MS + 1)
+  assert.deepEqual(touchJob(job.id, 'u1', 1000 + RESULT_TTL_MS + 2), { status: 'saved', conversationId: 'conv-1' })
+  assert.equal(touchJob(job.id, 'someone-else', 1000 + RESULT_TTL_MS + 2), null, "never tells another user where a reply went")
+  sweepJobs(1000 + RESULT_TTL_MS + SAVED_TTL_MS + 2)
+  assert.equal(touchJob(job.id, 'u1', 1000 + RESULT_TTL_MS + SAVED_TTL_MS + 3), null, 'forgotten after a day')
   setRescueHandler(null)
 })
 

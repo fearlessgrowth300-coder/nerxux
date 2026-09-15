@@ -51,11 +51,15 @@ setRescueHandler(async (job) => {
       role: m.role,
       content: typeof m.content === 'string' ? m.content : '',
       model: m.model || null,
-      data: m,
+      // The client gives every message an id when it collects a reply; a
+      // rescued one never passed through the client, so it has to get one here.
+      data: { id: m.id || randomUUID(), ...m },
       created_at: new Date(now + i).toISOString(),
     }))
   )
-  if (error) logErrorSummary('rescueReply', error)
+  if (error) return logErrorSummary('rescueReply', error)
+  // Bump the chat so History shows it as the latest one.
+  await supabaseAdmin.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', job.conversationId)
 })
 router.use(requireAuth)
 
@@ -300,6 +304,8 @@ router.get('/jobs/:id', (req, res) => {
     return res.status(404).json({ error: 'That request has expired — please resend your message.' })
   }
   if (job.status === 'running') return res.json({ status: 'running', events: job.events, live: job.live || null, now: Date.now() })
+  // Finished while nobody was polling and already written into the chat.
+  if (job.status === 'saved') return res.json({ status: 'saved', conversationId: job.conversationId })
   // Two devices watching the same job BOTH collected the result and both saved
   // it, so the conversation got the reply twice. Only the first collector saves;
   // any later one is told it is a duplicate and just displays it.

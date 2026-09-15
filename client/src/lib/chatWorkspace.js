@@ -27,6 +27,23 @@ export function writeWorkspace(storage, key, workspace, saveHistory = true) {
   } catch {} // Storage quota must not prevent chatting.
 }
 
+// True when the conversation already holds an answer to its latest message —
+// i.e. a reply the server saved while this device wasn't watching.
+export function hasReplyToLastMessage(messages) {
+  const lastUser = messages.map((m) => m.role).lastIndexOf('user')
+  return lastUser >= 0 && messages.slice(lastUser + 1).some((m) => m.role === 'assistant' && !m.error)
+}
+
+// Cloud history plus what only this device has (a turn sent but not synced).
+// Local error cards ("⚠️ That request has expired…") are dropped once the
+// cloud copy holds the real reply — otherwise the stale error stays pinned
+// under the answer and it looks like nothing came back.
+export function mergeHistory(cloud, local = []) {
+  const ids = new Set(cloud.map((m) => m.id).filter(Boolean))
+  const answered = hasReplyToLastMessage(cloud)
+  return [...cloud, ...local.filter((m) => !ids.has(m.id) && !(answered && m.error))]
+}
+
 export function editedHistory(messages, id, content) {
   const index = messages.findIndex(m => m.id === id && m.role === 'user')
   if (index < 0 || !content.trim()) throw new Error('Enter a message to resend.')

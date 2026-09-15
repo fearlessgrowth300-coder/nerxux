@@ -45,13 +45,19 @@ export async function pollJob(jobId, { signal, onProgress } = {}) {
         continue
       }
       if (job.status === 'running') { if (job.events?.length || job.live) onProgress?.(job.events || [], job.live ? { ...job.live, clockOffset: job.now ? Date.now() - job.now : 0 } : null); continue }
+      // Finished while nobody was polling; the server already wrote the reply
+      // into the conversation. The caller reloads the chat to show it.
+      if (job.status === 'saved') return { messages: [], routing: null, duplicate: true, saved: true }
       if (job.status === 'cancelled') throw new Error('Stopped.')
       if (job.status !== 'done') throw new Error(job.error || 'Chat request failed')
       // `duplicate`: another device already collected (and saved) this reply.
       return { messages: job.result.messages, routing: job.result.routing || null, duplicate: Boolean(job.duplicate) }
     }
   } catch (err) {
-    throw apiError(err, 'Chat request failed')
+    const error = apiError(err, 'Chat request failed')
+    // The server no longer knows this job — its reply may still be in History.
+    if (err?.response?.status === 404) error.expired = true
+    throw error
   } finally {
     signal?.removeEventListener('abort', stop)
   }
@@ -107,6 +113,7 @@ export async function sendChat({
     onJob?.(data.jobId)
     return await pollJob(data.jobId, { signal, onProgress })
   } catch (err) {
+    if (err?.expired) throw err // already converted by pollJob; keep the flag
     throw apiError(err, 'Chat request failed')
   }
 }

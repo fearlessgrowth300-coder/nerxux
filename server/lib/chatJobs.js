@@ -58,6 +58,14 @@ export function setRescueHandler(fn) { rescueUndelivered = fn }
 // disk on shutdown and read them once on startup, so the very next poll
 // gets an honest, specific answer instead.
 const graveyard = new Map() // id -> userId
+
+// A result nobody collected is written into its conversation and dropped from
+// `jobs`. The client that comes back later still polls the old id, and used to
+// get "That request has expired — please resend" for a reply that was sitting
+// in History; resending re-ran a 50-minute Always On turn. Remember where each
+// rescued reply went so that poll can say "it's saved, reload the chat".
+const savedJobs = new Map() // id -> { userId, conversationId, at }
+export const SAVED_TTL_MS = 24 * 60 * 60_000
 // Exported for tests — production just calls it once at import time, below.
 export function loadGraveyard() {
   try {
@@ -121,6 +129,8 @@ export function touchJob(id, userId, now = Date.now()) {
     job.lastSeen = now
     return job
   }
+  const saved = savedJobs.get(id)
+  if (saved && saved.userId === userId) return { status: 'saved', conversationId: saved.conversationId }
   if (graveyard.get(id) === userId) {
     return {
       status: 'error',
@@ -155,10 +165,13 @@ export function sweepJobs(now = Date.now()) {
     } else if (job.status !== 'running' && now - job.finishedAt > RESULT_TTL_MS) {
       if (!job.delivered && job.status === 'done' && job.conversationId && rescueUndelivered) {
         Promise.resolve(rescueUndelivered(job)).catch(() => {})
+        savedJobs.set(job.id, { userId: job.userId, conversationId: job.conversationId, at: now })
+        logJob('saved-to-history', job, now)
       }
       jobs.delete(job.id)
     }
   }
+  for (const [id, saved] of savedJobs) if (now - saved.at > SAVED_TTL_MS) savedJobs.delete(id)
 }
 
 // What is this user still running? localStorage is not a reliable record of

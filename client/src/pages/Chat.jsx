@@ -22,7 +22,7 @@ import {
   deleteConversation,
 } from '../lib/conversations'
 import { getModelById } from '@shared/models'
-import { readWorkspace, writeWorkspace, editedHistory } from '../lib/chatWorkspace'
+import { readWorkspace, writeWorkspace, editedHistory, mergeHistory, hasReplyToLastMessage } from '../lib/chatWorkspace'
 
 const CHIPS = [
   { label: 'Code', Icon: FileIcon, text: 'Help me write code that ' },
@@ -94,6 +94,19 @@ export default function Chat() {
   // instead of losing a long build's result.
   const [pendingJob, setPendingJob] = useState(null)
 
+  // The job finished while this device wasn't polling, so the server wrote the
+  // reply into the conversation itself. Show it from History instead of
+  // telling the user to resend (which re-runs the whole turn). Returns false
+  // if History doesn't hold an answer, so the caller can report the failure.
+  async function recoverFromHistory(conversationId) {
+    if (!conversationId) return false
+    let msgs
+    try { msgs = await listMessages(conversationId) } catch { return false }
+    if (!hasReplyToLastMessage(msgs)) return false
+    if (conversationId === convIdRef.current) setMessages((prev) => mergeHistory(msgs, prev))
+    return true
+  }
+
   async function resumePendingJob(job) {
     if (busyRef.current) return
     busyRef.current = true
@@ -103,7 +116,9 @@ export default function Chat() {
     abortRef.current = controller
     clearLive()
     try {
-      const { messages: replies, routing, duplicate } = await pollJob(job.jobId, { signal: controller.signal, onProgress: showLive })
+      const { messages: replies, routing, duplicate, saved } = await pollJob(job.jobId, { signal: controller.signal, onProgress: showLive })
+      if (saved && await recoverFromHistory(job.conversationId)) return
+      if (saved) throw new Error('The reply finished and was saved to this chat — reload to see it.')
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
@@ -118,6 +133,7 @@ export default function Chat() {
         catch (err) { setError(`Could not sync the reply (${err?.message || err}). A local copy is saved on this device.`) }
       }
     } catch (e) {
+      if (e.expired && await recoverFromHistory(job.conversationId)) return
       // Same rule as the success path: a failure belongs to the conversation
       // the job was started in. Appending it to whatever is on screen is how
       // "Stopped." turned up inside an unrelated chat.
@@ -178,13 +194,14 @@ export default function Chat() {
           if (cancelled) return
           setConversationId(selected.id); convIdRef.current = selected.id
           // Keep a locally saved in-flight turn when reloading before the reply.
-          const ids = new Set(msgs.map(m => m.id))
-          setMessages([...msgs, ...(saved?.messages || []).filter(m => !ids.has(m.id))])
+          setMessages(mergeHistory(msgs, saved?.messages || []))
         } else if (saved?.conversationId) {
           setConversationId(null); convIdRef.current = null
         }
       })
-      .catch(() => {}) // not signed in / table missing -> stay on local draft
+      // Stay on the local draft — but say so. Silently showing the device's
+      // copy is how a reply saved in History looked like it never came back.
+      .catch((err) => { if (!cancelled) setError(`Could not load chat history (${err?.message || err}). Showing the copy on this device.`) })
       .finally(async () => {
         if (cancelled) return
         restoredKeyRef.current = storageKey
@@ -314,7 +331,7 @@ export default function Chat() {
     clearLive()
     try {
       const systemPrompt = await buildSystemPrompt()
-      const { messages: replies, routing, duplicate } = await sendChat({
+      const { messages: replies, routing, duplicate, saved } = await sendChat({
         history: history.map(({ role, content }) => ({ role, content })),
         modelA, modelB, pipeline, systemPrompt, videoContext, auto,
         attachments: media,
@@ -327,6 +344,8 @@ export default function Chat() {
         onJob: (jobId) => setPendingJob({ jobId, conversationId: convId, model: modelA }),
       })
       setPendingJob(null)
+      if (saved && await recoverFromHistory(convId)) return
+      if (saved) throw new Error('The reply finished and was saved to this chat — reload to see it.')
       const toAdd = []
       if (routing) toAdd.push({ id: uuid(), role: 'routing', routing })
       for (const r of replies) toAdd.push({ id: uuid(), ...r })
@@ -338,6 +357,7 @@ export default function Chat() {
         catch (err) { setError(`Could not sync the reply (${err?.message || err}). A local copy is saved on this device.`) }
       }
     } catch (e) {
+      if (e.expired && !controller.signal.aborted && await recoverFromHistory(convId)) return
       if (controller.signal.aborted) {
         // The user pressed Stop — keep whatever the agent got done as a note, no error styling.
         const done = liveEventsRef.current.filter((ev) => ev.type === 'tool')
