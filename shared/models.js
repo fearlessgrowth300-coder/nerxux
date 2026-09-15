@@ -122,9 +122,11 @@ export const CHAT_MODELS = [
     vision: false,
   },
   {
-    // Qwen 3.8 27B Uncensored running on Hostinger KVM 8 (Always On) and Runpod GPU (Turbo)
+    // Turbo (RunPod GPU) runs this 27B. Always On (VPS CPU) sends
+    // ALWAYS_ON_MODEL instead — Qwen3.6 35B-A3B abliterated, ~3x faster there
+    // (server/adapters/ollama.js). The id stays the same so saved chats keep working.
     id: 'qwen3-8-runpod',
-    label: 'Qwen 3.8 27B Uncensored (Always On / Turbo)',
+    label: 'Qwen Uncensored (Turbo: 3.8 27B · Always On: 3.6 35B-A3B)',
     provider: 'ollama',
     apiModel: 'orcarouter/Qwen3.8-27B-Uncensored:latest',
     vision: false,

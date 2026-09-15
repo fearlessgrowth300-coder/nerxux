@@ -63,6 +63,49 @@ export function estimateReadSeconds(tokens, isRunpod) {
 // sent when it can be read in about this long.
 export const WRAPUP_MAX_READ_S = 480
 
+// Always On runs a faster model than Turbo. The dense 27B needs up to an hour
+// per agent step on the VPS CPU; a mixture-of-experts model with ~3B active
+// parameters does each step with a fraction of the compute. Turbo keeps the
+// 27B. Only the 27B's names are swapped — any other model is sent as picked.
+// Override with ALWAYS_ON_MODEL (e.g. back to the 27B) without a code change.
+export const ALWAYS_ON_MODEL = process.env.ALWAYS_ON_MODEL || 'huihui_ai/Qwen3.6-abliterated:35b-a3b'
+const BIG_QWEN = new Set([
+  'orcarouter/Qwen3.8-27B-Uncensored:latest', 'orcarouter/Qwen3.8-27B-Uncensored',
+  'qwen3.8-27b:latest', 'nexus-mine', 'nexus-mine:latest',
+])
+export function modelForTarget(model, isRunpod) {
+  const m = model || 'nexus-mine'
+  return !isRunpod && BIG_QWEN.has(m) ? ALWAYS_ON_MODEL : m
+}
+
+// estimateReadSeconds is fitted to the 27B. Other models read at their own
+// speed, so the adapter learns a per-model scale from Ollama's own timings
+// (prompt_eval_count / prompt_eval_duration on every response). Without this
+// a faster model would be refused steps it can easily do.
+// Starting scale measured on the VPS 2026-09-15: Qwen3.6-35B-A3B read a
+// 4,179-token prompt in 65 s cold (19 s warm) vs ~309 s fitted for the 27B,
+// and wrote at 15.4 tok/s (27B: 4.9). The cold figure is used; it learns from there.
+const INITIAL_READ_SCALE = {
+  'always_on|huihui_ai/Qwen3.6-abliterated:35b-a3b': 0.21,
+}
+const readScale = new Map()
+const speedKey = (model, isRunpod) => `${isRunpod ? 'turbo' : 'always_on'}|${model}`
+export function readSecondsFor(model, isRunpod, tokens) {
+  const key = speedKey(model, isRunpod)
+  return Math.ceil(estimateReadSeconds(tokens, isRunpod) * (readScale.get(key) ?? INITIAL_READ_SCALE[key] ?? 1))
+}
+export function learnReadSpeed(model, isRunpod, estimatedTokens, data) {
+  const count = Number(data?.prompt_eval_count)
+  const seconds = Number(data?.prompt_eval_duration) / 1e9
+  // A small prompt, or one mostly served from cache, says nothing about a full read.
+  if (!(count >= 500) || !(seconds > 0) || count < estimatedTokens * 0.5) return
+  const scale = Math.min(3, Math.max(0.02, seconds / estimateReadSeconds(estimatedTokens, isRunpod)))
+  const key = speedKey(model, isRunpod)
+  const prev = readScale.get(key)
+  readScale.set(key, prev ? (prev + scale) / 2 : scale)
+}
+export function resetReadSpeeds() { readScale.clear() }
+
 const fmtMinutes = (s) => (s < 90 ? `${Math.max(1, Math.round(s))} s` : `${Math.round(s / 60)} min`)
 
 function composeSystem(systemPrompt = '', skills = []) {
@@ -208,6 +251,8 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // cancelled. The budget used to be checked only BETWEEN steps, so one step
   // that took 63 minutes on Always On ran straight past a 25-minute budget.
   let timedOut = false
+  // The model actually sent (Always On swaps the 27B for ALWAYS_ON_MODEL).
+  let usedModel = modelForTarget(model, isRunpod)
 
   for (let step = 0; step < MAX_STEPS; step++) {
     // The budget check used to live only on the text-answer path, so a model
@@ -236,7 +281,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     // a conversation that fitted at the start need not fit by step 40.
     const stepMessages = [...fitMessages(messages, promptBudget - recordTokens).messages, record]
     const promptTokens = stepMessages.reduce((n, m) => n + estimateTokens(m), 0) + estimateTokens(JSON.stringify(agentTools))
-    const readSeconds = estimateReadSeconds(promptTokens, isRunpod)
+    const sendModel = modelForTarget(model, isRunpod)
+    usedModel = sendModel
+    const readSeconds = readSecondsFor(sendModel, isRunpod, promptTokens)
     const remainingMs = WALL_CLOCK_BUDGET_MS - (Date.now() - requestStart)
     // Don't start a step that cannot even be read in the time left: it would
     // run for up to an hour and then be thrown away. Say why, plainly.
@@ -264,7 +311,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: model || 'nexus-mine',
+          model: sendModel,
           messages: stepMessages,
           tools: agentTools,
           stream: false,
@@ -318,7 +365,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         console.error('[nexus-ai] tool-call parse failure:', JSON.stringify({
           error: msg.slice(0, 200),
           target: isRunpod ? 'turbo' : 'always_on',
-          model: model || 'nexus-mine',
+          model: sendModel,
           step,
           numPredict,
           toolsOffered: agentTools.length,
@@ -345,6 +392,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     }
 
     const data = await resp.json()
+    learnReadSpeed(sendModel, isRunpod, promptTokens, data)
     const msg = data.message || {}
     const rawContent = msg.content || ''
 
@@ -508,7 +556,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     const wrapTokens = wrapMessages.reduce((n, m) => n + estimateTokens(m), 0)
     // Only when it is quick: on Always On this summary re-read the whole
     // conversation and kept the user waiting another half hour for a note.
-    if (estimateReadSeconds(wrapTokens, isRunpod) <= WRAPUP_MAX_READ_S) {
+    if (readSecondsFor(modelForTarget(model, isRunpod), isRunpod, wrapTokens) <= WRAPUP_MAX_READ_S) {
       try {
         const wrapDeadline = AbortSignal.timeout((WRAPUP_MAX_READ_S + 180) * 1000)
         const r = await fetch(`${targetUrl}/api/chat`, {
@@ -516,7 +564,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: model || 'nexus-mine',
+            model: modelForTarget(model, isRunpod),
             messages: wrapMessages,
             stream: false,
             options: { num_predict: 1500, num_ctx: numCtx },
@@ -543,15 +591,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     type: mediaOut.length ? mediaOut[0].type : 'text',
     content: redactToolData(completion.content),
     verificationStatus: completion.verificationStatus,
-    model: dataModel(model),
+    model: usedModel,
     toolSteps: redactToolData(toolSteps),
     ...(mediaOut.length ? { media: mediaOut[0], mediaList: mediaOut } : {}),
   }
 }
 
-function dataModel(m) {
-  return m || 'nexus-mine'
-}
 
 // A turn that ends by asking the user whether to proceed, or by announcing
 // what it will do next ("Now let me build out the files:") without a tool

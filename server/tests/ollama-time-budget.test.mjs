@@ -5,7 +5,9 @@ import assert from 'node:assert/strict'
 // re-read from zero at CPU speed), ran straight past the 25-minute budget, then
 // started a no-tools summary that would have re-read everything again. The chat
 // sat on "Thinking…" for hours. These pin the fixes.
-const { run, estimateReadSeconds, WRAPUP_MAX_READ_S } = await import('../adapters/ollama.js')
+const { run, estimateReadSeconds, WRAPUP_MAX_READ_S, modelForTarget, ALWAYS_ON_MODEL, readSecondsFor, learnReadSpeed, resetReadSpeeds } = await import('../adapters/ollama.js')
+// A dense model with no learned speed: held to the 27B's measured read times.
+const DENSE = 'some-dense-model'
 const { createJob, sweepJobs, MAX_RUNTIME_MS, STALE_MS } = await import('../lib/chatJobs.js')
 
 test('the read-time estimate matches what the Always On box measured', () => {
@@ -24,7 +26,7 @@ test('Always On refuses a step it cannot read in the time left, instead of hangi
   globalThis.fetch = async () => { calls++; throw new Error('must not be called') }
   try {
     const events = []
-    const res = await run({ prompt: big, onProgress: (e) => events.push(e) })
+    const res = await run({ prompt: big, model: DENSE, onProgress: (e) => events.push(e) })
     assert.equal(calls, 0, 'no request is sent to the model')
     assert.match(res.content, /Always On/)
     assert.match(res.content, /Turbo/, 'tells the user the way out')
@@ -40,7 +42,7 @@ test('a slow step shows why it is slow instead of a silent spinner', async () =>
   try {
     const events = []
     // ~6k tokens with the tool definitions: minutes on the CPU, allowed.
-    const res = await run({ prompt: 'y'.repeat(3.2 * 3000), onProgress: (e) => events.push(e) })
+    const res = await run({ prompt: 'y'.repeat(3.2 * 3000), model: DENSE, onProgress: (e) => events.push(e) })
     assert.equal(res.content, 'hi')
     assert.ok(events.some((e) => e.type === 'text' && /reading about \d+k tokens/.test(e.text)), 'a progress note explains the wait')
   } finally {
@@ -93,4 +95,35 @@ test('no job can stay "running" forever, even while the client keeps polling', (
   assert.equal(job.aborted, true, 'the work is actually cancelled')
   assert.match(job.error, /continue/)
   assert.ok(STALE_MS < MAX_RUNTIME_MS)
+})
+
+test('Always On sends the faster model in place of the 27B; Turbo and other picks are untouched', async () => {
+  for (const big of ['orcarouter/Qwen3.8-27B-Uncensored:latest', 'nexus-mine', undefined]) {
+    assert.equal(modelForTarget(big, false), ALWAYS_ON_MODEL, `Always On swaps ${big}`)
+  }
+  assert.equal(modelForTarget('orcarouter/Qwen3.8-27B-Uncensored:latest', true), 'orcarouter/Qwen3.8-27B-Uncensored:latest', 'Turbo keeps the 27B')
+  assert.equal(modelForTarget('qwen2.5-coder:7b', false), 'qwen2.5-coder:7b', 'an explicitly different model is sent as picked')
+  const realFetch = globalThis.fetch
+  let sent = null
+  globalThis.fetch = async (url, init) => { sent = JSON.parse(init.body).model; return { ok: true, json: async () => ({ message: { content: 'ok' }, done_reason: 'stop' }) } }
+  try {
+    const res = await run({ prompt: 'hi', model: 'orcarouter/Qwen3.8-27B-Uncensored:latest' })
+    assert.equal(sent, ALWAYS_ON_MODEL)
+    assert.equal(res.model, ALWAYS_ON_MODEL, 'the reply reports the model that actually answered')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('the faster model is not held to the 27B read times, and speed is learned from Ollama timings', () => {
+  resetReadSpeeds()
+  const t = 20_000
+  assert.ok(readSecondsFor(ALWAYS_ON_MODEL, false, t) < estimateReadSeconds(t, false) / 3, 'starts from its measured speed')
+  // Ollama says a 4k prompt took 400 s: learn it is slower than assumed.
+  learnReadSpeed(DENSE, false, 4000, { prompt_eval_count: 3900, prompt_eval_duration: 400e9 })
+  assert.ok(readSecondsFor(DENSE, false, 4000) > estimateReadSeconds(4000, false), 'slower measurement raises the estimate')
+  // A cache hit (few tokens actually read) must not teach it anything.
+  resetReadSpeeds()
+  learnReadSpeed(DENSE, false, 4000, { prompt_eval_count: 40, prompt_eval_duration: 1e9 })
+  assert.equal(readSecondsFor(DENSE, false, 4000), estimateReadSeconds(4000, false))
 })

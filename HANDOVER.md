@@ -114,7 +114,17 @@ local HEAD**, printing `Deployed commit: <sha>`.
 
 ## Compute: "Always On" vs "Turbo"
 
-Both serve the same model, `orcarouter/Qwen3.8-27B-Uncensored:latest` (17.7 GB, Q4_K_M).
+**Turbo** serves `orcarouter/Qwen3.8-27B-Uncensored:latest` (17.7 GB, Q4_K_M).
+**Always On** serves `huihui_ai/Qwen3.6-abliterated:35b-a3b` (23 GB, mixture-of-experts,
+~3B active) since 2026-09-15 — the chat picker entry is the same; the adapter swaps the
+27B's names for `ALWAYS_ON_MODEL` when the target is Always On (`modelForTarget` in
+`adapters/ollama.js`; set `ALWAYS_ON_MODEL` in `server/.env` to change it). Measured on the
+VPS: reads 64 tok/s cold / 218 warm (27B: ~15), writes 15.4 tok/s (27B: 4.9), and no
+"forcing full prompt re-processing" warning. Only one of the two fits in the VPS RAM at a
+time (31 GB); the 27B is still on disk. Read-time estimates learn per model from Ollama's
+`prompt_eval_count`/`prompt_eval_duration`.
+
+The numbers below are the 27B's.
 
 **Always On** — Ollama on the VPS itself, CPU only, `http://127.0.0.1:11434`.
 Measured: reads prompts at **23 tok/s**, generates at **4.9 tok/s**.
