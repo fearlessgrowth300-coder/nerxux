@@ -11,6 +11,7 @@ import { redactToolData } from '../lib/redact.js'
 import { agentStateParts } from '../lib/agentState.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
+import { fitTurn } from '../lib/compactTurn.js'
 import { getComputeStatus, ensureTurboReady, takeFallbackReason } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
@@ -75,6 +76,11 @@ export const ALWAYS_ON_ANSWER_S = 180
 // leaving ~6k for recent conversation. Was the whole 32k window (~25k), which
 // made every step on a long chat re-read ~24k tokens (~12 min).
 export const ALWAYS_ON_PROMPT_TOKENS = 14000
+
+// Default read_file length on Always On. A 400-line read is ~5k tokens — a
+// third of the whole per-step budget — so one file pushed out everything else.
+// The tool output says how many lines the file has, so the model can page on.
+export const ALWAYS_ON_READ_LINES = 150
 
 // Always On runs a faster model than Turbo. The dense 27B needs up to an hour
 // per agent step on the VPS CPU; a mixture-of-experts model with ~3B active
@@ -294,6 +300,15 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // `images` (the Qwen/vision models read them directly), PDFs as extracted
   // text in the message body.
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+  // The request this turn is working on: never dropped when the turn is trimmed.
+  const request = lastUser || null
+  // Tool-output message -> what produced it, so old outputs can be shrunk to a
+  // one-line note instead of disappearing (see compactTurn.js).
+  const obsMeta = new WeakMap()
+  // read_file calls already answered this turn, and what the last step sent,
+  // for the repeat-read guard below.
+  const readsDone = new Map()
+  let lastSent = new Set()
   if (lastUser && attachments?.length) {
     lastUser.content = withDocuments(lastUser.content, attachments)
     const images = imageAttachments(attachments).map((a) => a.base64)
@@ -358,7 +373,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     if (estimateTokens(messages[0]) + recordTokens + 256 > promptBudget) throw new Error('Instructions and tool definitions exceed this model context. Reduce injected notes/connectors or use a larger context.')
     // Re-fitted every round: a long turn keeps appending tool output, so
     // a conversation that fitted at the start need not fit by step 40.
-    const stepMessages = [...fitMessages(messages, promptBudget - recordTokens).messages, record]
+    const fitted = fitTurn(messages, promptBudget - recordTokens, { request, obsMeta }).messages
+    lastSent = new Set(fitted)
+    const stepMessages = [...fitted, record]
     const promptTokens = stepMessages.reduce((n, m) => n + estimateTokens(m), 0) + estimateTokens(JSON.stringify(agentTools))
     const sendModel = modelForTarget(model, isRunpod)
     usedModel = sendModel
@@ -585,9 +602,26 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     if (rawContent.trim()) onProgress({ type: 'text', text: rawContent })
     const nativeCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0
     messages.push({ role: 'assistant', content: rawContent, ...(nativeCalls ? { tool_calls: msg.tool_calls } : {}) })
-    const observe = (name, content) => messages.push(nativeCalls ? { role: 'tool', tool_name: name, content: redactToolData(content) } : { role: 'user', content: redactToolData(content) })
+    let currentArgs = {}
+    const observe = (name, content) => {
+      const m = nativeCalls ? { role: 'tool', tool_name: name, content: redactToolData(content) } : { role: 'user', content: redactToolData(content) }
+      messages.push(m)
+      const a = currentArgs || {}
+      obsMeta.set(m, {
+        name,
+        path: a.path || (a.command ? '`' + String(a.command).split('\n')[0].slice(0, 60) + '`' : ''),
+        start: a.start,
+        limit: a.limit,
+        chars: String(m.content || '').length,
+      })
+      return m
+    }
 
     for (const call of detectedCalls) {
+      if (call.name === 'read_file' && !isRunpod && call.args && call.args.limit == null) {
+        call.args = { ...call.args, limit: ALWAYS_ON_READ_LINES }
+      }
+      currentArgs = call.args
       status({ phase: 'tool', tool: call.name, args: Object.fromEntries(Object.entries(call.args || {}).map(([k, v]) => [k, String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 200)])), startedAt: Date.now() })
       const callKey = call.name + ' ' + JSON.stringify(call.args)
       const times = (seenCalls.get(callKey) || 0) + 1
@@ -600,6 +634,21 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         toolSteps.push(step)
         onProgress({ type: 'tool', ...step })
         observe(call.name, `[Tool Execution Refused: ${call.name}] You already ran this call twice. Inspect the current state before changing your approach.`)
+        continue
+      }
+      // The same lines of the same file, read again with nothing changed since:
+      // the model lost track of it (see compactTurn.js). Re-reading only
+      // pushes something else out, so say where the content is instead.
+      const readKey = call.name === 'read_file' ? `${call.args?.path}|${call.args?.start || 1}|${call.args?.limit || 400}` : null
+      if (readKey && readsDone.has(readKey)) {
+        const visible = lastSent.has(readsDone.get(readKey))
+        const why = visible
+          ? `Its full content is already above in this conversation — use it and make your change now.`
+          : `Its full text was removed from context to save space, and reading the whole file again would push out something else. Use search_files to find the exact lines you need, or read_file with start and limit for a range of at most 80 lines, then make your change.`
+        const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: 'Not re-read: this file was already read this turn and has not changed.', target: 'loop-guard' }
+        toolSteps.push(step)
+        onProgress({ type: 'tool', ...step })
+        observe(call.name, `[read_file not run: you already read ${call.args?.path} (same lines) earlier in this turn and it has not changed since. ${why}]`)
         continue
       }
       try {
@@ -637,9 +686,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
 
         // A test rerun after a patch is new work, even with identical args.
         if (result.ok && ['write_file', 'edit_file'].includes(call.name)) seenCalls.clear()
+        // Anything that can change files makes earlier reads stale.
+        if (['write_file', 'edit_file', 'execute_command'].includes(call.name)) readsDone.clear()
         // Always include stderr: a script can print progress before throwing.
         const obs = observationText(call.name, result) + recovery(call.name, result)
-        observe(call.name, obs)
+        const observed = observe(call.name, obs)
+        if (readKey && result.ok) readsDone.set(readKey, observed)
       } catch (err) {
         const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: err.message, target: 'error' }
         toolSteps.push(step)

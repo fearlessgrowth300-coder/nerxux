@@ -27,7 +27,7 @@ export function estimateTokens(message) {
   return text + images
 }
 
-function truncateMiddle(text, budgetTokens) {
+export function truncateMiddle(text, budgetTokens) {
   const max = Math.max(200, budgetTokens * CHARS_PER_TOKEN)
   if (text.length <= max) return text
   const half = Math.floor((max - 80) / 2)
