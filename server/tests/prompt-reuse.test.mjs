@@ -35,7 +35,8 @@ test('the Ollama adapter fixes the system prompt once and appends the live recor
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
   assert.match(src, /if \(step === 0 \|\| rewriteSystem\) \{\s*rewriteSystem = false\s*messages\[0\]\.content = system \+ state\.notes/, 'system prompt is written on step 0 (or after the window shrinks) only')
   assert.doesNotMatch(src, /messages\[0\]\.content = system \+ '\\n\\n' \+ await agentStatePrompt/, 'the per-step record no longer goes into the system prompt')
-  assert.match(src, /messages: \[\.\.\.fitMessages\(messages, promptBudget - recordTokens\)\.messages, record\]/, 'the record is the final message and is budgeted for')
+  assert.match(src, /const stepMessages = \[\.\.\.fitMessages\(messages, promptBudget - recordTokens\)\.messages, record\]/, 'the record is the final message and is budgeted for')
+  assert.match(src, /messages: stepMessages,/, 'and that is what is sent')
 })
 
 // Measured on the viewe-account chat: rules 3,048 + tools 3,865 + NEXUS.md

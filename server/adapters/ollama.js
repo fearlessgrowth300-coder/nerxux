@@ -46,6 +46,25 @@ function resolveTargetUrl(model) {
 // wall-clock budget and the client's abort signal still bound it.
 export const OLLAMA_DISPATCHER = new Agent({ headersTimeout: 0, bodyTimeout: 0 })
 
+// How long the model needs to READ a prompt before it can write anything.
+// This model (qwen35, hybrid memory) cannot reuse the previous request's
+// prompt cache — Ollama logs "forcing full prompt re-processing" on every
+// request — so every agent step re-reads the whole conversation from zero.
+// Always On (8-core EPYC, measured from the Ollama journal 2026-09-15):
+// 4,096 tokens in 282 s, 21,196 tokens in 3,343 s (~56 min) — reading slows
+// as the prompt grows, so the fit is quadratic. Turbo (A40): ~1,100 tok/s.
+export function estimateReadSeconds(tokens, isRunpod) {
+  if (isRunpod) return Math.ceil(tokens / 1000)
+  return Math.ceil(0.0476 * tokens + 5.2e-6 * tokens * tokens)
+}
+
+// The no-tools summary at the end of a cut-off turn re-reads the whole
+// conversation too. On Always On a long chat took 25+ minutes for it, so it is only
+// sent when it can be read in about this long.
+export const WRAPUP_MAX_READ_S = 480
+
+const fmtMinutes = (s) => (s < 90 ? `${Math.max(1, Math.round(s))} s` : `${Math.round(s / 60)} min`)
+
 function composeSystem(systemPrompt = '', skills = []) {
   const parts = []
   parts.push(AGENT_SYSTEM_PROMPT)
@@ -110,9 +129,10 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // ~1.5k, reply 3k) left ~700 tokens for the conversation, and any message that
   // pulled in connector tools failed with "Instructions and tool definitions
   // exceed this model context". 32k fits in RAM with the box's Ollama set to
-  // flash attention + q8_0 KV cache (~4 GB beside the 17 GB weights). Reading
-  // that much at ~23 tok/s is slow only once: the prompt prefix is reused
-  // between steps (see the system prompt handling in the loop).
+  // flash attention + q8_0 KV cache (~4 GB beside the 17 GB weights). This model
+  // does NOT reuse the prompt cache between steps (see estimateReadSeconds), so
+  // every step re-reads all of it — the turn budget, not the window, is what
+  // keeps a long Always On chat from running for hours.
   const ALWAYS_ON_CTX = 32768
   let numCtx = isRunpod ? 65536 : ALWAYS_ON_CTX
   // What is left for the conversation once the answer's budget is set aside.
@@ -184,6 +204,10 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // wall-clock while still working, nothing has summarised the turn — the reply
   // was an empty card over dozens of tool actions. See the wrap-up after the loop.
   let finished = false
+  // Set when a single model request ran into the wall-clock budget and was
+  // cancelled. The budget used to be checked only BETWEEN steps, so one step
+  // that took 63 minutes on Always On ran straight past a 25-minute budget.
+  let timedOut = false
 
   for (let step = 0; step < MAX_STEPS; step++) {
     // The budget check used to live only on the text-answer path, so a model
@@ -208,6 +232,31 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       }
     }
     if (estimateTokens(messages[0]) + recordTokens + 256 > promptBudget) throw new Error('Instructions and tool definitions exceed this model context. Reduce injected notes/connectors or use a larger context.')
+    // Re-fitted every round: a long turn keeps appending tool output, so
+    // a conversation that fitted at the start need not fit by step 40.
+    const stepMessages = [...fitMessages(messages, promptBudget - recordTokens).messages, record]
+    const promptTokens = stepMessages.reduce((n, m) => n + estimateTokens(m), 0) + estimateTokens(JSON.stringify(agentTools))
+    const readSeconds = estimateReadSeconds(promptTokens, isRunpod)
+    const remainingMs = WALL_CLOCK_BUDGET_MS - (Date.now() - requestStart)
+    // Don't start a step that cannot even be read in the time left: it would
+    // run for up to an hour and then be thrown away. Say why, plainly.
+    if (!isRunpod && readSeconds * 1000 > remainingMs) {
+      const n = toolSteps.length
+      finalContent = [
+        finalContent.trim(),
+        `*(stopped — on Always On this chat is about ${Math.round(promptTokens / 1000)}k tokens, which takes the CPU about ${fmtMinutes(readSeconds)} to read before it can reply, ` +
+        `and only ${fmtMinutes(Math.max(0, remainingMs / 1000))} of this turn's ${WALL_CLOCK_BUDGET_MS / 60000}-minute limit is left` +
+        `${n ? ` (${n} tool action${n === 1 ? '' : 's'} done so far)` : ''}. ` +
+        'Switch to Turbo (it reads this in under a minute), or start a new chat with a shorter request.)*',
+      ].filter(Boolean).join('\n\n')
+      finished = true
+      break
+    }
+    if (readSeconds > 90) {
+      onProgress({ type: 'text', text: `(${isRunpod ? 'Turbo' : 'Always On'} is reading about ${Math.round(promptTokens / 1000)}k tokens — roughly ${fmtMinutes(readSeconds)} before it can reply${isRunpod ? '' : '. Turbo reads this in under a minute'}.)` })
+    }
+    // The budget also bounds the request itself, not only the gap between requests.
+    const deadline = AbortSignal.timeout(Math.max(1000, remainingMs))
     let resp
     try {
       resp = await fetch(`${targetUrl}/api/chat`, {
@@ -216,17 +265,16 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: model || 'nexus-mine',
-          // Re-fitted every round: a long turn keeps appending tool output, so
-          // a conversation that fitted at the start need not fit by step 40.
-          messages: [...fitMessages(messages, promptBudget - recordTokens).messages, record],
+          messages: stepMessages,
           tools: agentTools,
           stream: false,
           options: { num_predict: numPredict, num_ctx: numCtx },
         }),
-        signal,
+        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       })
     } catch (e) {
-      if (e.name === 'AbortError') throw e // client disconnected — stop, don't burn CPU on a dead request
+      if (signal?.aborted) throw e // client disconnected — stop, don't burn CPU on a dead request
+      if (deadline.aborted) { timedOut = true; break }
       const cause = e.cause?.code || e.cause?.message || ''
       // The tunnel was checked before the turn started, but a build is dozens
       // of round-trips over many minutes and the tunnel can die in the middle
@@ -447,32 +495,43 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // tools, and always say plainly that the turn was cut off.
   if (!finished && !signal?.aborted) {
     let summary = ''
-    try {
-      const r = await fetch(`${targetUrl}/api/chat`, {
-        dispatcher: OLLAMA_DISPATCHER,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: model || 'nexus-mine',
-          messages: fitMessages([
-            ...messages,
-            {
-              role: 'user',
-              content:
-                'This turn has used its whole step budget and must stop NOW. Do not call any tools. ' +
-                'In a few short lines tell the user: what you completed (name the files you changed), ' +
-                'what you verified and how, and what is still left to do.',
-            },
-          ], promptBudget).messages,
-          stream: false,
-          options: { num_predict: 1500, num_ctx: numCtx },
-        }),
-        signal,
-      })
-      if (r.ok) summary = String((await r.json()).message?.content || '').trim()
-    } catch {}
+    const wrapMessages = fitMessages([
+      ...messages,
+      {
+        role: 'user',
+        content:
+          'This turn has used its whole step budget and must stop NOW. Do not call any tools. ' +
+          'In a few short lines tell the user: what you completed (name the files you changed), ' +
+          'what you verified and how, and what is still left to do.',
+      },
+    ], promptBudget).messages
+    const wrapTokens = wrapMessages.reduce((n, m) => n + estimateTokens(m), 0)
+    // Only when it is quick: on Always On this summary re-read the whole
+    // conversation and kept the user waiting another half hour for a note.
+    if (estimateReadSeconds(wrapTokens, isRunpod) <= WRAPUP_MAX_READ_S) {
+      try {
+        const wrapDeadline = AbortSignal.timeout((WRAPUP_MAX_READ_S + 180) * 1000)
+        const r = await fetch(`${targetUrl}/api/chat`, {
+          dispatcher: OLLAMA_DISPATCHER,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: model || 'nexus-mine',
+            messages: wrapMessages,
+            stream: false,
+            options: { num_predict: 1500, num_ctx: numCtx },
+          }),
+          signal: signal ? AbortSignal.any([signal, wrapDeadline]) : wrapDeadline,
+        })
+        if (r.ok) summary = String((await r.json()).message?.content || '').trim()
+      } catch {}
+    }
     const n = toolSteps.length
-    const note = `*(stopped after ${n} tool action${n === 1 ? '' : 's'} — the limit for one turn was reached before the work was finished. Send "continue" and it will pick up from here.)*`
+    const why = timedOut
+      ? `this turn hit its ${WALL_CLOCK_BUDGET_MS / 60000}-minute limit while the model was still ${isRunpod ? 'working' : 'reading/answering on Always On'}`
+      : 'the limit for one turn was reached before the work was finished'
+    const tip = !isRunpod && timedOut ? ' Switching to Turbo makes each step many times faster.' : ''
+    const note = `*(stopped after ${n} tool action${n === 1 ? '' : 's'} — ${why}. Send "continue" and it will pick up from here.${tip})*`
     finalContent = [summary || finalContent.trim(), note].filter(Boolean).join('\n\n')
   }
 

@@ -25,6 +25,18 @@ const GRAVEYARD_FILE = path.join(__dirname, '../.chat-jobs-graveyard.json')
 // locked, the PC is off, and a long build is running on the server.
 export const STALE_MS = 70 * 60_000
 export const RESULT_TTL_MS = 10 * 60_000
+// Hard ceiling on one job, watched or not. The model adapters bound their own
+// turns (25 min Always On, 60 min Turbo), but anything that awaits without a
+// timeout used to leave the chat on "Thinking…" indefinitely while nothing was
+// running — the user sent "continue" and waited hours. Past this the job is
+// ended with a plain message, so the client always gets an answer.
+export const MAX_RUNTIME_MS = 80 * 60_000
+
+// One line per job lifecycle event — ids and timings only, never content.
+// Before this a stuck job left no trace in the server logs at all.
+function logJob(event, job, now, extra = {}) {
+  console.log('[nexus-ai] chat job', JSON.stringify({ event, id: job.id, seconds: Math.round((now - job.createdAt) / 1000), ...extra }))
+}
 
 const jobs = new Map()
 
@@ -80,6 +92,7 @@ export function createJob(userId, controller, now = Date.now(), conversationId =
     finishedAt: null,
   }
   jobs.set(job.id, job)
+  logJob('started', job, now)
   return job
 }
 
@@ -88,6 +101,7 @@ export function completeJob(job, result, now = Date.now()) {
   job.status = 'done'
   job.result = result
   job.finishedAt = now
+  logJob('done', job, now)
 }
 
 export function failJob(job, err, now = Date.now()) {
@@ -95,6 +109,7 @@ export function failJob(job, err, now = Date.now()) {
   job.status = err?.name === 'AbortError' ? 'cancelled' : 'error'
   job.error = err?.name === 'AbortError' ? 'The request was cancelled.' : safeErrorMessage(err, 'Chat request failed')
   job.finishedAt = now
+  logJob(job.status, job, now, job.status === 'error' ? { error: String(job.error).slice(0, 160) } : { reason: String(err?.message || '').slice(0, 40) })
 }
 
 // Returns the job for polling and marks it as still being watched.
@@ -130,7 +145,11 @@ export function cancelJob(id, userId) {
 // so it can be driven directly in tests.
 export function sweepJobs(now = Date.now()) {
   for (const job of jobs.values()) {
-    if (job.status === 'running' && now - job.lastSeen > STALE_MS) {
+    if (job.status === 'running' && now - job.createdAt > MAX_RUNTIME_MS) {
+      job.controller.abort()
+      failJob(job, new Error(`This request ran for ${Math.round(MAX_RUNTIME_MS / 60_000)} minutes without finishing, so it was stopped. ` +
+        'Send "continue" to pick up from here — files and commits it already made are kept. For long builds, switch to Turbo.'), now)
+    } else if (job.status === 'running' && now - job.lastSeen > STALE_MS) {
       job.controller.abort()
       failJob(job, Object.assign(new Error('abandoned'), { name: 'AbortError' }), now)
     } else if (job.status !== 'running' && now - job.finishedAt > RESULT_TTL_MS) {

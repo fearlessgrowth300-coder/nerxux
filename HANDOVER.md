@@ -126,6 +126,18 @@ Measured: reads prompts at **23 tok/s**, generates at **4.9 tok/s**.
 > what makes Always On unusable for agent work: every step re-reads the whole
 > conversation. One build step ≈ 16 min on CPU vs ≈ 2 min on GPU.
 
+> **Measured 2026-09-15 (Ollama journal):** this model cannot reuse the prompt
+> cache between requests ("forcing full prompt re-processing … hybrid/recurrent
+> memory"), and CPU reading slows as the prompt grows: 4k tokens in 282 s, 21k
+> tokens in ~56 min. One agent step on a 22k-token chat took **63 minutes**.
+> `estimateReadSeconds()` in `adapters/ollama.js` is fitted to these numbers.
+> Since then: a step that can't be read in the turn's remaining budget is not
+> sent (the reply says so and suggests Turbo); every model request carries the
+> turn deadline; the end-of-turn summary is skipped when it would take >8 min to
+> read; and `chatJobs.js` ends any job after 80 min (`MAX_RUNTIME_MS`) so the
+> chat can never show "Thinking…" forever. Job start/finish lines are in
+> `pm2 logs nexus-server` (`[nexus-ai] chat job`).
+
 ### How Turbo works
 
 The **VPS** opens the SSH tunnel — *not* the user's PC, which can be switched
