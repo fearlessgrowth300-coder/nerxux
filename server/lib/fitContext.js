@@ -13,6 +13,12 @@
 const CHARS_PER_TOKEN = 3.2
 // An image is not free — it becomes a block of vision tokens.
 const TOKENS_PER_IMAGE = 1300
+// See the trimming note in fitMessages: the cut point moves in steps of this
+// many messages, and the notice never carries a changing count.
+const TRIM_CHUNK = 8
+const DROPPED_NOTICE =
+  '[Earlier messages from this conversation were left out to fit the context window. ' +
+  'Work from what follows; ask if you need something from earlier.]'
 
 export function estimateTokens(message) {
   if (typeof message === 'string') return Math.ceil(message.length / CHARS_PER_TOKEN)
@@ -59,21 +65,25 @@ export function fitMessages(messages, budget) {
     break
   }
 
+  // Ollama reuses the part of a prompt that is byte-identical to the previous
+  // request, so a 32k-token agent step costs 3 s instead of 83 s (measured on
+  // 2x T4) — as long as the START of the message list does not change. Trimming
+  // one message per step moved the start every step, and the "[N earlier
+  // messages ...]" notice changed with N. So: once trimming is needed, drop in
+  // chunks so the cut point only moves every TRIM_CHUNK messages, and keep the
+  // notice's wording constant.
+  let dropped = rest.length - kept.length
+  if (dropped > 0) {
+    const chunked = Math.min(rest.length - 1, Math.ceil(dropped / TRIM_CHUNK) * TRIM_CHUNK)
+    while (dropped < chunked && kept.length > 1) { kept.shift(); dropped++ }
+  }
+
   // Orphaned tool observations become explicit historical data.
   for (let i = 0; i < kept.length && kept[i].role === 'tool'; i++) {
     kept[i] = { role: 'user', content: '[Earlier tool observation] ' + String(kept[i].content || '') }
   }
-  const dropped = rest.length - kept.length
   const out = system ? [system] : []
-  if (dropped > 0) {
-    out.push({
-      role: 'user',
-      content:
-        `[${dropped} earlier message${dropped === 1 ? '' : 's'} from this conversation ` +
-        'were left out to fit the context window. Work from what follows; ask if you need ' +
-        'something from earlier.]',
-    })
-  }
+  if (dropped > 0) out.push({ role: 'user', content: DROPPED_NOTICE })
   const final = [...out, ...kept]
   return { messages: final, dropped, estimated: final.reduce((n, m) => n + estimateTokens(m), 0) }
 }

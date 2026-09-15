@@ -8,7 +8,7 @@ import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTo
 import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
 import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
 import { redactToolData } from '../lib/redact.js'
-import { agentStatePrompt } from '../lib/agentState.js'
+import { agentStateParts } from '../lib/agentState.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { getComputeStatus, ensureTurboReady, takeFallbackReason } from '../lib/computeManager.js'
@@ -175,8 +175,17 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     // The budget check used to live only on the text-answer path, so a model
     // that kept calling tools ran straight past it — one turn went 84 minutes.
     if (Date.now() - requestStart > WALL_CLOCK_BUDGET_MS) break
-    messages[0].content = system + '\n\n' + await agentStatePrompt(userId, sessionId)
-    if (estimateTokens(messages[0]) + 256 > promptBudget) throw new Error('Instructions and tool definitions exceed this model context. Reduce injected notes/connectors or use a larger context.')
+    // Ollama reuses the prefix of the previous request byte-for-byte; the
+    // execution record changes after every tool call, so writing it into the
+    // system prompt (message 0) made every step re-read the whole conversation
+    // — 83 s per step at 32k tokens on 2x T4, minutes on the CPU box. The
+    // system prompt now holds only the stable parts (rules + project notes,
+    // read once per turn); the live record rides at the END as its own message.
+    const state = await agentStateParts(userId, sessionId)
+    if (step === 0) messages[0].content = system + state.notes
+    const record = { role: 'user', content: state.record }
+    const recordTokens = estimateTokens(record)
+    if (estimateTokens(messages[0]) + recordTokens + 256 > promptBudget) throw new Error('Instructions and tool definitions exceed this model context. Reduce injected notes/connectors or use a larger context.')
     let resp
     try {
       resp = await fetch(`${targetUrl}/api/chat`, {
@@ -187,7 +196,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           model: model || 'nexus-mine',
           // Re-fitted every round: a long turn keeps appending tool output, so
           // a conversation that fitted at the start need not fit by step 40.
-          messages: fitMessages(messages, promptBudget).messages,
+          messages: [...fitMessages(messages, promptBudget - recordTokens).messages, record],
           tools: agentTools,
           stream: false,
           options: { num_predict: numPredict, num_ctx: numCtx },
