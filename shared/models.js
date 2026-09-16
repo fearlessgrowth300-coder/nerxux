@@ -7,6 +7,9 @@ export const PROVIDERS = {
   openai: { id: 'openai', label: 'OpenAI' },
   gemini: { id: 'gemini', label: 'Google Gemini' },
   groq: { id: 'groq', label: 'Groq (Llama 4 / DeepSeek / Qwen3 — fast)' },
+  // Gateway on the VPS (127.0.0.1:20128): one key, many providers incl. free
+  // tiers, automatic fallback. Its key is a platform key (OMNIROUTE_API_KEY).
+  omniroute: { id: 'omniroute', label: 'OmniRoute (free AI gateway on the VPS)' },
   elevenlabs: { id: 'elevenlabs', label: 'ElevenLabs' },
   higgsfield: { id: 'higgsfield', label: 'Higgsfield' },
   // Not a chat model — a credential the agent's sandbox tool uses to
@@ -50,6 +53,13 @@ export const CHAT_MODELS = [
     apiModel: 'gemini-2.0-flash',
     vision: true,
   },
+  // ---- OmniRoute: the VPS gateway picks a working (often free) provider ----
+  // auto/* are OmniRoute's own routing profiles; it falls back to the next
+  // provider when one is down or out of quota.
+  { id: 'omniroute-best-coding', label: 'OmniRoute auto: best coding (free gateway)', provider: 'omniroute', apiModel: 'auto/best-coding', vision: false },
+  { id: 'omniroute-best-reasoning', label: 'OmniRoute auto: best reasoning (free gateway)', provider: 'omniroute', apiModel: 'auto/best-reasoning', vision: false },
+  { id: 'omniroute-fast', label: 'OmniRoute auto: fast (free gateway)', provider: 'omniroute', apiModel: 'auto/best-fast', vision: false },
+  { id: 'omniroute-auto', label: 'OmniRoute auto (free gateway)', provider: 'omniroute', apiModel: 'auto', vision: false },
   // ---- Groq: open models on LPU hardware, ~free (30 req/min), very fast ----
   // Model ids track console.groq.com/docs/models; Groq rotates its lineup, so if
   // one 404s the adapter says so and you swap it here.

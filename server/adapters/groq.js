@@ -98,18 +98,20 @@ function friendlyError(err) {
 // { prompt, systemPrompt, skills, apiKey, model, attachments, tools?, onToolCall?, webSearch? }
 export async function run(opts) {
   try {
-    return await runInner(opts)
+    return await runOpenAICompatible(opts)
   } catch (err) {
     throw friendlyError(err)
   }
 }
 
-async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch, onBeforeFinish }) {
-  if (!apiKey) throw new Error('Groq API key is not connected')
+// The whole loop only depends on an OpenAI-compatible endpoint, so other
+// gateways (OmniRoute on the VPS) reuse it with their own base URL and name.
+export async function runOpenAICompatible({ prompt, systemPrompt, skills, apiKey, model, attachments, tools, onToolCall, webSearch, onBeforeFinish, baseURL = GROQ_BASE_URL, providerName = 'groq', label = 'Groq', defaultModel = 'llama-3.3-70b-versatile' }) {
+  if (!apiKey) throw new Error(`${label} API key is not connected`)
 
-  const client = new OpenAI({ apiKey, baseURL: GROQ_BASE_URL })
+  const client = new OpenAI({ apiKey, baseURL })
   const system = composeSystem(systemPrompt, skills)
-  const apiModel = model || 'llama-3.3-70b-versatile'
+  const apiModel = model || defaultModel
 
   const images = (attachments || []).filter((a) => a.kind === 'image' && a.base64)
   // PDFs arrive with their text already extracted by the client.
@@ -189,7 +191,7 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, attachmen
 
   return {
     ok: true,
-    provider: 'groq',
+    provider: providerName,
     type: 'text',
     content: stripReasoning(completion.choices?.[0]?.message?.content || ''),
     model: completion.model,

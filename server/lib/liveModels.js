@@ -68,7 +68,23 @@ async function fetchGroqModels(apiKey) {
     .map((m) => entry('groq', m.id, m.id, /scout|maverick|vision|llava/i.test(m.id)))
 }
 
-const FETCHERS = { claude: fetchClaudeModels, openai: fetchOpenAIModels, gemini: fetchGeminiModels, groq: fetchGroqModels }
+// OmniRoute lists ~480 models (every provider it knows). The dropdown gets only
+// its auto/* routing profiles — OmniRoute picks a working provider for each —
+// with the curated ones first under their friendly labels.
+async function fetchOmniRouteModels(apiKey) {
+  const base = process.env.OMNIROUTE_URL || 'http://127.0.0.1:20128/v1'
+  const r = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5000) })
+  if (!r.ok) throw new Error(`OmniRoute models ${r.status}`)
+  const j = await r.json()
+  const ids = new Set((j.data || []).map((m) => m.id).filter((id) => /^auto(\/|$)/.test(id)))
+  const curated = CHAT_MODELS.filter((m) => m.provider === 'omniroute' && ids.has(m.apiModel))
+  const rest = [...ids]
+    .filter((id) => !curated.some((m) => m.apiModel === id))
+    .map((id) => entry('omniroute', id, `OmniRoute ${id}`, /vision/.test(id)))
+  return [...curated, ...rest]
+}
+
+const FETCHERS = { claude: fetchClaudeModels, openai: fetchOpenAIModels, gemini: fetchGeminiModels, groq: fetchGroqModels, omniroute: fetchOmniRouteModels }
 // Exported for tests only — real callers go through getAvailableModels.
 export const _fetchers = FETCHERS
 

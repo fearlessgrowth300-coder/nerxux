@@ -191,6 +191,28 @@ ssh -N -L 127.0.0.1:11435:127.0.0.1:11434 root@<pod-ip> -p <pod-port>
 
 ---
 
+## Added 2026-09-16: OmniRoute, Graphify, agent-skills, Ponytail
+
+**OmniRoute** (github.com/diegosouzapw/OmniRoute, npm `omniroute` 3.8.50) is an AI gateway on the
+VPS: systemd `omniroute`, `127.0.0.1:20128` only, `REQUIRE_API_KEY=true`, working dir and data
+`/var/lib/omniroute`, settings `/etc/omniroute/omniroute.env` (600: dashboard `INITIAL_PASSWORD`,
+JWT/API-key/storage secrets — never commit). Nexus provider `omniroute` (`adapters/omniroute.js`,
+shares the OpenAI-compatible loop in `adapters/groq.js`); platform key `OMNIROUTE_API_KEY` +
+`OMNIROUTE_URL` in `server/.env`. The picker shows its `auto/*` routing profiles only. Out of the box
+`auto` answers via OpenCode's free model; add provider keys/OAuth in its dashboard for more
+(reach it with `ssh -L 20128:127.0.0.1:20128 root@2.25.126.125`, then http://localhost:20128).
+It runs separately from `/root/.env` — that file is a stray copy of Nexus secrets and should be removed.
+
+**Graphify** (Graphify-Labs/graphify, pip `graphifyy`) is installed in `/usr/local/lib/graphify-venv`
+with `/usr/local/bin/graphify`, so the agent can run it inside bwrap (offline, code only):
+`graphify update . --no-cluster`, `graphify query "…"`, `explain`, `affected`, `path`, `god-nodes`.
+Output `graphify-out/` must stay gitignored.
+
+**Skills** (Supabase `skills`, user ff9d0de8): all 25 addyosmani/agent-skills, 4 Ponytail skills
+(ponytail, -review, -audit, -debt; -gain/-help skipped as plugin-only) and a compact `graphify` usage
+skill. 50 enabled skills ≈ 3k tokens of index on every message; bodies are 1–28k chars and are loaded
+on demand with `load_skill` — expensive on Always On (7 tok/s read), cheap on Turbo.
+
 ## The agent sandbox
 
 `server/lib/sandbox.js` — bubblewrap (`bwrap`), OS-level isolation.

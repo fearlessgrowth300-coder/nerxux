@@ -30,6 +30,7 @@ const PLATFORM_ENV = {
   openai: 'OPENAI_API_KEY',
   gemini: 'GEMINI_API_KEY',
   groq: 'GROQ_API_KEY',
+  omniroute: 'OMNIROUTE_API_KEY',
   elevenlabs: 'ELEVENLABS_API_KEY',
   higgsfield: 'HIGGSFIELD_API_KEY',
   github: 'GITHUB_TOKEN',
