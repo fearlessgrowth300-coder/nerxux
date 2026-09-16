@@ -13,7 +13,7 @@ import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { fitTurn } from '../lib/compactTurn.js'
 import { alwaysOnUsesOpenAI, postOpenAIChat, openAIModels } from '../lib/llamaServerChat.js'
-import { getComputeStatus, ensureTurboReady, takeFallbackReason } from '../lib/computeManager.js'
+import { getComputeStatus, ensureTurboReady, ensureKaggleReady, takeFallbackReason, KAGGLE_URL } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
 import { watchReadProgress } from '../lib/ollamaReadProgress.js'
@@ -33,12 +33,13 @@ export const NOTES_POINTER = '\n\n# Project notes\nThis project has a NEXUS.md a
 // Ollama's own wording when the tool call it received will not parse.
 const MALFORMED_TOOL_CALL = /XML syntax error|unexpected end element|invalid character|unmarshal|failed to parse tool/i
 
-// One chat request to the model server. Turbo and a default Always On speak
-// Ollama's /api/chat; with ALWAYS_ON_API=openai, Always On is a llama-server and
-// the request is translated both ways (lib/llamaServerChat.js), so everything
-// after this call sees the same Ollama-shaped reply either way.
+// One chat request to the model server. Turbo speaks Ollama's native /api/chat.
+// Kaggle always runs llama-server (the notebook has no Ollama), and Always On
+// does when ALWAYS_ON_API=openai — both get the request translated both ways
+// (lib/llamaServerChat.js), so everything after this call sees the same
+// Ollama-shaped reply regardless of which server actually answered.
 function postChat(targetUrl, body, signal, isRunpod) {
-  if (!isRunpod && alwaysOnUsesOpenAI()) return postOpenAIChat(targetUrl, body, { signal })
+  if (targetUrl === KAGGLE_URL || (!isRunpod && alwaysOnUsesOpenAI())) return postOpenAIChat(targetUrl, body, { signal })
   return fetch(`${targetUrl}/api/chat`, {
     dispatcher: OLLAMA_DISPATCHER,
     method: 'POST',
@@ -50,8 +51,8 @@ function postChat(targetUrl, body, signal, isRunpod) {
 
 function resolveTargetUrl(model) {
   const status = getComputeStatus()
-  if (status.mode === 'turbo') {
-    return status.activeUrl // http://127.0.0.1:11435
+  if (status.mode === 'turbo' || status.mode === 'kaggle') {
+    return status.activeUrl // 127.0.0.1:11435 (turbo) or 127.0.0.1:20140 (kaggle tunnel)
   }
   return status.hostingerUrl || 'http://127.0.0.1:11434'
 }
@@ -108,9 +109,9 @@ const BIG_QWEN = new Set([
   'orcarouter/Qwen3.8-27B-Uncensored:latest', 'orcarouter/Qwen3.8-27B-Uncensored',
   'qwen3.8-27b:latest', 'nexus-mine', 'nexus-mine:latest',
 ])
-export function modelForTarget(model, isRunpod) {
+export function modelForTarget(model, isRunpod, isKaggle = false) {
   const m = model || 'nexus-mine'
-  return !isRunpod && BIG_QWEN.has(m) ? ALWAYS_ON_MODEL : m
+  return !isRunpod && !isKaggle && BIG_QWEN.has(m) ? ALWAYS_ON_MODEL : m
 }
 
 // estimateReadSeconds is fitted to the 27B. Other models read at their own
@@ -227,12 +228,27 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // by waiting out a five-minute timeout on a request that could never land.
   // If the pod itself is gone (out of credit, exited), ensureTurboReady has
   // already switched to Always On: run the turn there instead of failing it.
-  const fallbackNote = () => `(Turbo is unavailable — ${takeFallbackReason() || 'the GPU pod is not running'}. Continuing on Always On, which is slower.)`
+  const fallbackNote = (label) => `(${label} is unavailable — ${takeFallbackReason() || 'not reachable right now'}. Continuing on Always On, which is slower.)`
   if (targetUrl.includes('11435') && !(await ensureTurboReady())) {
     targetUrl = resolveTargetUrl(model)
-    onProgress({ type: 'text', text: fallbackNote() })
+    onProgress({ type: 'text', text: fallbackNote('Turbo') })
+  } else if (targetUrl === KAGGLE_URL && !(await ensureKaggleReady())) {
+    targetUrl = resolveTargetUrl(model)
+    onProgress({ type: 'text', text: fallbackNote('Kaggle') })
   }
   let isRunpod = targetUrl.includes('11435')
+  // Kaggle's GPU reads and writes far faster than the CPU box (measured 2x T4:
+  // ~390 tok/s read, ~10-12 tok/s write — see kaggle-nexus-benchmark.ipynb), and
+  // llama-server there DOES reuse the prompt cache between steps, unlike this
+  // model on the CPU. So it gets Turbo's generous budget, not Always On's tight
+  // one, even though it talks the OpenAI protocol like a llama-server Always On.
+  // isKaggle never changes mid-turn (nothing falls back FROM Kaggle to itself),
+  // but generousBudget/targetLabel do when fallBackToAlwaysOn fires below —
+  // they must be `let` and recomputed there, or a Turbo turn that drops mid-way
+  // would keep Turbo's Infinity budget and label on the Always On box it fell back to.
+  const isKaggle = targetUrl === KAGGLE_URL
+  let generousBudget = isRunpod || isKaggle
+  let targetLabel = isRunpod ? 'Turbo' : isKaggle ? 'Kaggle' : 'Always On'
   // Chat requests run as background jobs the client polls (routes/chat.js),
   // so there's no proxy timeout to squeeze under any more. This budget is
   // purely about not leaving someone staring at a spinner forever on the
@@ -258,7 +274,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // too small above. A write_file carrying a real file cannot fit in 900
   // tokens, so the call was cut mid-emission and Ollama's tool parser
   // rejected the fragment ("XML syntax error ... unexpected end element").
-  let numPredict = isRunpod ? 12000 : 3000
+  let numPredict = generousBudget ? 12000 : 3000
   // The model supports far more, but Ollama defaults it to 32,768 — which a
   // build conversation crosses, after which EVERY message in that chat fails
   // with "exceeds the available context size". 64k is verified to fit on the
@@ -272,14 +288,14 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // every step re-reads all of it — the turn budget, not the window, is what
   // keeps a long Always On chat from running for hours.
   const ALWAYS_ON_CTX = 32768
-  let numCtx = isRunpod ? 65536 : ALWAYS_ON_CTX
+  let numCtx = generousBudget ? 65536 : ALWAYS_ON_CTX
   // What is left for the conversation once the answer's budget is set aside.
   const toolTokens = estimateTokens(JSON.stringify(agentTools))
   // Always On re-reads everything it is sent on every step, so what it is sent
   // is capped well below the window: the fixed parts (rules, NEXUS.md, the
   // execution record) always go in, and older conversation is trimmed first.
   // Continuity comes from the record and the files, not from old chat turns.
-  const budgetFor = () => Math.min(numCtx - numPredict - toolTokens - 512, isRunpod ? Infinity : ALWAYS_ON_PROMPT_TOKENS)
+  const budgetFor = () => Math.min(numCtx - numPredict - toolTokens - 512, generousBudget ? Infinity : ALWAYS_ON_PROMPT_TOKENS)
   let promptBudget = budgetFor()
   // Set when the budget shrinks mid-turn, so the system prompt is re-checked
   // against the new, smaller window on the next step.
@@ -291,11 +307,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const fallBackToAlwaysOn = () => {
     targetUrl = resolveTargetUrl(model)
     isRunpod = false
+    generousBudget = false
+    targetLabel = 'Always On'
     numPredict = 3000
     numCtx = ALWAYS_ON_CTX
     promptBudget = budgetFor()
     rewriteSystem = true
-    onProgress({ type: 'text', text: fallbackNote() })
+    onProgress({ type: 'text', text: fallbackNote('Turbo') })
   }
   const system = composeSystem(systemPrompt, skills)
   const beforeFinish = createCompletionCheck(userId, sessionId)
@@ -362,7 +380,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // that took 63 minutes on Always On ran straight past a 25-minute budget.
   let timedOut = false
   // The model actually sent (Always On swaps the 27B for ALWAYS_ON_MODEL).
-  let usedModel = modelForTarget(model, isRunpod)
+  let usedModel = modelForTarget(model, isRunpod, isKaggle)
 
   for (let step = 0; step < MAX_STEPS; step++) {
     // The budget check used to live only on the text-answer path, so a model
@@ -393,13 +411,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     lastSent = new Set(fitted)
     const stepMessages = [...fitted, record]
     const promptTokens = stepMessages.reduce((n, m) => n + estimateTokens(m), 0) + estimateTokens(JSON.stringify(agentTools))
-    const sendModel = modelForTarget(model, isRunpod)
+    const sendModel = modelForTarget(model, isRunpod, isKaggle)
     usedModel = sendModel
-    const readSeconds = readSecondsFor(sendModel, isRunpod, promptTokens)
+    const readSeconds = readSecondsFor(sendModel, generousBudget, promptTokens)
     const remainingMs = WALL_CLOCK_BUDGET_MS - (Date.now() - requestStart)
     // Don't start a step that cannot even be read in the time left: it would
     // run for up to an hour and then be thrown away. Say why, plainly.
-    if (!isRunpod && (readSeconds + ALWAYS_ON_ANSWER_S) * 1000 > remainingMs) {
+    if (!generousBudget && (readSeconds + ALWAYS_ON_ANSWER_S) * 1000 > remainingMs) {
       const n = toolSteps.length
       finalContent = [
         finalContent.trim(),
@@ -412,18 +430,18 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       break
     }
     if (readSeconds > 90) {
-      onProgress({ type: 'text', text: `(${isRunpod ? 'Turbo' : 'Always On'} is reading about ${Math.round(promptTokens / 1000)}k tokens — roughly ${fmtMinutes(readSeconds)} before it can reply${isRunpod ? '' : '. Turbo reads this in under a minute'}.)` })
+      onProgress({ type: 'text', text: `(${targetLabel} is reading about ${Math.round(promptTokens / 1000)}k tokens — roughly ${fmtMinutes(readSeconds)} before it can reply${generousBudget ? '' : '. Turbo reads this in under a minute'}.)` })
     }
     // The budget also bounds the request itself, not only the gap between requests.
     const deadline = AbortSignal.timeout(Math.max(1000, remainingMs))
     // Live status for the chat card: what the model is doing right now. It
     // replaces the previous status rather than piling up in the activity log.
-    const target = isRunpod ? 'Turbo' : 'Always On'
+    const target = targetLabel
     const readStart = Date.now()
     const status = (extra) => onProgress({ type: 'status', target, step: step + 1, promptTokens, ...extra })
     status({ phase: 'reading', startedAt: readStart, estSeconds: readSeconds })
     // Always On: the real read progress from Ollama's own log (see ollamaReadProgress.js).
-    const stopWatch = isRunpod ? () => {} : watchReadProgress((p) => {
+    const stopWatch = generousBudget ? () => {} : watchReadProgress((p) => {
       status({ phase: 'reading', startedAt: readStart, estSeconds: readSeconds, read: { ...p, at: Date.now() } })
     })
     let writeStart = 0
@@ -453,7 +471,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         tools: agentTools,
         stream: true,
         options: { num_predict: numPredict, num_ctx: numCtx },
-      }, signal ? AbortSignal.any([signal, deadline]) : deadline, isRunpod)
+      }, signal ? AbortSignal.any([signal, deadline]) : deadline, isRunpod || isKaggle)
       if (resp.ok) data = await readChatResponse(resp, onChunk)
     } catch (e) {
       stopWatch()
@@ -479,8 +497,8 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           continue
         }
       }
-      const onLlamaServer = !isRunpod && alwaysOnUsesOpenAI()
-      const targetDesc = isRunpod ? `Runpod GPU Ollama tunnel at ${targetUrl}` : onLlamaServer ? `the Always On llama-server at ${targetUrl}` : `local Ollama at ${targetUrl}`
+      const onLlamaServer = !isRunpod && !isKaggle && alwaysOnUsesOpenAI()
+      const targetDesc = isRunpod ? `Runpod GPU Ollama tunnel at ${targetUrl}` : isKaggle ? `the Kaggle notebook's tunnel at ${targetUrl}` : onLlamaServer ? `the Always On llama-server at ${targetUrl}` : `local Ollama at ${targetUrl}`
       throw new Error(
         `Can't reach ${targetDesc}. ${onLlamaServer ? 'Is the llama-server service running?' : 'Is the SSH tunnel / Ollama active?'} (${e.message}${cause ? ' / ' + cause : ''})`
       )
@@ -505,7 +523,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         // credentials the user pasted.
         console.error('[nexus-ai] tool-call parse failure:', JSON.stringify({
           error: msg.slice(0, 200),
-          target: isRunpod ? 'turbo' : 'always_on',
+          target: isRunpod ? 'turbo' : isKaggle ? 'kaggle' : 'always_on',
           model: sendModel,
           step,
           numPredict,
@@ -526,13 +544,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       }
       throw new Error(
         MALFORMED_TOOL_CALL.test(msg)
-          ? `The model kept producing a tool call too long to complete${isRunpod ? '' : ' on the Always On box'}. ` +
-            'Ask for one smaller step at a time' + (isRunpod ? '' : ', or switch to Turbo for file-writing work') + '.'
+          ? `The model kept producing a tool call too long to complete${generousBudget ? '' : ' on the Always On box'}. ` +
+            'Ask for one smaller step at a time' + (generousBudget ? '' : ', or switch to Turbo for file-writing work') + '.'
           : msg
       )
     }
 
-    learnReadSpeed(sendModel, isRunpod, promptTokens, data)
+    learnReadSpeed(sendModel, generousBudget, promptTokens, data)
     const msg = data.message || {}
     const rawContent = msg.content || ''
 
@@ -629,7 +647,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     }
 
     for (const call of detectedCalls) {
-      if (call.name === 'read_file' && !isRunpod && call.args && call.args.limit == null) {
+      if (call.name === 'read_file' && !generousBudget && call.args && call.args.limit == null) {
         call.args = { ...call.args, limit: ALWAYS_ON_READ_LINES }
       }
       currentArgs = call.args
@@ -732,21 +750,21 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     const wrapTokens = wrapMessages.reduce((n, m) => n + estimateTokens(m), 0)
     // Only when it is quick: on Always On this summary re-read the whole
     // conversation and kept the user waiting another half hour for a note.
-    if (readSecondsFor(modelForTarget(model, isRunpod), isRunpod, wrapTokens) <= WRAPUP_MAX_READ_S) {
+    if (readSecondsFor(modelForTarget(model, isRunpod, isKaggle), generousBudget, wrapTokens) <= WRAPUP_MAX_READ_S) {
       try {
         const wrapDeadline = AbortSignal.timeout((WRAPUP_MAX_READ_S + 180) * 1000)
         const r = await postChat(targetUrl, {
-          model: modelForTarget(model, isRunpod),
+          model: modelForTarget(model, isRunpod, isKaggle),
           messages: wrapMessages,
           stream: false,
           options: { num_predict: 1500, num_ctx: numCtx },
-        }, signal ? AbortSignal.any([signal, wrapDeadline]) : wrapDeadline, isRunpod)
+        }, signal ? AbortSignal.any([signal, wrapDeadline]) : wrapDeadline, isRunpod || isKaggle)
         if (r.ok) summary = String((await r.json()).message?.content || '').trim()
       } catch {}
     }
     const n = toolSteps.length
     const why = timedOut
-      ? `this turn hit its ${WALL_CLOCK_BUDGET_MS / 60000}-minute limit while the model was still ${isRunpod ? 'working' : 'reading/answering on Always On'}`
+      ? `this turn hit its ${WALL_CLOCK_BUDGET_MS / 60000}-minute limit while the model was still ${generousBudget ? 'working' : 'reading/answering on Always On'}`
       : 'the limit for one turn was reached before the work was finished'
     const tip = !isRunpod && timedOut ? ' Switching to Turbo makes each step many times faster.' : ''
     const note = `*(stopped after ${n} tool action${n === 1 ? '' : 's'} — ${why}. Send "continue" and it will pick up from here.${tip})*`

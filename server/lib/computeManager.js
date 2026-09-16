@@ -13,9 +13,19 @@ import { OllamaTunnel, podSshEndpoint, TURBO_URL } from './ollamaTunnel.js'
 // Compute modes:
 // 1. "always_on": Hostinger KVM 8 VPS (2-5 tok/s, 24/7 flat $26/mo)
 // 2. "turbo": RunPod GPU pod (30-65+ tok/s, billed per hour while running)
+// 3. "kaggle": a Kaggle notebook's 2x T4 GPU, reached over a reverse SSH
+//    tunnel THE NOTEBOOK opens into this VPS (Kaggle has no public address —
+//    the direction is inverted from Turbo, where the VPS opens the tunnel).
+//    Not a service: it exists only while someone's notebook is running, capped
+//    at ~12h/session and 30 GPU-hours/week by Kaggle. Measured on 2x T4:
+//    reads ~390 tok/s, writes ~10-12 tok/s (see kaggle-nexus-benchmark.ipynb).
 
 const getApiKey = () => process.env.RUNPOD_API_KEY || ''
 let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://2.25.126.125:11434'
+// The tunnel's authorized_keys entry restricts it to `permitlisten="127.0.0.1:20140"` —
+// this must stay the same port or the notebook's reverse-forward is refused.
+export const KAGGLE_URL = process.env.KAGGLE_URL || 'http://127.0.0.1:20140'
+const KAGGLE_WEEKLY_LIMIT_S = 30 * 3600
 const SSH_KEY_PATH = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_ed25519')
 const STATE_FILE = path.join(__dirname, '../.compute-state.json')
 
@@ -35,12 +45,70 @@ function writeState(patch) {
   return next
 }
 
+const MODES = new Set(['turbo', 'kaggle', 'always_on'])
 function setCurrentMode(mode) {
-  currentMode = mode === 'turbo' ? 'turbo' : 'always_on'
+  currentMode = MODES.has(mode) ? mode : 'always_on'
   writeState({ mode: currentMode })
 }
 
-let currentMode = readState().mode === 'turbo' ? 'turbo' : 'always_on'
+let currentMode = MODES.has(readState().mode) ? readState().mode : 'always_on'
+
+// Weekly Kaggle GPU-hour usage. Kaggle enforces the real 30h/week cap on its
+// own side; this is just so Nexus can warn before a mid-turn cutoff surprises
+// someone. Accumulated only while a health check finds the tunnel actually up,
+// so a closed notebook does not keep racking up hours. Resets on a rolling 7
+// days from first use, not calendar weeks (Kaggle's own reset time is not public).
+let kaggleUsage = readState().kaggleUsage || { windowStart: 0, seconds: 0 }
+let lastKaggleCheck = 0
+function trackKaggleUsage(connected) {
+  const now = Date.now()
+  if (!kaggleUsage.windowStart || now - kaggleUsage.windowStart > 7 * 86400 * 1000) {
+    kaggleUsage = { windowStart: now, seconds: 0 }
+  }
+  if (connected && lastKaggleCheck) {
+    // Cap a single gap at 5 min: a server restart or long pause between checks
+    // must not be counted as connected time that never really happened.
+    kaggleUsage.seconds += Math.min(300, (now - lastKaggleCheck) / 1000)
+  }
+  lastKaggleCheck = connected ? now : 0
+  writeState({ kaggleUsage })
+}
+export function getKaggleUsage() {
+  const remaining = Math.max(0, KAGGLE_WEEKLY_LIMIT_S - kaggleUsage.seconds)
+  return { usedSeconds: Math.round(kaggleUsage.seconds), remainingSeconds: Math.round(remaining), limitSeconds: KAGGLE_WEEKLY_LIMIT_S, windowStart: kaggleUsage.windowStart }
+}
+
+// Is the notebook's reverse tunnel currently listening? A quick local check —
+// no SSH involved, the tunnel already did that work — so this is cheap enough
+// to run on every status poll.
+export async function kaggleReachable() {
+  try {
+    const r = await fetch(`${KAGGLE_URL}/health`, { signal: AbortSignal.timeout(2500) })
+    return r.ok
+  } catch {
+    return false
+  }
+}
+let lastKaggleReachable = false
+
+export function switchToKaggle() {
+  setCurrentMode('kaggle')
+  return getComputeStatus()
+}
+
+// Called by a chat turn before sending to Kaggle, mirroring ensureTurboReady:
+// if the notebook's tunnel is not up, fall back to Always On instead of
+// hanging the turn on a target that will never answer.
+export async function ensureKaggleReady() {
+  if (currentMode !== 'kaggle') return false
+  const ok = await kaggleReachable()
+  lastKaggleReachable = ok
+  trackKaggleUsage(ok)
+  if (ok) return true
+  setCurrentMode('always_on')
+  lastFallbackReason = 'the Kaggle notebook is not connected (start it and open the tunnel cell)'
+  return false
+}
 // A pod id is not a permanent address. Pods get exited when funds run out, GPUs
 // get reclaimed, and the replacement has a NEW id — so a single id baked into
 // .env means every replacement needs someone to edit the server by hand. The
@@ -109,32 +177,34 @@ export function runpodRequest(apiPath, { method = 'GET', body = null } = {}) {
 }
 
 export function getComputeStatus() {
-  return {
-    mode: currentMode,
-    hostingerUrl: HOSTINGER_OLLAMA_URL,
-    runpodPodId: knownPodId,
-    runpodActive: tunnel.ready,
-    activeUrl: currentMode === 'turbo' ? 'http://127.0.0.1:11435' : HOSTINGER_OLLAMA_URL,
-    details:
-      currentMode === 'turbo'
-        ? {
-            label: 'Turbo: RunPod model (GPU)',
-            speed: '30–65+ tok/s',
-            cost: 'per hour while running',
-            status: tunnel.ready ? 'ready' : 'disconnected',
-          }
-        : {
-            label: 'Always On: Hostinger model (KVM 8)',
-            speed: '2–5 tok/s',
-            cost: '$26/mo flat',
-            status: 'ready',
-          },
+  const activeUrl = currentMode === 'turbo' ? 'http://127.0.0.1:11435' : currentMode === 'kaggle' ? KAGGLE_URL : HOSTINGER_OLLAMA_URL
+  let details
+  if (currentMode === 'turbo') {
+    details = { label: 'Turbo: RunPod model (GPU)', speed: '30–65+ tok/s', cost: 'per hour while running', status: tunnel.ready ? 'ready' : 'disconnected' }
+  } else if (currentMode === 'kaggle') {
+    details = { label: 'Kaggle: notebook GPU (2x T4)', speed: '~10-12 tok/s, reads ~390 tok/s', cost: 'free — 30 GPU-hrs/week', status: lastKaggleReachable ? 'ready' : 'disconnected', usage: getKaggleUsage() }
+  } else {
+    details = { label: 'Always On: Hostinger model (KVM 8)', speed: '2–5 tok/s', cost: '$26/mo flat', status: 'ready' }
   }
+  return { mode: currentMode, hostingerUrl: HOSTINGER_OLLAMA_URL, runpodPodId: knownPodId, runpodActive: tunnel.ready, activeUrl, details }
 }
 
 // Include the provider's real pod state so the UI can distinguish the selected
 // route from a RunPod instance that is still running and accruing charges.
 export async function getLiveComputeStatus() {
+  // Kaggle has no RunPod pod to poll and no provisioning state — a short,
+  // separate path instead of threading a third mode through the RunPod logic
+  // below (which fetches pod details unconditionally, for the pod picker).
+  if (currentMode === 'kaggle') {
+    const ok = await kaggleReachable()
+    lastKaggleReachable = ok
+    trackKaggleUsage(ok)
+    const usage = getKaggleUsage()
+    let notice = null
+    if (!ok) notice = 'The Kaggle notebook is not connected. Start it and run the tunnel cell — Nexus will pick it up automatically.'
+    else if (usage.remainingSeconds < 3600) notice = `Kaggle's weekly GPU quota is nearly used up (~${Math.round(usage.remainingSeconds / 60)} min left). It may cut off mid-turn.`
+    return { ...getComputeStatus(), switching: Boolean(switchPromise), ...(notice ? { notice } : {}) }
+  }
   await tunnel.health()
   const switching = Boolean(switchPromise)
   try {

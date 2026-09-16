@@ -5,6 +5,7 @@ import {
   setHostingerIp,
   switchToAlwaysOn,
   switchToTurbo,
+  switchToKaggle,
   startRunpodPod,
   stopRunpodPod,
   fetchPodDetails,
@@ -46,6 +47,9 @@ router.post('/switch', async (req, res) => {
     const { mode = 'always_on', stopPod = false } = req.body || {}
     if (mode === 'turbo') {
       const result = await switchToTurbo()
+      return res.json(result)
+    } else if (mode === 'kaggle') {
+      const result = switchToKaggle()
       return res.json(result)
     } else {
       const result = await switchToAlwaysOn({ stopPod })

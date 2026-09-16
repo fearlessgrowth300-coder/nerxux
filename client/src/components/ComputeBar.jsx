@@ -90,6 +90,8 @@ export default function ComputeBar() {
   }
 
   const isTurbo = status.mode === 'turbo'
+  const isKaggle = status.mode === 'kaggle'
+  const isAlwaysOn = !isTurbo && !isKaggle
 
   return (
     <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 bg-nexus-panel/80 border-b border-nexus-border/60 text-xs">
@@ -103,7 +105,7 @@ export default function ComputeBar() {
           disabled={loading}
           className={[
             'flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition cursor-pointer',
-            !isTurbo
+            isAlwaysOn
               ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-500/10 ring-1 ring-emerald-500/30'
               : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-gray-200 border border-transparent',
           ].join(' ')}
@@ -112,10 +114,36 @@ export default function ComputeBar() {
           <span>🐢</span>
           <span>Always On</span>
           <span className="text-[10px] opacity-70 hidden sm:inline">(Hostinger model)</span>
-          {!isTurbo && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>}
+          {isAlwaysOn && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>}
         </button>
 
-        {/* Button 2: Turbo */}
+        {/* Button 2: Kaggle. Unlike Always On / Turbo, Nexus cannot start or stop
+            this — it only detects whether the notebook's tunnel is currently up.
+            Selecting it while the tunnel is down is fine: the adapter falls back
+            to Always On per-turn and says why, same as a dead Turbo pod. */}
+        <button
+          type="button"
+          onClick={() => handleSwitch('kaggle')}
+          disabled={loading}
+          className={[
+            'flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition cursor-pointer',
+            isKaggle
+              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm shadow-sky-500/10 ring-1 ring-sky-500/30'
+              : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-gray-200 border border-transparent',
+          ].join(' ')}
+          title="Kaggle notebook, 2x T4 GPU: free, ~30 GPU-hrs/week, only while the notebook's tunnel is running"
+        >
+          <span>📓</span>
+          <span>Kaggle</span>
+          <span className="text-[10px] opacity-70 hidden sm:inline">(notebook GPU)</span>
+          {isKaggle && (
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${status.details?.status === 'ready' ? 'bg-sky-400 animate-pulse' : 'bg-red-400'}`}
+            ></span>
+          )}
+        </button>
+
+        {/* Button 3: Turbo */}
         <button
           type="button"
           onClick={() => handleSwitch('turbo')}
@@ -161,7 +189,7 @@ export default function ComputeBar() {
           <div className="flex min-w-0 items-center gap-2 text-gray-400">
             <span
               className={`h-2 w-2 rounded-full ${
-                isTurbo ? 'bg-amber-400' : 'bg-emerald-400'
+                isTurbo ? 'bg-amber-400' : isKaggle ? 'bg-sky-400' : 'bg-emerald-400'
               }`}
             />
             <span>

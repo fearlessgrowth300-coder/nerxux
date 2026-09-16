@@ -76,5 +76,5 @@ test('the adapter wires in the guard, the request pin and shorter Always On read
   assert.match(src, /fitTurn\(messages, promptBudget - recordTokens, \{ request, obsMeta \}\)/)
   assert.match(src, /readsDone\.has\(readKey\)/)
   assert.match(src, /\['write_file', 'edit_file', 'execute_command'\]\.includes\(call\.name\)\) readsDone\.clear\(\)/)
-  assert.match(src, /!isRunpod && call\.args && call\.args\.limit == null/)
+  assert.match(src, /!generousBudget && call\.args && call\.args\.limit == null/)
 })

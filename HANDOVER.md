@@ -112,6 +112,47 @@ local HEAD**, printing `Deployed commit: <sha>`.
 
 ---
 
+## Compute: "Always On" vs "Turbo" vs "Kaggle"
+
+**Kaggle (added 2026-09-16)** is a third mode: a Kaggle notebook's 2x T4 GPU (free,
+~30 GPU-hrs/week), reached over a **reverse** SSH tunnel — the notebook opens it INTO
+this VPS (backwards from Turbo, where the VPS opens the tunnel out to RunPod), because
+Kaggle has no public address of its own.
+
+- **VPS side:** `/root/.ssh/authorized_keys` has one extra, tightly restricted entry:
+  `restrict,port-forwarding,permitopen="127.0.0.1:1",permitlisten="127.0.0.1:20140",command="echo tunnel-only key; exit 1" ssh-ed25519 ... kaggle-tunnel-nexus`.
+  Verified live (2026-09-16): the key cannot open a shell, cannot forward any other
+  port, cannot local-forward anywhere — it can ONLY reverse-forward to
+  `127.0.0.1:20140`. (`permitopen="none"` is rejected by OpenSSH 9.6 as invalid — use
+  a dead port like `127.0.0.1:1` instead, or the key fails to authenticate at all.)
+  The private key itself is not in this repo or on the VPS filesystem — only the
+  user has it, to paste into a Kaggle Secret.
+- **Nexus side:** `computeManager.js` exports `KAGGLE_URL` (`http://127.0.0.1:20140`),
+  `switchToKaggle()`, `kaggleReachable()` (a `/health` probe, no SSH involved — the
+  tunnel already did that work), `ensureKaggleReady()` (same pre-flight-then-fallback
+  pattern as `ensureTurboReady`: not reachable -> falls back to Always On, never
+  strands a turn), and `getKaggleUsage()` (a rolling 7-day connected-seconds counter,
+  purely advisory — Kaggle enforces the real 30h/week cap on its own side).
+  `adapters/ollama.js`: Kaggle always talks the OpenAI protocol via
+  `lib/llamaServerChat.js` (same translation Always On's llama-server uses), gets
+  Turbo's generous budget (`generousBudget = isRunpod || isKaggle` — GPU reads fast
+  and reuses the prompt cache) but keeps its real model name (`modelForTarget(model,
+  isRunpod, isKaggle)` — no Always-On-model swap). `client/components/ComputeBar.jsx`
+  has a third button; picking it is safe even if the notebook is off (falls back
+  per-turn with a notice, same UX as a dead Turbo pod).
+- **The notebook:** `kaggle-nexus-turbo.ipynb` (given to the user, not in this repo —
+  it embeds no secret itself, it reads one from a Kaggle Secret named
+  `NEXUS_TUNNEL_KEY`). Builds llama.cpp with CUDA at the same pinned commit used for
+  Always On (`4df29be4`), runs `Swift-Qwen3.8-27B-Uncensored-Dynamic-MTP-UD-Q4_K_XL.gguf`
+  (self-speculative MTP, single file) on both T4s, then opens the reverse tunnel and
+  idles printing a heartbeat until stopped or the session/quota ends.
+- **Not verified (couldn't be, from here):** that Kaggle's sandbox actually permits
+  outbound SSH (port 22) from a notebook. Everything else in this mode was tested
+  against the real VPS; this one assumption only gets checked when the user runs it.
+- **To change the port:** update `KAGGLE_URL` in `server/.env`, the notebook's
+  `REMOTE_PORT`, AND the `permitlisten` value in authorized_keys — all three must
+  agree or the tunnel is refused.
+
 ## Compute: "Always On" vs "Turbo"
 
 **Turbo** serves `orcarouter/Qwen3.8-27B-Uncensored:latest` (17.7 GB, Q4_K_M).
