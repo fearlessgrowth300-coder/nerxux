@@ -12,6 +12,7 @@ import { agentStateParts } from '../lib/agentState.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { fitTurn } from '../lib/compactTurn.js'
+import { alwaysOnUsesOpenAI, postOpenAIChat, openAIModels } from '../lib/llamaServerChat.js'
 import { getComputeStatus, ensureTurboReady, takeFallbackReason } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
@@ -31,6 +32,21 @@ export const NOTES_POINTER = '\n\n# Project notes\nThis project has a NEXUS.md a
 
 // Ollama's own wording when the tool call it received will not parse.
 const MALFORMED_TOOL_CALL = /XML syntax error|unexpected end element|invalid character|unmarshal|failed to parse tool/i
+
+// One chat request to the model server. Turbo and a default Always On speak
+// Ollama's /api/chat; with ALWAYS_ON_API=openai, Always On is a llama-server and
+// the request is translated both ways (lib/llamaServerChat.js), so everything
+// after this call sees the same Ollama-shaped reply either way.
+function postChat(targetUrl, body, signal, isRunpod) {
+  if (!isRunpod && alwaysOnUsesOpenAI()) return postOpenAIChat(targetUrl, body, { signal })
+  return fetch(`${targetUrl}/api/chat`, {
+    dispatcher: OLLAMA_DISPATCHER,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+}
 
 function resolveTargetUrl(model) {
   const status = getComputeStatus()
@@ -431,19 +447,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     let resp
     let data
     try {
-      resp = await fetch(`${targetUrl}/api/chat`, {
-        dispatcher: OLLAMA_DISPATCHER,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: sendModel,
-          messages: stepMessages,
-          tools: agentTools,
-          stream: true,
-          options: { num_predict: numPredict, num_ctx: numCtx },
-        }),
-        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
-      })
+      resp = await postChat(targetUrl, {
+        model: sendModel,
+        messages: stepMessages,
+        tools: agentTools,
+        stream: true,
+        options: { num_predict: numPredict, num_ctx: numCtx },
+      }, signal ? AbortSignal.any([signal, deadline]) : deadline, isRunpod)
       if (resp.ok) data = await readChatResponse(resp, onChunk)
     } catch (e) {
       stopWatch()
@@ -469,9 +479,10 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           continue
         }
       }
-      const targetDesc = isRunpod ? `Runpod GPU Ollama tunnel at ${targetUrl}` : `local Ollama at ${targetUrl}`
+      const onLlamaServer = !isRunpod && alwaysOnUsesOpenAI()
+      const targetDesc = isRunpod ? `Runpod GPU Ollama tunnel at ${targetUrl}` : onLlamaServer ? `the Always On llama-server at ${targetUrl}` : `local Ollama at ${targetUrl}`
       throw new Error(
-        `Can't reach ${targetDesc}. Is the SSH tunnel / Ollama active? (${e.message}${cause ? ' / ' + cause : ''})`
+        `Can't reach ${targetDesc}. ${onLlamaServer ? 'Is the llama-server service running?' : 'Is the SSH tunnel / Ollama active?'} (${e.message}${cause ? ' / ' + cause : ''})`
       )
     }
 
@@ -724,18 +735,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     if (readSecondsFor(modelForTarget(model, isRunpod), isRunpod, wrapTokens) <= WRAPUP_MAX_READ_S) {
       try {
         const wrapDeadline = AbortSignal.timeout((WRAPUP_MAX_READ_S + 180) * 1000)
-        const r = await fetch(`${targetUrl}/api/chat`, {
-          dispatcher: OLLAMA_DISPATCHER,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: modelForTarget(model, isRunpod),
-            messages: wrapMessages,
-            stream: false,
-            options: { num_predict: 1500, num_ctx: numCtx },
-          }),
-          signal: signal ? AbortSignal.any([signal, wrapDeadline]) : wrapDeadline,
-        })
+        const r = await postChat(targetUrl, {
+          model: modelForTarget(model, isRunpod),
+          messages: wrapMessages,
+          stream: false,
+          options: { num_predict: 1500, num_ctx: numCtx },
+        }, signal ? AbortSignal.any([signal, wrapDeadline]) : wrapDeadline, isRunpod)
         if (r.ok) summary = String((await r.json()).message?.content || '').trim()
       } catch {}
     }
@@ -787,6 +792,11 @@ export async function health() {
   const urls = [status.activeUrl, status.hostingerUrl, 'http://127.0.0.1:11435'].filter(Boolean)
   for (const url of [...new Set(urls)]) {
     try {
+      if (url === status.hostingerUrl && alwaysOnUsesOpenAI()) {
+        models.push(...await openAIModels(url))
+        reachable = true
+        continue
+      }
       const r = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(2000) })
       if (r.ok) {
         reachable = true

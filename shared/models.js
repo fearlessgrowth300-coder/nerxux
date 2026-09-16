@@ -122,11 +122,11 @@ export const CHAT_MODELS = [
     vision: false,
   },
   {
-    // Turbo (RunPod GPU) runs this 27B. Always On (VPS CPU) sends
-    // ALWAYS_ON_MODEL instead — Qwen3.6 35B-A3B abliterated, ~3x faster there
-    // (server/adapters/ollama.js). The id stays the same so saved chats keep working.
+    // Turbo (RunPod GPU) runs this 27B on Ollama. Always On (VPS CPU) runs
+    // Qwen3.8 27B HauhauCS Aggressive + FastMTP on llama-server (ALWAYS_ON_API=openai,
+    // server/lib/llamaServerChat.js). The id stays the same so saved chats keep working.
     id: 'qwen3-8-runpod',
-    label: 'Qwen Uncensored (Turbo: 3.8 27B · Always On: 3.6 35B-A3B)',
+    label: 'Qwen 3.8 27B Uncensored (Turbo · Always On: HauhauCS + MTP)',
     provider: 'ollama',
     apiModel: 'orcarouter/Qwen3.8-27B-Uncensored:latest',
     vision: false,

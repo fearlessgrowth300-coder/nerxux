@@ -115,7 +115,21 @@ local HEAD**, printing `Deployed commit: <sha>`.
 ## Compute: "Always On" vs "Turbo"
 
 **Turbo** serves `orcarouter/Qwen3.8-27B-Uncensored:latest` (17.7 GB, Q4_K_M).
-**Always On** serves `huihui_ai/Qwen3.6-abliterated:35b-a3b` (23 GB, mixture-of-experts,
+
+**Always On (since 2026-09-16)** is **llama-server**, not Ollama: systemd unit
+`llama-server`, `127.0.0.1:8080`, CPU build of llama.cpp `4df29be4` + the HauhauCS FastMTP
+patch in `/opt/llama/llama.cpp`, model `Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf`
+with the `FastMTP-32K` draft (spec-type draft-mtp, n-max 3), context 32768, reasoning xhigh.
+`server/.env`: `HOSTINGER_OLLAMA_URL=http://127.0.0.1:8080`, `ALWAYS_ON_API=openai`,
+`OLLAMA_JOURNAL_UNIT=llama-server` (live read progress parses its log). The adapter
+translates Ollama `/api/chat` <-> OpenAI `/v1/chat/completions` in `lib/llamaServerChat.js`;
+Turbo still speaks Ollama. The VPS `ollama` service is stopped and disabled (RAM).
+First measured request (316-token prompt, cold): reads **7 tok/s**, writes **3.7 tok/s**
+(FastMTP accepted 51/87 drafts) — slower than the MoE model below; read-time estimates
+learn from real timings. To go back: `systemctl disable --now llama-server`, reinstall/pull
+the Ollama model, `systemctl enable --now ollama`, unset `ALWAYS_ON_API`, URL back to :11434.
+
+Before that, **Always On** served `huihui_ai/Qwen3.6-abliterated:35b-a3b` (23 GB, mixture-of-experts,
 ~3B active) since 2026-09-15 — the chat picker entry is the same; the adapter swaps the
 27B's names for `ALWAYS_ON_MODEL` when the target is Always On (`modelForTarget` in
 `adapters/ollama.js`; set `ALWAYS_ON_MODEL` in `server/.env` to change it). Measured on the
