@@ -84,10 +84,31 @@ def main():
     if CODE_ONLY:
         safe_print("Preserving existing server/.env (code-only release).")
     else:
-        safe_print("Writing server/.env...")
+        # Rewrite only the keys this script manages. It used to replace the
+        # whole file, which silently wiped every setting added on the server
+        # (ALWAYS_ON_API, the llama-server URL, HOSTINGER_API_TOKEN, ...).
+        safe_print("Writing server/.env (managed keys; others preserved)...")
         sftp = ssh.open_sftp()
+        managed = {line.split('=', 1)[0] for line in ENV_CONTENT.splitlines() if '=' in line}
+        try:
+            with sftp.file("/root/nerxux/server/.env", "r") as f:
+                existing = f.read().decode('utf-8', errors='replace').splitlines()
+        except IOError:
+            existing = []
+        kept = [line for line in existing
+                if '=' in line and not line.lstrip().startswith('#')
+                and line.split('=', 1)[0].strip() not in managed]
+        # Settings made on the server win over the local copy for the Always On
+        # target, which the server itself decides (Ollama :11434 or llama-server).
+        server_url = next((l for l in existing if l.startswith('HOSTINGER_OLLAMA_URL=')), None)
+        content = ENV_CONTENT
+        if server_url:
+            content = '\n'.join(server_url if l.startswith('HOSTINGER_OLLAMA_URL=') else l for l in content.splitlines()) + '\n'
+        if kept:
+            content += '\n# preserved from the server\n' + '\n'.join(kept) + '\n'
+            safe_print(f"Preserved {len(kept)} server-only setting(s): " + ', '.join(l.split('=', 1)[0] for l in kept))
         with sftp.file("/root/nerxux/server/.env", "w") as f:
-            f.write(ENV_CONTENT)
+            f.write(content)
         sftp.close()
 
     # 3. Install dependencies
