@@ -34,6 +34,7 @@ let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://2.25.126.
 export const KAGGLE_SLOTS = [
   { id: 'a', label: 'Kaggle A', url: process.env.KAGGLE_URL || 'http://127.0.0.1:20140' },
   { id: 'b', label: 'Kaggle B', url: process.env.KAGGLE_URL_2 || 'http://127.0.0.1:20141' },
+  { id: 'c', label: 'Kaggle C', url: process.env.KAGGLE_URL_3 || 'http://127.0.0.1:20142' },
 ]
 // Kept for callers that only ever cared about "a" Kaggle URL (the primary
 // slot) — the multi-slot logic lives behind isKaggleUrl()/findReachableKaggleSlot().

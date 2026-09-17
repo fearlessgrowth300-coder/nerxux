@@ -26,19 +26,24 @@ test('computeManager exposes exactly what the adapter and routes need for Kaggle
     assert.ok(name in cm, `computeManager must export ${name}`)
   }
   assert.match(cm.KAGGLE_URL, /^http:\/\/127\.0\.0\.1:20140$/, 'must match the port the primary account tunnel restriction permits')
-  assert.equal(cm.KAGGLE_SLOTS.length, 2, 'two accounts')
-  assert.match(cm.KAGGLE_SLOTS[1].url, /^http:\/\/127\.0\.0\.1:20141$/, 'the second account must use a DIFFERENT port than the first — two notebooks sharing one port cannot both hold the tunnel')
-  assert.ok(cm.isKaggleUrl(cm.KAGGLE_SLOTS[0].url) && cm.isKaggleUrl(cm.KAGGLE_SLOTS[1].url), 'both accounts must be recognised as Kaggle targets')
+  assert.equal(cm.KAGGLE_SLOTS.length, 3, 'three accounts')
+  const ports = cm.KAGGLE_SLOTS.map((s) => s.url)
+  assert.deepEqual(new Set(ports).size, ports.length, 'every account must use a DIFFERENT port — two notebooks sharing one port cannot both hold the tunnel')
+  assert.match(cm.KAGGLE_SLOTS[1].url, /^http:\/\/127\.0\.0\.1:20141$/)
+  assert.match(cm.KAGGLE_SLOTS[2].url, /^http:\/\/127\.0\.0\.1:20142$/)
+  assert.ok(ports.every((u) => cm.isKaggleUrl(u)), 'every account must be recognised as a Kaggle target')
   assert.ok(!cm.isKaggleUrl('http://127.0.0.1:11435'), 'a Turbo url must not be mistaken for Kaggle')
 })
 
-test('the two Kaggle accounts each get their own restricted SSH key on their own port — verified live against the VPS', () => {
-  // Documents the manual verification of the SECOND account's authorized_keys
-  // entry, added alongside the first (see the single-port test above). Two
-  // notebooks sharing one port cannot both hold the tunnel — this is why a
-  // second account needs its own port, not just its own key.
+test('all three Kaggle accounts each get their own restricted SSH key on their own port — verified live against the VPS', () => {
+  // Documents the manual verification of accounts B and C's authorized_keys
+  // entries, added alongside the first (see the single-port test above). Two
+  // notebooks sharing one port cannot both hold the tunnel — this is why each
+  // extra account needs its own port, not just its own key.
   const restrictionB = 'restrict,port-forwarding,permitopen="127.0.0.1:1",permitlisten="127.0.0.1:20141",command="echo tunnel-only key; exit 1"'
+  const restrictionC = 'restrict,port-forwarding,permitopen="127.0.0.1:1",permitlisten="127.0.0.1:20142",command="echo tunnel-only key; exit 1"'
   assert.match(restrictionB, /permitlisten="127\.0\.0\.1:20141"/, 'account B must reverse-forward to a port account A never uses')
+  assert.match(restrictionC, /permitlisten="127\.0\.0\.1:20142"/, 'account C must reverse-forward to a port neither A nor B uses')
 })
 
 test('switching to kaggle mode is reflected in status, with its own label and no billing claim', async () => {
