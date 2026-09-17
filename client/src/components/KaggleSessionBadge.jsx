@@ -38,7 +38,7 @@ export default function KaggleSessionBadge() {
         `not Kaggle's own clock, so the real limit may land a little earlier.` +
         (usage ? ` Weekly quota: ${formatDuration(usage.remainingSeconds)} left of 30h.` : '')
       }
-      className={`hidden items-center gap-1.5 rounded-full border px-3 py-1 text-xs sm:flex ${tone}`}
+      className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs ${tone}`}
     >
       <span>📓</span>
       <span className="font-mono">{formatDuration(countdown.remainingSeconds)}</span>
