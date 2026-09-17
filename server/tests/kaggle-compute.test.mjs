@@ -51,7 +51,10 @@ test('switching to kaggle mode is reflected in status, with its own label and no
   cm.switchToKaggle()
   const status = cm.getComputeStatus()
   assert.equal(status.mode, 'kaggle')
-  assert.equal(status.activeUrl, cm.KAGGLE_URL)
+  // Whichever account is active — the sticky slot carries over from whatever ran
+  // before, so pinning this to slot A would only be testing test ordering.
+  assert.ok(cm.KAGGLE_SLOTS.some((s) => s.url === status.activeUrl),
+    `activeUrl ${status.activeUrl} must be one of the configured Kaggle accounts`)
   assert.match(status.details.label, /Kaggle/)
   assert.match(status.details.cost, /free/i, 'Kaggle GPU hours are free, unlike Turbo')
   assert.ok(status.details.usage, 'usage/quota must be visible so the user does not run out mid-turn unexpectedly')
@@ -74,7 +77,12 @@ test('ensureKaggleReady stays on kaggle when the tunnel answers', async () => {
   const cm = await import('../lib/computeManager.js')
   cm.switchToKaggle()
   const realFetch = globalThis.fetch
-  globalThis.fetch = async (url) => { assert.match(String(url), /127\.0\.0\.1:20140\/health/); return new Response('{"status":"ok"}', { status: 200 }) }
+  // The probe is /v1/models, not /health: it proves reachability AND carries
+  // the server's real context window in the same request (see kaggleSlotReachable).
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /127\.0\.0\.1:20140\/v1\/models/)
+    return new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: 32768 } }] }), { status: 200 })
+  }
   try {
     assert.equal(await cm.ensureKaggleReady(), true)
     assert.equal(cm.getComputeStatus().mode, 'kaggle')
@@ -191,7 +199,13 @@ test('a Nexus restart does not reset an in-progress Kaggle countdown', async () 
 // starts llama-server with --ctx-size 32768, a FIXED limit the OpenAI-style
 // endpoint cannot raise per request. Nexus budgeted room for a ~65k-token
 // prompt and sent something the real server could only ever reject.
-test("a Kaggle request never exceeds the notebook's real 32768 context, even with a huge conversation", async () => {
+// Parameterised over the window the SERVER reports, because that is now where
+// the number comes from: the notebook picks its --ctx-size off a fallback
+// ladder (whatever fits the GPU that run), and Nexus reads it back from
+// /v1/models. Both rungs are checked so neither a small nor a large window
+// can drift out of budget again.
+for (const serverCtx of [32768, 131072]) {
+  test(`a Kaggle request never exceeds the context the server reports (${serverCtx}), even with a huge conversation`, async () => {
   const cm = await import('../lib/computeManager.js')
   const { run } = await import('../adapters/ollama.js')
   const { estimateTokens } = await import('../lib/fitContext.js')
@@ -199,7 +213,9 @@ test("a Kaggle request never exceeds the notebook's real 32768 context, even wit
   const realFetch = globalThis.fetch
   let sentBody = null
   globalThis.fetch = async (url, init) => {
-    if (String(url).includes('/health')) return new Response('{"status":"ok"}', { status: 200 })
+    if (String(url).includes('/v1/models')) {
+      return new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: serverCtx } }] }), { status: 200 })
+    }
     sentBody = JSON.parse(init.body)
     return new Response(JSON.stringify({
       id: 'x', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }],
@@ -207,6 +223,7 @@ test("a Kaggle request never exceeds the notebook's real 32768 context, even wit
     }), { status: 200 })
   }
   try {
+    await cm.ensureKaggleReady() // learn the server's window before the turn
     // A conversation big enough to have produced the real 37742-token request
     // under the old bug (generousBudget gave it a 65536 ceiling); the model
     // here has no tool defs beyond the agent's own, keeping this deterministic.
@@ -218,14 +235,15 @@ test("a Kaggle request never exceeds the notebook's real 32768 context, even wit
     assert.ok(sentBody, 'the chat request must actually have been sent (Kaggle was reachable)')
     const sentTokens = sentBody.messages.reduce((n, m) => n + estimateTokens(m), 0)
     // Nexus's own reply budget (numPredict) plus the 512-token safety margin
-    // must fit alongside what was sent, inside the notebook's REAL 32768 window.
-    assert.ok(sentTokens + 12000 + 512 <= 32768,
-      `sent ${sentTokens} tokens (+ 12000 reply + 512 margin = ${sentTokens + 12512}) — must fit in Kaggle's real 32768, not Turbo's 65536`)
+    // must fit alongside what was sent, inside the window the server declared.
+    assert.ok(sentTokens + 12000 + 512 <= serverCtx,
+      `sent ${sentTokens} tokens (+ 12000 reply + 512 margin = ${sentTokens + 12512}) — must fit in the server's reported ${serverCtx}`)
   } finally {
     globalThis.fetch = realFetch
     cm.switchToKaggle() // leave mode as kaggle is fine; state is per-process anyway
   }
-})
+  })
+}
 
 test('a Turbo or Kaggle turn that falls back to Always On mid-way drops the fast budget and label too', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
@@ -251,11 +269,13 @@ test('a Kaggle tunnel that drops mid-turn falls back to Always On instead of thr
   let tunnelUp = true // the pre-turn ensureKaggleReady check must see it up
   let chatCalls = 0
   globalThis.fetch = async (url, init) => {
-    if (String(url).includes('/health')) {
+    // Reachability probe (see kaggleSlotReachable) — must be matched BEFORE the
+    // chat branch below, since it targets the same host:port.
+    if (String(url).includes('/v1/models')) {
       if (!tunnelUp) throw new TypeError('fetch failed')
-      return new Response('{"status":"ok"}', { status: 200 })
+      return new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: 32768 } }] }), { status: 200 })
     }
-    if (String(url).includes('127.0.0.1:20140')) {
+    if (/127\.0\.0\.1:2014[0-9]/.test(String(url))) {
       chatCalls++
       tunnelUp = false // the notebook's session ends right as this first real request lands
       const e = new TypeError('terminated'); e.cause = { code: 'UND_ERR_SOCKET' }; throw e
@@ -308,11 +328,18 @@ test("each Kaggle account tracks its own weekly usage — one account's hours do
   const realFetch = globalThis.fetch
   try {
     cm.switchToKaggle()
-    globalThis.fetch = async (url) => (String(url).startsWith(cm.KAGGLE_SLOTS[0].url) ? new Response('{"status":"ok"}', { status: 200 }) : Promise.reject(new TypeError('fetch failed')))
+    // Only account A answers. Assert B is UNCHANGED across A's activity rather
+    // than zero: usage is persisted in .compute-state.json and earlier tests may
+    // legitimately have left some on B — "unchanged" is the real invariant.
+    const before = cm.getKaggleUsage('b').usedSeconds
+    globalThis.fetch = async (url) => (String(url).startsWith(cm.KAGGLE_SLOTS[0].url)
+      ? new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: 32768 } }] }), { status: 200 })
+      : Promise.reject(new TypeError('fetch failed')))
     await cm.ensureKaggleReady() // accrues some time on account A
-    const usageA = cm.getKaggleUsage('a')
-    const usageB = cm.getKaggleUsage('b')
-    assert.notEqual(usageA.windowStart, 0, 'account A must have a real usage window once used')
-    assert.equal(usageB.usedSeconds, 0, "account B's usage must be untouched by account A's activity")
+    await new Promise((r) => setTimeout(r, 5))
+    await cm.ensureKaggleReady() // second check: A actually accrues seconds now
+    assert.notEqual(cm.getKaggleUsage('a').windowStart, 0, 'account A must have a real usage window once used')
+    assert.equal(cm.getKaggleUsage('b').usedSeconds, before,
+      "account B's usage must be untouched by account A's activity")
   } finally { globalThis.fetch = realFetch }
 })

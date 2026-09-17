@@ -47,7 +47,14 @@ test('Always On has room for the agent, and oversized notes degrade instead of f
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
   const ctx = Number(src.match(/const ALWAYS_ON_CTX = (\d+)/)[1])
   assert.ok(ctx >= 32768, `Always On context ${ctx} cannot hold the agent's ~12k fixed tokens plus a conversation`)
-  assert.match(src, /let numCtx = isRunpod \? 65536 : ALWAYS_ON_CTX/, '65536 is real only on Turbo (Ollama); Kaggle/Always On both run llama-server, fixed at 32768 by --ctx-size, regardless of generousBudget')
+  // 65536 is real only on Turbo (Ollama). Always On's llama-server is fixed at
+  // ALWAYS_ON_CTX. Kaggle's is whatever --ctx-size that notebook run managed to
+  // allocate (it walks a fallback ladder), so it is READ BACK from the server
+  // via getKaggleCtx() rather than assumed — with ALWAYS_ON_CTX as the floor
+  // until it has been seen. Never hardcode a size for Kaggle here again: a
+  // hardcoded 65536 against a real 32768 is exactly what broke in production.
+  assert.match(src, /let numCtx = isRunpod \? 65536 : isKaggle \? \(getKaggleCtx\(\) \|\| ALWAYS_ON_CTX\) : ALWAYS_ON_CTX/,
+    'Kaggle must budget against the context the server reports, not a constant')
   assert.match(src, /numCtx = ALWAYS_ON_CTX/, 'mid-turn fallback uses the same window')
   assert.match(src, /messages\[0\]\.content = system \+ NOTES_POINTER/, 'notes that do not fit become a pointer to NEXUS.md')
   const fixed = 3048 + 3865 + 2874 + 1592 + 256

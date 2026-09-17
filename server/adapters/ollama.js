@@ -13,7 +13,7 @@ import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { fitTurn } from '../lib/compactTurn.js'
 import { alwaysOnUsesOpenAI, postOpenAIChat, openAIModels } from '../lib/llamaServerChat.js'
-import { getComputeStatus, ensureTurboReady, ensureKaggleReady, takeFallbackReason, isKaggleUrl } from '../lib/computeManager.js'
+import { getComputeStatus, ensureTurboReady, ensureKaggleReady, takeFallbackReason, isKaggleUrl, getKaggleCtx } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
 import { watchReadProgress } from '../lib/ollamaReadProgress.js'
@@ -300,7 +300,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // OTHER generousBudget-gated choice below is fine for Kaggle (it genuinely
   // reads fast and reuses the prompt cache) — only the real context ceiling
   // must track the server that will actually enforce it, not a shared flag.
-  let numCtx = isRunpod ? 65536 : ALWAYS_ON_CTX
+  // Kaggle's llama-server has a FIXED window chosen at process start, and its
+  // OpenAI-style endpoint cannot raise it per request — so Nexus must budget
+  // against the real number, not a guess. getKaggleCtx() reports what that
+  // server actually started with; the ALWAYS_ON_CTX floor covers the window
+  // between connecting and first reading it. Hardcoding this is what caused
+  // "request (37742 tokens) exceeds the available context size" in production.
+  let numCtx = isRunpod ? 65536 : isKaggle ? (getKaggleCtx() || ALWAYS_ON_CTX) : ALWAYS_ON_CTX
   // What is left for the conversation once the answer's budget is set aside.
   const toolTokens = estimateTokens(JSON.stringify(agentTools))
   // Always On re-reads everything it is sent on every step, so what it is sent

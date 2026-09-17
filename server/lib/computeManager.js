@@ -151,13 +151,29 @@ export function getKaggleSessionTime(slotId = kaggleActiveSlot) {
 // Is a given slot's reverse tunnel currently listening? A quick local check —
 // no SSH involved, the tunnel already did that work — so this is cheap enough
 // to run on every status poll.
+// Probes /v1/models rather than /health: it answers 200 exactly when /health
+// would, AND carries the context window the server actually started with
+// (meta.n_ctx) in the same request. That number used to be hardcoded on the
+// Nexus side, and drifted from the notebook's --ctx-size — which is precisely
+// what produced the live failure on 2026-09-17: "request (37742 tokens)
+// exceeds the available context size (32768 tokens)". Reading it from the
+// server is what makes that class of bug impossible rather than merely fixed.
+const kaggleCtx = {} // slot id -> n_ctx last reported, or undefined
 async function kaggleSlotReachable(slot) {
   try {
-    const r = await fetch(`${slot.url}/health`, { signal: AbortSignal.timeout(2500) })
-    return r.ok
+    const r = await fetch(`${slot.url}/v1/models`, { signal: AbortSignal.timeout(2500) })
+    if (!r.ok) return false
+    const n = (await r.json())?.data?.[0]?.meta?.n_ctx
+    if (Number.isFinite(n) && n > 0) kaggleCtx[slot.id] = n
+    return true
   } catch {
     return false
   }
+}
+// The active account's real context window, or null when it has not been seen.
+// Callers must fall back to a safe floor rather than assuming a size.
+export function getKaggleCtx() {
+  return kaggleCtx[kaggleActiveSlot] || null
 }
 // Back-compat: reachability of the primary slot only, for callers that don't
 // need to know about multiple accounts.
