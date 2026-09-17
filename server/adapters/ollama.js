@@ -13,7 +13,7 @@ import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { fitTurn } from '../lib/compactTurn.js'
 import { alwaysOnUsesOpenAI, postOpenAIChat, openAIModels } from '../lib/llamaServerChat.js'
-import { getComputeStatus, ensureTurboReady, ensureKaggleReady, takeFallbackReason, isKaggleUrl, getKaggleCtx } from '../lib/computeManager.js'
+import { getComputeStatus, ensureTurboReady, ensureKaggleReady, takeFallbackReason, isKaggleUrl, getKaggleCtx, getKaggleVision } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
 import { watchReadProgress } from '../lib/ollamaReadProgress.js'
@@ -39,7 +39,12 @@ const MALFORMED_TOOL_CALL = /XML syntax error|unexpected end element|invalid cha
 // (lib/llamaServerChat.js), so everything after this call sees the same
 // Ollama-shaped reply regardless of which server actually answered.
 function postChat(targetUrl, body, signal, isRunpod) {
-  if (isKaggleUrl(targetUrl) || (!isRunpod && alwaysOnUsesOpenAI())) return postOpenAIChat(targetUrl, body, { signal })
+  // Only Kaggle reports a projector today; Always On's llama-server runs
+  // text-only, and getKaggleVision() is false unless that run actually loaded
+  // one. Images are never sent on a guess: a text-only server rejects the
+  // whole request rather than ignoring them.
+  if (isKaggleUrl(targetUrl)) return postOpenAIChat(targetUrl, body, { signal, vision: getKaggleVision() })
+  if (!isRunpod && alwaysOnUsesOpenAI()) return postOpenAIChat(targetUrl, body, { signal })
   return fetch(`${targetUrl}/api/chat`, {
     dispatcher: OLLAMA_DISPATCHER,
     method: 'POST',

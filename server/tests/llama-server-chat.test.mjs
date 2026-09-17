@@ -34,7 +34,7 @@ test('Ollama messages become OpenAI messages with linked tool calls', () => {
     { role: 'tool', tool_name: 'orphan', content: 'left over' },
   ])
   assert.equal(out[0].role, 'system')
-  assert.match(out[1].content, /cannot see images/, 'images are dropped with a note, not sent to a server without vision')
+  assert.match(out[1].content, /no vision support/, 'images are dropped with a note, not sent to a server without vision')
   assert.equal(out[1].images, undefined)
   const calls = out[2].tool_calls
   assert.equal(calls.length, 2)
@@ -132,7 +132,57 @@ test('health lists llama-server models', async () => {
 
 test('the adapter routes Always On through llama-server only when ALWAYS_ON_API=openai, never Turbo', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
-  assert.match(src, /if \(isKaggleUrl\(targetUrl\) \|\| \(!isRunpod && alwaysOnUsesOpenAI\(\)\)\) return postOpenAIChat\(targetUrl, body, \{ signal \}\)/)
+  // Kaggle and Always On are separate branches now: only Kaggle can carry a
+  // vision projector, so only it passes a vision flag. Always On stays
+  // text-only, and Turbo must never reach postOpenAIChat at all.
+  assert.match(src, /if \(isKaggleUrl\(targetUrl\)\) return postOpenAIChat\(targetUrl, body, \{ signal, vision: getKaggleVision\(\) \}\)/)
+  assert.match(src, /if \(!isRunpod && alwaysOnUsesOpenAI\(\)\) return postOpenAIChat\(targetUrl, body, \{ signal \}\)/)
   assert.equal((src.match(/fetch\(`\$\{targetUrl\}\/api\/chat`/g) || []).length, 1, 'every chat request goes through postChat')
   assert.equal((src.match(/await postChat\(targetUrl,/g) || []).length, 2, 'the step request and the wrap-up both use it')
+})
+
+// Vision is end-to-end or it is nothing: the Kaggle notebook loading an mmproj
+// achieves exactly zero on its own, because this translation layer used to
+// strip every image and replace it with a note before the request ever left
+// the VPS (caught 2026-09-17 while wiring the projector up).
+test('images are SENT when the server has a projector, and described when it does not', () => {
+  const png = 'iVBORw0KGgoAAAANSUhEUg'
+  const msgs = [{ role: 'user', content: 'what is this?', images: [png] }]
+
+  const withVision = toOpenAIMessages(msgs, { vision: true })
+  assert.ok(Array.isArray(withVision[0].content), 'a vision request must use OpenAI multimodal content parts')
+  const parts = withVision[0].content
+  assert.deepEqual(parts[0], { type: 'text', text: 'what is this?' })
+  assert.equal(parts[1].type, 'image_url')
+  assert.match(parts[1].image_url.url, /^data:image\/png;base64,iVBORw0KGgo/)
+  assert.doesNotMatch(JSON.stringify(withVision), /not included/, 'the image is sent, so nothing is described away')
+
+  const noVision = toOpenAIMessages(msgs, { vision: false })
+  assert.equal(typeof noVision[0].content, 'string', 'a text-only server must not be sent image parts — it rejects the whole request')
+  assert.match(noVision[0].content, /1 attached image was not included/)
+  // Must not name a backend: this path serves Always On AND a Kaggle run whose
+  // notebook found no projector.
+  assert.doesNotMatch(noVision[0].content, /Always On model/)
+})
+
+test('vision defaults to OFF, so an unknown server is never sent images it cannot decode', () => {
+  const msgs = [{ role: 'user', content: 'hi', images: ['iVBORw0KGgoAAAANSUhEUg'] }]
+  assert.equal(typeof toOpenAIMessages(msgs)[0].content, 'string', 'no options object must mean no images sent')
+  assert.equal(typeof toOpenAIRequest({ messages: msgs }).messages[0].content, 'string')
+})
+
+test('the image mime type is read from the payload, not guessed', () => {
+  const cases = [['/9j/4AAQSkZJRg', 'image/jpeg'], ['iVBORw0KGgoAAAA', 'image/png'],
+                 ['R0lGODlhAQABAI', 'image/gif'], ['UklGRiQAAABXRUJQ', 'image/webp'],
+                 ['ZZZZunrecognised', 'image/png']]
+  for (const [b64, mime] of cases) {
+    const out = toOpenAIMessages([{ role: 'user', content: '', images: [b64] }], { vision: true })
+    assert.match(out[0].content[0].image_url.url, new RegExp(`^data:${mime.replace('/', '\/')};base64,`), b64)
+  }
+})
+
+test('the Kaggle path asks the compute manager whether vision is actually available', async () => {
+  const src = await fs.readFile('./adapters/ollama.js', 'utf8')
+  assert.match(src, /postOpenAIChat\(targetUrl, body, \{ signal, vision: getKaggleVision\(\) \}\)/,
+    'Kaggle must pass the REAL projector state, never assume it')
 })

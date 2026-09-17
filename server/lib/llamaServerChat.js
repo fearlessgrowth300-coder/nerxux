@@ -24,7 +24,26 @@ export const alwaysOnUsesOpenAI = () => String(process.env.ALWAYS_ON_API || '').
 // every tool result. Ids are assigned in order and results are matched to the
 // open calls of the assistant message before them, which is how the adapter
 // pushes them (one result per call, same order).
-export function toOpenAIMessages(messages = []) {
+// Nexus carries images the Ollama way — bare base64 on `message.images`, with
+// the mime type dropped at adapters/ollama.js. An OpenAI-style data URL has to
+// declare one, so it is read back off the payload's magic bytes rather than
+// guessed: base64 encodes 3 bytes per 4 chars, so each format has a fixed
+// prefix. An unrecognised payload falls back to image/png, which llama.cpp
+// sniffs past anyway.
+function imageMime(b64) {
+  const head = String(b64).slice(0, 12)
+  if (head.startsWith('/9j/')) return 'image/jpeg'
+  if (head.startsWith('iVBORw0KGgo')) return 'image/png'
+  if (head.startsWith('R0lGOD')) return 'image/gif'
+  if (head.startsWith('UklGR')) return 'image/webp'
+  return 'image/png'
+}
+
+// `vision` says whether the server on the other end actually loaded a projector
+// (computeManager reads it from /props). It is NOT assumed: sending images to a
+// text-only llama-server fails the whole request, so without it they are
+// described instead of sent.
+export function toOpenAIMessages(messages = [], { vision = false } = {}) {
   const out = []
   let pending = [] // ids of the latest assistant tool calls not yet answered
   let n = 0
@@ -52,20 +71,33 @@ export function toOpenAIMessages(messages = []) {
     }
     pending = []
     let content = String(m.content ?? '')
-    // No vision projector is loaded on Always On. Say so instead of failing the request.
-    if (Array.isArray(m.images) && m.images.length) {
-      content += `\n\n[${m.images.length} attached image${m.images.length === 1 ? ' was' : 's were'} not included: the Always On model cannot see images. Switch to Turbo for image questions.]`
+    const images = Array.isArray(m.images) ? m.images.filter(Boolean) : []
+    if (images.length && vision) {
+      out.push({
+        role: m.role,
+        content: [
+          ...(content ? [{ type: 'text', text: content }] : []),
+          ...images.map((b64) => ({ type: 'image_url', image_url: { url: `data:${imageMime(b64)};base64,${b64}` } })),
+        ],
+      })
+      continue
+    }
+    if (images.length) {
+      // Text-only server: say so rather than failing the request. Deliberately
+      // does not name a backend — this path serves both Always On and a Kaggle
+      // run whose notebook found no projector.
+      content += `\n\n[${images.length} attached image${images.length === 1 ? ' was' : 's were'} not included: the model serving this request has no vision support. Switch to Turbo for image questions.]`
     }
     out.push({ role: m.role, content })
   }
   return out
 }
 
-export function toOpenAIRequest(body = {}) {
+export function toOpenAIRequest(body = {}, { vision = false } = {}) {
   const opts = body.options || {}
   return {
     model: body.model,
-    messages: toOpenAIMessages(body.messages),
+    messages: toOpenAIMessages(body.messages, { vision }),
     ...(Array.isArray(body.tools) && body.tools.length ? { tools: body.tools } : {}),
     stream: body.stream !== false,
     ...(body.stream !== false ? { stream_options: { include_usage: true } } : {}),
@@ -212,12 +244,12 @@ export function sseToOllamaStream(body) {
 // POST an Ollama-shaped chat body to llama-server and return a fetch Response
 // shaped like Ollama's: NDJSON when streaming, one JSON object otherwise, and
 // Ollama-style { error } bodies on failure.
-export async function postOpenAIChat(baseUrl, body, { signal, fetchImpl = fetch } = {}) {
+export async function postOpenAIChat(baseUrl, body, { signal, fetchImpl = fetch, vision = false } = {}) {
   const resp = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
     dispatcher: DISPATCHER,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(toOpenAIRequest(body)),
+    body: JSON.stringify(toOpenAIRequest(body, { vision })),
     signal,
   })
   const headers = { 'Content-Type': 'application/x-ndjson' }

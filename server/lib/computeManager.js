@@ -151,20 +151,27 @@ export function getKaggleSessionTime(slotId = kaggleActiveSlot) {
 // Is a given slot's reverse tunnel currently listening? A quick local check —
 // no SSH involved, the tunnel already did that work — so this is cheap enough
 // to run on every status poll.
-// Probes /v1/models rather than /health: it answers 200 exactly when /health
-// would, AND carries the context window the server actually started with
-// (meta.n_ctx) in the same request. That number used to be hardcoded on the
-// Nexus side, and drifted from the notebook's --ctx-size — which is precisely
-// what produced the live failure on 2026-09-17: "request (37742 tokens)
-// exceeds the available context size (32768 tokens)". Reading it from the
-// server is what makes that class of bug impossible rather than merely fixed.
-const kaggleCtx = {} // slot id -> n_ctx last reported, or undefined
+// Probes /props rather than /health: it answers 200 exactly when /health would,
+// and carries BOTH facts Nexus has to know about a run in the same request —
+// default_generation_settings.n_ctx and modalities.vision (shape verified
+// against a live llama-server, 2026-09-17).
+//
+// Neither may be assumed. The notebook picks --ctx-size off a fallback ladder,
+// so the window differs per run; hardcoding it is what caused "request (37742
+// tokens) exceeds the available context size (32768 tokens)" in production.
+// And vision depends on whether that run found an mmproj to load, so sending
+// images to a server without one would fail the request outright.
+const kaggleProps = {} // slot id -> { ctx, vision }
 async function kaggleSlotReachable(slot) {
   try {
-    const r = await fetch(`${slot.url}/v1/models`, { signal: AbortSignal.timeout(2500) })
+    const r = await fetch(`${slot.url}/props`, { signal: AbortSignal.timeout(2500) })
     if (!r.ok) return false
-    const n = (await r.json())?.data?.[0]?.meta?.n_ctx
-    if (Number.isFinite(n) && n > 0) kaggleCtx[slot.id] = n
+    const j = await r.json()
+    const n = j?.default_generation_settings?.n_ctx
+    kaggleProps[slot.id] = {
+      ctx: Number.isFinite(n) && n > 0 ? n : undefined,
+      vision: Boolean(j?.modalities?.vision),
+    }
     return true
   } catch {
     return false
@@ -173,7 +180,13 @@ async function kaggleSlotReachable(slot) {
 // The active account's real context window, or null when it has not been seen.
 // Callers must fall back to a safe floor rather than assuming a size.
 export function getKaggleCtx() {
-  return kaggleCtx[kaggleActiveSlot] || null
+  return kaggleProps[kaggleActiveSlot]?.ctx || null
+}
+// Whether the active account's run actually loaded a vision projector. Defaults
+// to false, so an unknown server is treated as text-only rather than being sent
+// images it cannot decode.
+export function getKaggleVision() {
+  return Boolean(kaggleProps[kaggleActiveSlot]?.vision)
 }
 // Back-compat: reachability of the primary slot only, for callers that don't
 // need to know about multiple accounts.

@@ -22,7 +22,7 @@ test('the Kaggle SSH key can only reverse-forward its one port — verified live
 
 test('computeManager exposes exactly what the adapter and routes need for Kaggle', async () => {
   const cm = await import('../lib/computeManager.js')
-  for (const name of ['KAGGLE_URL', 'KAGGLE_SLOTS', 'isKaggleUrl', 'getKaggleUsage', 'kaggleReachable', 'switchToKaggle', 'ensureKaggleReady']) {
+  for (const name of ['KAGGLE_URL', 'KAGGLE_SLOTS', 'isKaggleUrl', 'getKaggleCtx', 'getKaggleVision', 'getKaggleUsage', 'kaggleReachable', 'switchToKaggle', 'ensureKaggleReady']) {
     assert.ok(name in cm, `computeManager must export ${name}`)
   }
   assert.match(cm.KAGGLE_URL, /^http:\/\/127\.0\.0\.1:20140$/, 'must match the port the primary account tunnel restriction permits')
@@ -77,11 +77,12 @@ test('ensureKaggleReady stays on kaggle when the tunnel answers', async () => {
   const cm = await import('../lib/computeManager.js')
   cm.switchToKaggle()
   const realFetch = globalThis.fetch
-  // The probe is /v1/models, not /health: it proves reachability AND carries
-  // the server's real context window in the same request (see kaggleSlotReachable).
+  // The probe is /props, not /health: it proves reachability AND carries both
+  // the real context window and whether a vision projector loaded, in one
+  // request (see kaggleSlotReachable).
   globalThis.fetch = async (url) => {
-    assert.match(String(url), /127\.0\.0\.1:20140\/v1\/models/)
-    return new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: 32768 } }] }), { status: 200 })
+    assert.match(String(url), /127\.0\.0\.1:20140\/props/)
+    return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 32768 }, modalities: { vision: false } }), { status: 200 })
   }
   try {
     assert.equal(await cm.ensureKaggleReady(), true)
@@ -213,8 +214,8 @@ for (const serverCtx of [32768, 131072]) {
   const realFetch = globalThis.fetch
   let sentBody = null
   globalThis.fetch = async (url, init) => {
-    if (String(url).includes('/v1/models')) {
-      return new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: serverCtx } }] }), { status: 200 })
+    if (String(url).includes('/props')) {
+      return new Response(JSON.stringify({ default_generation_settings: { n_ctx: serverCtx }, modalities: { vision: false } }), { status: 200 })
     }
     sentBody = JSON.parse(init.body)
     return new Response(JSON.stringify({
@@ -271,9 +272,9 @@ test('a Kaggle tunnel that drops mid-turn falls back to Always On instead of thr
   globalThis.fetch = async (url, init) => {
     // Reachability probe (see kaggleSlotReachable) — must be matched BEFORE the
     // chat branch below, since it targets the same host:port.
-    if (String(url).includes('/v1/models')) {
+    if (String(url).includes('/props')) {
       if (!tunnelUp) throw new TypeError('fetch failed')
-      return new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: 32768 } }] }), { status: 200 })
+      return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 32768 }, modalities: { vision: false } }), { status: 200 })
     }
     if (/127\.0\.0\.1:2014[0-9]/.test(String(url))) {
       chatCalls++
@@ -333,7 +334,7 @@ test("each Kaggle account tracks its own weekly usage — one account's hours do
     // legitimately have left some on B — "unchanged" is the real invariant.
     const before = cm.getKaggleUsage('b').usedSeconds
     globalThis.fetch = async (url) => (String(url).startsWith(cm.KAGGLE_SLOTS[0].url)
-      ? new Response(JSON.stringify({ data: [{ id: 'm', meta: { n_ctx: 32768 } }] }), { status: 200 })
+      ? new Response(JSON.stringify({ default_generation_settings: { n_ctx: 32768 }, modalities: { vision: false } }), { status: 200 })
       : Promise.reject(new TypeError('fetch failed')))
     await cm.ensureKaggleReady() // accrues some time on account A
     await new Promise((r) => setTimeout(r, 5))
