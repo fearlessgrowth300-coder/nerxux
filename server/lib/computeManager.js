@@ -74,8 +74,13 @@ function trackKaggleUsage(connected) {
     kaggleUsage = { windowStart: now, seconds: 0 }
   }
   if (connected) {
-    if (!lastKaggleCheck) kaggleSessionStart = now // just (re)connected
-    else kaggleUsage.seconds += Math.min(300, (now - lastKaggleCheck) / 1000)
+    // "Is this a fresh session" is decided from kaggleSessionStart (persisted,
+    // and only ever cleared on an OBSERVED disconnect below), never from
+    // lastKaggleCheck — that one resets to 0 on every server restart, which
+    // used to make a plain Nexus deploy (the tunnel never actually dropping)
+    // look like a brand-new session and reset the 12h countdown to full.
+    if (!kaggleSessionStart) kaggleSessionStart = now
+    if (lastKaggleCheck) kaggleUsage.seconds += Math.min(300, (now - lastKaggleCheck) / 1000)
   } else {
     kaggleSessionStart = null
   }

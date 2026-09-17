@@ -136,6 +136,36 @@ test('reconnecting after a drop starts a FRESH countdown, not the old one', asyn
   } finally { globalThis.fetch = realFetch }
 })
 
+// Regression: a real Nexus deploy while the tunnel was live reset the visible
+// countdown to a fresh 12h, because "is this a fresh connection" used to key
+// off lastKaggleCheck (an in-memory flag, back to 0 on every process start)
+// instead of kaggleSessionStart (persisted, and cleared only on an observed
+// disconnect). Simulates the restart with a genuinely fresh module instance
+// (cache-busted import), the same way a real `pm2 restart` re-runs this file
+// from a clean process while .compute-state.json survives on disk.
+test('a Nexus restart does not reset an in-progress Kaggle countdown', async () => {
+  const cm = await import('../lib/computeManager.js')
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response('{"status":"ok"}', { status: 200 })
+  try {
+    cm.switchToKaggle()
+    await cm.ensureKaggleReady()
+    const before = cm.getKaggleSessionTime()
+    assert.ok(before, 'a session must be recorded before "restarting"')
+
+    const cm2 = await import(`../lib/computeManager.js?restart-test=${Date.now()}`)
+    const restored = cm2.getKaggleSessionTime()
+    assert.ok(restored, 'the countdown must survive a restart (it is read from persisted state)')
+    assert.equal(restored.startedAt, before.startedAt, 'the ORIGINAL start time, not a new one')
+
+    // The first health check the "new process" makes must not treat an
+    // already-connected tunnel as a brand-new session.
+    await cm2.ensureKaggleReady()
+    assert.equal(cm2.getKaggleSessionTime().startedAt, before.startedAt,
+      'still connected after "restart" -> same countdown, not reset to now')
+  } finally { globalThis.fetch = realFetch }
+})
+
 test('a Turbo turn that falls back to Always On mid-way drops the Infinity budget and the Turbo label too', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
   const fallback = src.match(/const fallBackToAlwaysOn = \(\) => \{[\s\S]*?\n  \}/)
