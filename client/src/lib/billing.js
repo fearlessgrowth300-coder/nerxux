@@ -32,6 +32,20 @@ export function formatDuration(seconds) {
   return `${m}m ${String(sec).padStart(2, '0')}s`
 }
 
+// Kaggle's ~12h session cap, ticked down the same way chargeCycle ticks down
+// from pod.startedAt: one absolute timestamp from the server, subtracted
+// locally every second so the badge doesn't need a per-second poll.
+// session = { startedAt, limitSeconds, approximate } | null (see computeManager.js
+// getKaggleSessionTime — startedAt is when Nexus first saw the tunnel connect,
+// not Kaggle's own session start, so this runs out a little AFTER the real limit
+// could hit, never before).
+export function kaggleSessionCountdown(session, nowMs = Date.now()) {
+  if (!session?.startedAt) return null
+  const limit = Number(session.limitSeconds) || 12 * 3600
+  const elapsedSeconds = Math.max(0, (nowMs - session.startedAt) / 1000)
+  return { elapsedSeconds, remainingSeconds: Math.max(0, limit - elapsedSeconds), limitSeconds: limit }
+}
+
 // RunPod deducts a running pod's cost in chunks rather than per second: the
 // balance sat unchanged for minutes at a time while the pod ran. The cycle is
 // measured from the pod's start time. Measured at 5 minutes (two consecutive

@@ -81,6 +81,61 @@ test('modelForTarget: Turbo and Kaggle both keep the real model; only Always On 
   assert.equal(modelForTarget(big, false, false), ALWAYS_ON_MODEL, 'Always On still swaps')
 })
 
+test('a Kaggle session-time countdown starts on connect and clears on disconnect', async () => {
+  const cm = await import('../lib/computeManager.js')
+  const realFetch = globalThis.fetch
+  // Down, then up: getKaggleSessionTime must be null until a connection is seen.
+  globalThis.fetch = async () => { throw new TypeError('fetch failed') }
+  cm.switchToKaggle()
+  await cm.ensureKaggleReady() // fails -> falls back to always_on, no session
+  assert.equal(cm.getComputeStatus().mode, 'always_on')
+  cm.switchToKaggle()
+  globalThis.fetch = async () => new Response('{"status":"ok"}', { status: 200 })
+  try {
+    const t0 = Date.now()
+    assert.equal(await cm.ensureKaggleReady(), true)
+    const session = cm.getComputeStatus().details.session
+    assert.ok(session, 'a session must appear once the tunnel is seen up')
+    assert.ok(session.startedAt >= t0 && session.startedAt <= Date.now() + 1000, 'startedAt is the moment it was first seen connected, not some other time')
+    assert.equal(session.limitSeconds, cm.KAGGLE_SESSION_LIMIT_S)
+    assert.equal(session.approximate, true, "must be honest that this is not Kaggle's own clock")
+
+    // Still connected on the next check: the SAME session, not a new one.
+    const startedAt1 = session.startedAt
+    await new Promise((r) => setTimeout(r, 5))
+    await cm.ensureKaggleReady()
+    assert.equal(cm.getComputeStatus().details.session.startedAt, startedAt1, 'staying connected must not reset the countdown')
+
+    // Disconnects: the session clears immediately, not lingering as stale.
+    // (ensureKaggleReady also falls back to always_on on failure — checking
+    // getKaggleSessionTime() directly here, independent of the current mode,
+    // is what actually proves the countdown state was cleared.)
+    globalThis.fetch = async () => { throw new TypeError('fetch failed') }
+    await cm.ensureKaggleReady()
+    assert.equal(cm.getKaggleSessionTime(), null, 'no active tunnel means no countdown to show')
+  } finally { globalThis.fetch = realFetch }
+})
+
+test('reconnecting after a drop starts a FRESH countdown, not the old one', async () => {
+  const cm = await import('../lib/computeManager.js')
+  const realFetch = globalThis.fetch
+  try {
+    cm.switchToKaggle()
+    globalThis.fetch = async () => new Response('{"status":"ok"}', { status: 200 })
+    await cm.ensureKaggleReady()
+    const first = cm.getComputeStatus().details.session.startedAt
+
+    globalThis.fetch = async () => { throw new TypeError('fetch failed') }
+    await cm.ensureKaggleReady() // drops -> falls back to always_on
+    cm.switchToKaggle()
+    await new Promise((r) => setTimeout(r, 5))
+    globalThis.fetch = async () => new Response('{"status":"ok"}', { status: 200 })
+    await cm.ensureKaggleReady() // reconnects (e.g. a new notebook run)
+    const second = cm.getComputeStatus().details.session.startedAt
+    assert.ok(second > first, 'a fresh connection must get a fresh, later start time')
+  } finally { globalThis.fetch = realFetch }
+})
+
 test('a Turbo turn that falls back to Always On mid-way drops the Infinity budget and the Turbo label too', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
   const fallback = src.match(/const fallBackToAlwaysOn = \(\) => \{[\s\S]*?\n  \}/)

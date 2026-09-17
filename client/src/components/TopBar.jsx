@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { MenuIcon, LogoutIcon } from './icons'
 import BalanceBadge from './BalanceBadge'
+import KaggleSessionBadge from './KaggleSessionBadge'
 
 // Derive up-to-two-letter initials from an email for the avatar.
 function initialsFromEmail(email = '') {
@@ -41,6 +42,7 @@ export default function TopBar({ onMenuClick }) {
       </div>
 
       <div className="flex items-center gap-3">
+      <KaggleSessionBadge />
       <BalanceBadge />
       <div className="relative" ref={menuRef}>
         <button

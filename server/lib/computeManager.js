@@ -60,22 +60,38 @@ let currentMode = MODES.has(readState().mode) ? readState().mode : 'always_on'
 // days from first use, not calendar weeks (Kaggle's own reset time is not public).
 let kaggleUsage = readState().kaggleUsage || { windowStart: 0, seconds: 0 }
 let lastKaggleCheck = 0
+// Kaggle's ~12h session cap, timed from the FIRST check that finds the tunnel
+// up after being down (a fresh notebook run, not a blip). Nexus has no way to
+// ask Kaggle when the session actually started — this is an approximation
+// that starts a little late, by however long the notebook's setup/build/
+// download cells took before the tunnel came up. Cleared the moment the
+// tunnel drops, so the next connection gets a fresh countdown, not a stale one.
+export const KAGGLE_SESSION_LIMIT_S = 12 * 3600
+let kaggleSessionStart = readState().kaggleSessionStart || null
 function trackKaggleUsage(connected) {
   const now = Date.now()
   if (!kaggleUsage.windowStart || now - kaggleUsage.windowStart > 7 * 86400 * 1000) {
     kaggleUsage = { windowStart: now, seconds: 0 }
   }
-  if (connected && lastKaggleCheck) {
-    // Cap a single gap at 5 min: a server restart or long pause between checks
-    // must not be counted as connected time that never really happened.
-    kaggleUsage.seconds += Math.min(300, (now - lastKaggleCheck) / 1000)
+  if (connected) {
+    if (!lastKaggleCheck) kaggleSessionStart = now // just (re)connected
+    else kaggleUsage.seconds += Math.min(300, (now - lastKaggleCheck) / 1000)
+  } else {
+    kaggleSessionStart = null
   }
   lastKaggleCheck = connected ? now : 0
-  writeState({ kaggleUsage })
+  writeState({ kaggleUsage, kaggleSessionStart })
 }
 export function getKaggleUsage() {
   const remaining = Math.max(0, KAGGLE_WEEKLY_LIMIT_S - kaggleUsage.seconds)
   return { usedSeconds: Math.round(kaggleUsage.seconds), remainingSeconds: Math.round(remaining), limitSeconds: KAGGLE_WEEKLY_LIMIT_S, windowStart: kaggleUsage.windowStart }
+}
+// Client ticks this down locally from `startedAt` (see billing.js
+// kaggleSessionCountdown) the same way the RunPod badge ticks down from
+// pod.startedAt — one absolute timestamp, no server round-trip needed to move it.
+export function getKaggleSessionTime() {
+  if (!kaggleSessionStart) return null
+  return { startedAt: kaggleSessionStart, limitSeconds: KAGGLE_SESSION_LIMIT_S, approximate: true }
 }
 
 // Is the notebook's reverse tunnel currently listening? A quick local check —
@@ -182,7 +198,7 @@ export function getComputeStatus() {
   if (currentMode === 'turbo') {
     details = { label: 'Turbo: RunPod model (GPU)', speed: '30–65+ tok/s', cost: 'per hour while running', status: tunnel.ready ? 'ready' : 'disconnected' }
   } else if (currentMode === 'kaggle') {
-    details = { label: 'Kaggle: notebook GPU (2x T4)', speed: '~10-12 tok/s, reads ~390 tok/s', cost: 'free — 30 GPU-hrs/week', status: lastKaggleReachable ? 'ready' : 'disconnected', usage: getKaggleUsage() }
+    details = { label: 'Kaggle: notebook GPU (2x T4)', speed: '~10-12 tok/s, reads ~390 tok/s', cost: 'free — 30 GPU-hrs/week', status: lastKaggleReachable ? 'ready' : 'disconnected', usage: getKaggleUsage(), session: getKaggleSessionTime() }
   } else {
     details = { label: 'Always On: Hostinger model (KVM 8)', speed: '2–5 tok/s', cost: '$26/mo flat', status: 'ready' }
   }

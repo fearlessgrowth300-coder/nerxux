@@ -34,7 +34,30 @@ test('formatting', () => {
   assert.equal(formatDuration(200_000), '2d 7h 33m')
 })
 
-import { chargeCycle } from '../src/lib/billing.js'
+import { chargeCycle, kaggleSessionCountdown } from '../src/lib/billing.js'
+
+test('the Kaggle session countdown ticks down from startedAt, capped at zero, using the server-given limit', () => {
+  const startedAt = Date.parse('2026-09-17T00:00:00.000Z')
+  const session = { startedAt, limitSeconds: 12 * 3600, approximate: true }
+
+  const fresh = kaggleSessionCountdown(session, startedAt)
+  assert.equal(fresh.remainingSeconds, 12 * 3600)
+  assert.equal(fresh.elapsedSeconds, 0)
+
+  const midway = kaggleSessionCountdown(session, startedAt + 3600 * 1000)
+  assert.equal(midway.remainingSeconds, 11 * 3600)
+  assert.equal(midway.elapsedSeconds, 3600)
+
+  const overrun = kaggleSessionCountdown(session, startedAt + 20 * 3600 * 1000)
+  assert.equal(overrun.remainingSeconds, 0, 'never goes negative once the session should have ended')
+
+  assert.equal(kaggleSessionCountdown(null), null, 'no session (notebook never connected) means nothing to show')
+  assert.equal(kaggleSessionCountdown({}), null, 'a session with no startedAt is not a real session')
+
+  // A custom limit from the server (in case KAGGLE_SESSION_LIMIT_S ever changes) is honored.
+  const custom = kaggleSessionCountdown({ startedAt, limitSeconds: 3600 }, startedAt + 1800 * 1000)
+  assert.equal(custom.remainingSeconds, 1800)
+})
 
 test('the charge countdown runs from the pod start in fixed cycles', () => {
   const startedAt = '2026-09-13T13:39:05.944Z'
