@@ -54,6 +54,11 @@ test('a turn that runs out of rounds mid-work ends with a summary, not an empty 
     assert.match(res.content, /limit for one turn was reached/, 'the cut-off is stated plainly')
     assert.match(res.content, /Send "continue"/)
     assert.equal(bodies.filter((b) => !b.tools).length, 1, 'exactly one wrap-up request')
+    // The model's own wrap-up summary can be vague or wrong about what it
+    // actually did — this factual, server-recorded listing must show up
+    // regardless, since toolSteps is tracked independent of the model.
+    assert.match(res.content, /Checked this turn \(\d+ actions?(?:, \d+ failed)?\): generate_image/,
+      'the deterministic step listing is present even though a model summary was also returned')
   } finally {
     globalThis.fetch = realFetch
   }

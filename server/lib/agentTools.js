@@ -148,6 +148,44 @@ export function observationText(name, result) {
   return context + `[Tool Execution: ${name} on ${result.target || 'sandbox'}]\n${result.job ? `Job: ${JSON.stringify(result.job)}\n` : ''}Exit Code: ${result.exitCode}\nOutput:\n${body}${out && err ? `\nStderr:\n${err}` : ''}`
 }
 
+// A cut-off turn's own free-text summary is only as good as what survived
+// context trimming and the model's willingness to synthesize it — caught live
+// (2026-09-17): a 98-tool-call turn ran out of budget and the model's
+// wrap-up said only "I can't safely name the changed files from memory
+// here," giving the user nothing concrete despite having actually read
+// NEXUS.md, several source files and the git log. toolSteps is tracked
+// server-side for the WHOLE turn, independent of what got trimmed from the
+// model's own context — this turns it into a plain, factual "what was
+// checked" list that is shown NO MATTER how good or bad the model's own
+// summary attempt is.
+const STEP_TARGET_KEYS = ['path', 'command', 'url', 'query', 'name', 'host']
+function stepTarget(step) {
+  const a = step.args || {}
+  for (const k of STEP_TARGET_KEYS) {
+    if (a[k]) return String(a[k]).slice(0, 80)
+  }
+  return ''
+}
+export function summarizeSteps(toolSteps, { max = 20 } = {}) {
+  const seen = new Set()
+  const lines = []
+  let failed = 0
+  for (const step of toolSteps || []) {
+    if (!step.ok) failed++
+    const target = stepTarget(step)
+    const key = `${step.tool} ${target}`
+    if (seen.has(key)) continue // the same read/command repeated — show it once
+    seen.add(key)
+    lines.push(target ? `${step.tool}(${target})` : step.tool)
+  }
+  if (!lines.length) return ''
+  const shown = lines.slice(0, max)
+  const more = lines.length - shown.length
+  const failedNote = failed ? `, ${failed} failed` : ''
+  return `Checked this turn (${toolSteps.length} action${toolSteps.length === 1 ? '' : 's'}${failedNote}): ` +
+    shown.join(', ') + (more > 0 ? `, +${more} more` : '')
+}
+
 // A step record for the UI's tool card / live progress.
 export function toStep(name, args, result) {
   return {

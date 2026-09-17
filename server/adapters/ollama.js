@@ -5,7 +5,7 @@
 // ::1 first, but Ollama listens on IPv4 only, so "localhost" fails to connect.
 import { Agent } from 'undici'
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTool, extractToolCallsFromText } from '../lib/agentLoop.js'
-import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
+import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep, summarizeSteps } from '../lib/agentTools.js'
 import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
 import { redactToolData } from '../lib/redact.js'
 import { agentStateParts } from '../lib/agentState.js'
@@ -749,6 +749,14 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // tools, and always say plainly that the turn was cut off.
   if (!finished && !signal?.aborted) {
     let summary = ''
+    // No tools are sent with this request (it must not call any), so — unlike
+    // every other request this turn — nothing needs to be reserved for tool
+    // definitions here. Using the same shrunken promptBudget the main loop
+    // used was wasting that room and dropping MORE of the actual conversation
+    // than necessary, which is why a 98-tool-call turn's wrap-up once said
+    // "I can't safely name the changed files from memory here" — fitMessages
+    // had already cut away the very reads it was being asked to summarize.
+    const wrapBudget = numCtx - 1500 - 512
     const wrapMessages = fitMessages([
       ...messages,
       {
@@ -758,7 +766,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           'In a few short lines tell the user: what you completed (name the files you changed), ' +
           'what you verified and how, and what is still left to do.',
       },
-    ], promptBudget).messages
+    ], wrapBudget).messages
     const wrapTokens = wrapMessages.reduce((n, m) => n + estimateTokens(m), 0)
     // Only when it is quick: on Always On this summary re-read the whole
     // conversation and kept the user waiting another half hour for a note.
@@ -780,7 +788,12 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       : 'the limit for one turn was reached before the work was finished'
     const tip = !isRunpod && timedOut ? ' Switching to Turbo makes each step many times faster.' : ''
     const note = `*(stopped after ${n} tool action${n === 1 ? '' : 's'} — ${why}. Send "continue" and it will pick up from here.${tip})*`
-    finalContent = [summary || finalContent.trim(), note].filter(Boolean).join('\n\n')
+    // A factual "what was actually checked" line, built server-side from the
+    // recorded steps — shown regardless of whether the model's own summary
+    // above was any good, so the user is never left with just a vague note
+    // and a count when real reads/commands happened.
+    const checked = summarizeSteps(toolSteps)
+    finalContent = [summary || finalContent.trim(), checked, note].filter(Boolean).join('\n\n')
   }
 
   const completion = toolSteps.some(s => AGENT_TOOL_NAMES.has(s.tool) && !['web_search', 'read_web_page'].includes(s.tool))

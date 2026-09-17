@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, toOpenAITools, fileToolCommand, observationText } from '../lib/agentTools.js'
+import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, toOpenAITools, fileToolCommand, observationText, summarizeSteps } from '../lib/agentTools.js'
 
 test('tool defs convert to OpenAI function format and the name set covers them all', () => {
   const oa = toOpenAITools(AGENT_TOOL_DEFS)
@@ -109,4 +109,53 @@ test('a path that merely starts with the same letters is not rewritten', () => {
     { base: '/workspace/project', hostRoot: '/root/viewe-account' })
   assert.match(cmd, /viewe-account-backup\/x\.md/)
   assert.doesNotMatch(cmd, /\/workspace\/project/)
+})
+
+test('summarizeSteps returns empty string for no steps', () => {
+  assert.equal(summarizeSteps([]), '')
+  assert.equal(summarizeSteps(undefined), '')
+})
+
+test('summarizeSteps lists each distinct tool call with its target', () => {
+  const steps = [
+    { tool: 'read_file', args: { path: 'NEXUS.md' }, ok: true },
+    { tool: 'execute_command', args: { command: 'git log --oneline -25' }, ok: true },
+  ]
+  const s = summarizeSteps(steps)
+  assert.match(s, /^Checked this turn \(2 actions\): /)
+  assert.match(s, /read_file\(NEXUS\.md\)/)
+  assert.match(s, /execute_command\(git log --oneline -25\)/)
+})
+
+test('summarizeSteps deduplicates the same tool+target repeated across steps', () => {
+  const steps = [
+    { tool: 'read_file', args: { path: 'a.py' }, ok: true },
+    { tool: 'read_file', args: { path: 'a.py' }, ok: true },
+    { tool: 'read_file', args: { path: 'b.py' }, ok: true },
+  ]
+  const s = summarizeSteps(steps)
+  // total count still reflects every step, but the listing shows a.py once
+  assert.match(s, /^Checked this turn \(3 actions\): /)
+  assert.equal((s.match(/a\.py/g) || []).length, 1)
+  assert.match(s, /b\.py/)
+})
+
+test('summarizeSteps notes how many steps failed', () => {
+  const steps = [
+    { tool: 'execute_command', args: { command: 'true' }, ok: true },
+    { tool: 'execute_command', args: { command: 'false' }, ok: false },
+  ]
+  assert.match(summarizeSteps(steps), /2 actions, 1 failed/)
+})
+
+test('summarizeSteps caps the listed entries and reports how many more', () => {
+  const steps = Array.from({ length: 25 }, (_, i) => ({ tool: 'read_file', args: { path: `f${i}.txt` }, ok: true }))
+  const s = summarizeSteps(steps, { max: 20 })
+  assert.match(s, /\+5 more$/)
+  assert.equal((s.match(/f\d+\.txt/g) || []).length, 20)
+})
+
+test('summarizeSteps falls back to the bare tool name when there is no recognizable target', () => {
+  const s = summarizeSteps([{ tool: 'job_status', args: { jobId: 'abc', offset: 0 }, ok: true }])
+  assert.match(s, /job_status(?!\()/)
 })
