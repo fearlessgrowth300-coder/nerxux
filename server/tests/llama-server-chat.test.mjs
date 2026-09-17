@@ -132,7 +132,7 @@ test('health lists llama-server models', async () => {
 
 test('the adapter routes Always On through llama-server only when ALWAYS_ON_API=openai, never Turbo', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
-  assert.match(src, /if \(targetUrl === KAGGLE_URL \|\| \(!isRunpod && alwaysOnUsesOpenAI\(\)\)\) return postOpenAIChat\(targetUrl, body, \{ signal \}\)/)
+  assert.match(src, /if \(isKaggleUrl\(targetUrl\) \|\| \(!isRunpod && alwaysOnUsesOpenAI\(\)\)\) return postOpenAIChat\(targetUrl, body, \{ signal \}\)/)
   assert.equal((src.match(/fetch\(`\$\{targetUrl\}\/api\/chat`/g) || []).length, 1, 'every chat request goes through postChat')
   assert.equal((src.match(/await postChat\(targetUrl,/g) || []).length, 2, 'the step request and the wrap-up both use it')
 })

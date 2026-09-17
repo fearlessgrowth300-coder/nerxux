@@ -22,9 +22,28 @@ import { OllamaTunnel, podSshEndpoint, TURBO_URL } from './ollamaTunnel.js'
 
 const getApiKey = () => process.env.RUNPOD_API_KEY || ''
 let HOSTINGER_OLLAMA_URL = process.env.HOSTINGER_OLLAMA_URL || 'http://2.25.126.125:11434'
-// The tunnel's authorized_keys entry restricts it to `permitlisten="127.0.0.1:20140"` —
-// this must stay the same port or the notebook's reverse-forward is refused.
-export const KAGGLE_URL = process.env.KAGGLE_URL || 'http://127.0.0.1:20140'
+// Two Kaggle accounts, each with its OWN restricted tunnel key and its OWN
+// port — a second notebook using the SAME key/port as the first cannot
+// actually help (caught live, 2026-09-17): both tried to reverse-forward to
+// 127.0.0.1:20140, so the second one's connection was refused outright
+// ("bind [127.0.0.1]:20140: Address already in use") and just sat there
+// doing nothing while the first was the only one actually serving chats.
+// Each slot's authorized_keys entry restricts it to its own permitlisten
+// port — these must stay in sync with the VPS or the notebook's
+// reverse-forward is refused.
+export const KAGGLE_SLOTS = [
+  { id: 'a', label: 'Kaggle A', url: process.env.KAGGLE_URL || 'http://127.0.0.1:20140' },
+  { id: 'b', label: 'Kaggle B', url: process.env.KAGGLE_URL_2 || 'http://127.0.0.1:20141' },
+]
+// Kept for callers that only ever cared about "a" Kaggle URL (the primary
+// slot) — the multi-slot logic lives behind isKaggleUrl()/findReachableKaggleSlot().
+export const KAGGLE_URL = KAGGLE_SLOTS[0].url
+export function isKaggleUrl(url) {
+  return KAGGLE_SLOTS.some((s) => s.url === url)
+}
+function kaggleSlotById(id) {
+  return KAGGLE_SLOTS.find((s) => s.id === id)
+}
 const KAGGLE_WEEKLY_LIMIT_S = 30 * 3600
 const SSH_KEY_PATH = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_ed25519')
 const STATE_FILE = path.join(__dirname, '../.compute-state.json')
@@ -53,64 +72,113 @@ function setCurrentMode(mode) {
 
 let currentMode = MODES.has(readState().mode) ? readState().mode : 'always_on'
 
-// Weekly Kaggle GPU-hour usage. Kaggle enforces the real 30h/week cap on its
-// own side; this is just so Nexus can warn before a mid-turn cutoff surprises
-// someone. Accumulated only while a health check finds the tunnel actually up,
-// so a closed notebook does not keep racking up hours. Resets on a rolling 7
-// days from first use, not calendar weeks (Kaggle's own reset time is not public).
-let kaggleUsage = readState().kaggleUsage || { windowStart: 0, seconds: 0 }
-let lastKaggleCheck = 0
-// Kaggle's ~12h session cap, timed from the FIRST check that finds the tunnel
-// up after being down (a fresh notebook run, not a blip). Nexus has no way to
-// ask Kaggle when the session actually started — this is an approximation
-// that starts a little late, by however long the notebook's setup/build/
-// download cells took before the tunnel came up. Cleared the moment the
-// tunnel drops, so the next connection gets a fresh countdown, not a stale one.
+// Weekly Kaggle GPU-hour usage, PER ACCOUNT — each Kaggle account gets its own
+// 30h/week from Kaggle, so a shared counter would have falsely shown account
+// B as "almost out" just because A had been used heavily. Kaggle enforces the
+// real cap on its own side; this is just so Nexus can warn before a mid-turn
+// cutoff surprises someone. Accumulated only while a health check finds that
+// account's tunnel actually up. Resets on a rolling 7 days from that
+// account's first use, not calendar weeks (Kaggle's own reset time is not
+// public).
+// Kaggle's ~12h session cap, timed from the FIRST check that finds a given
+// account's tunnel up after being down (a fresh notebook run, not a blip).
+// Nexus has no way to ask Kaggle when the session actually started — this is
+// an approximation that starts a little late, by however long that
+// notebook's setup/build/download cells took before the tunnel came up.
+// Cleared the moment that account's tunnel drops, so its next connection
+// gets a fresh countdown, not a stale one.
 export const KAGGLE_SESSION_LIMIT_S = 12 * 3600
-let kaggleSessionStart = readState().kaggleSessionStart || null
-function trackKaggleUsage(connected) {
+
+function migrateKaggleAccounts() {
+  const st = readState()
+  if (st.kaggleAccounts) return st.kaggleAccounts
+  // Pre-multi-account state used one flat usage/session pair — fold it into
+  // slot 'a' rather than losing the quota history that account already used.
+  const accounts = {}
+  for (const slot of KAGGLE_SLOTS) accounts[slot.id] = { usage: { windowStart: 0, seconds: 0 }, sessionStart: null }
+  if (st.kaggleUsage) accounts.a.usage = st.kaggleUsage
+  if (st.kaggleSessionStart) accounts.a.sessionStart = st.kaggleSessionStart
+  writeState({ kaggleAccounts: accounts })
+  return accounts
+}
+let kaggleAccounts = migrateKaggleAccounts()
+const lastKaggleCheck = {} // slot id -> ms timestamp, for accrual math
+// The slot Nexus is actually using right now — sticky across health checks
+// so a healthy account isn't churned away from just because the OTHER one
+// also happens to answer; only re-probed when the active one stops answering.
+let kaggleActiveSlot = readState().kaggleActiveSlot || null
+let lastKaggleReachableSlot = null
+
+function persistKaggleAccounts() {
+  writeState({ kaggleAccounts })
+}
+
+function trackKaggleUsage(slotId, connected) {
   const now = Date.now()
-  if (!kaggleUsage.windowStart || now - kaggleUsage.windowStart > 7 * 86400 * 1000) {
-    kaggleUsage = { windowStart: now, seconds: 0 }
+  const acct = kaggleAccounts[slotId]
+  if (!acct.usage.windowStart || now - acct.usage.windowStart > 7 * 86400 * 1000) {
+    acct.usage = { windowStart: now, seconds: 0 }
   }
   if (connected) {
-    // "Is this a fresh session" is decided from kaggleSessionStart (persisted,
-    // and only ever cleared on an OBSERVED disconnect below), never from
+    // "Is this a fresh session" is decided from sessionStart (persisted, and
+    // only ever cleared on an OBSERVED disconnect below), never from
     // lastKaggleCheck — that one resets to 0 on every server restart, which
     // used to make a plain Nexus deploy (the tunnel never actually dropping)
     // look like a brand-new session and reset the 12h countdown to full.
-    if (!kaggleSessionStart) kaggleSessionStart = now
-    if (lastKaggleCheck) kaggleUsage.seconds += Math.min(300, (now - lastKaggleCheck) / 1000)
+    if (!acct.sessionStart) acct.sessionStart = now
+    if (lastKaggleCheck[slotId]) acct.usage.seconds += Math.min(300, (now - lastKaggleCheck[slotId]) / 1000)
   } else {
-    kaggleSessionStart = null
+    acct.sessionStart = null
   }
-  lastKaggleCheck = connected ? now : 0
-  writeState({ kaggleUsage, kaggleSessionStart })
+  lastKaggleCheck[slotId] = connected ? now : 0
+  persistKaggleAccounts()
 }
-export function getKaggleUsage() {
-  const remaining = Math.max(0, KAGGLE_WEEKLY_LIMIT_S - kaggleUsage.seconds)
-  return { usedSeconds: Math.round(kaggleUsage.seconds), remainingSeconds: Math.round(remaining), limitSeconds: KAGGLE_WEEKLY_LIMIT_S, windowStart: kaggleUsage.windowStart }
+export function getKaggleUsage(slotId = kaggleActiveSlot || 'a') {
+  const acct = kaggleAccounts[slotId] || kaggleAccounts.a
+  const remaining = Math.max(0, KAGGLE_WEEKLY_LIMIT_S - acct.usage.seconds)
+  return { usedSeconds: Math.round(acct.usage.seconds), remainingSeconds: Math.round(remaining), limitSeconds: KAGGLE_WEEKLY_LIMIT_S, windowStart: acct.usage.windowStart, slot: slotId }
 }
 // Client ticks this down locally from `startedAt` (see billing.js
 // kaggleSessionCountdown) the same way the RunPod badge ticks down from
 // pod.startedAt — one absolute timestamp, no server round-trip needed to move it.
-export function getKaggleSessionTime() {
-  if (!kaggleSessionStart) return null
-  return { startedAt: kaggleSessionStart, limitSeconds: KAGGLE_SESSION_LIMIT_S, approximate: true }
+export function getKaggleSessionTime(slotId = kaggleActiveSlot) {
+  const acct = slotId && kaggleAccounts[slotId]
+  if (!acct?.sessionStart) return null
+  return { startedAt: acct.sessionStart, limitSeconds: KAGGLE_SESSION_LIMIT_S, approximate: true, slot: slotId }
 }
 
-// Is the notebook's reverse tunnel currently listening? A quick local check —
+// Is a given slot's reverse tunnel currently listening? A quick local check —
 // no SSH involved, the tunnel already did that work — so this is cheap enough
 // to run on every status poll.
-export async function kaggleReachable() {
+async function kaggleSlotReachable(slot) {
   try {
-    const r = await fetch(`${KAGGLE_URL}/health`, { signal: AbortSignal.timeout(2500) })
+    const r = await fetch(`${slot.url}/health`, { signal: AbortSignal.timeout(2500) })
     return r.ok
   } catch {
     return false
   }
 }
-let lastKaggleReachable = false
+// Back-compat: reachability of the primary slot only, for callers that don't
+// need to know about multiple accounts.
+export async function kaggleReachable() {
+  return kaggleSlotReachable(KAGGLE_SLOTS[0])
+}
+// Tries the currently-active slot first (sticky — a slow-to-answer health
+// check on the account already in use shouldn't bounce Nexus onto the other
+// one), then the rest in order. Returns the slot that answered, or null if
+// NEITHER Kaggle account currently has a tunnel up.
+async function findReachableKaggleSlot() {
+  const ordered = kaggleActiveSlot
+    ? [kaggleSlotById(kaggleActiveSlot), ...KAGGLE_SLOTS.filter((s) => s.id !== kaggleActiveSlot)]
+    : KAGGLE_SLOTS
+  for (const slot of ordered) {
+    if (slot && (await kaggleSlotReachable(slot))) return slot
+  }
+  return null
+}
+function activeKaggleSlot() {
+  return kaggleSlotById(kaggleActiveSlot) || KAGGLE_SLOTS[0]
+}
 
 export function switchToKaggle() {
   setCurrentMode('kaggle')
@@ -118,16 +186,23 @@ export function switchToKaggle() {
 }
 
 // Called by a chat turn before sending to Kaggle, mirroring ensureTurboReady:
-// if the notebook's tunnel is not up, fall back to Always On instead of
-// hanging the turn on a target that will never answer.
+// checks both accounts and uses whichever answers; falls back to Always On
+// only when NEITHER notebook's tunnel is up, instead of hanging the turn on
+// a target that will never answer.
 export async function ensureKaggleReady() {
   if (currentMode !== 'kaggle') return false
-  const ok = await kaggleReachable()
-  lastKaggleReachable = ok
-  trackKaggleUsage(ok)
-  if (ok) return true
+  const slot = await findReachableKaggleSlot()
+  if (slot) {
+    lastKaggleReachableSlot = slot.id
+    kaggleActiveSlot = slot.id
+    writeState({ kaggleActiveSlot })
+    trackKaggleUsage(slot.id, true)
+    return true
+  }
+  if (kaggleActiveSlot) trackKaggleUsage(kaggleActiveSlot, false)
+  lastKaggleReachableSlot = null
   setCurrentMode('always_on')
-  lastFallbackReason = 'the Kaggle notebook is not connected (start it and open the tunnel cell)'
+  lastFallbackReason = 'no Kaggle notebook is connected on either account (start one and open its tunnel cell)'
   return false
 }
 // A pod id is not a permanent address. Pods get exited when funds run out, GPUs
@@ -198,12 +273,23 @@ export function runpodRequest(apiPath, { method = 'GET', body = null } = {}) {
 }
 
 export function getComputeStatus() {
-  const activeUrl = currentMode === 'turbo' ? 'http://127.0.0.1:11435' : currentMode === 'kaggle' ? KAGGLE_URL : HOSTINGER_OLLAMA_URL
+  const activeUrl = currentMode === 'turbo' ? 'http://127.0.0.1:11435' : currentMode === 'kaggle' ? activeKaggleSlot().url : HOSTINGER_OLLAMA_URL
   let details
   if (currentMode === 'turbo') {
     details = { label: 'Turbo: RunPod model (GPU)', speed: '30–65+ tok/s', cost: 'per hour while running', status: tunnel.ready ? 'ready' : 'disconnected' }
   } else if (currentMode === 'kaggle') {
-    details = { label: 'Kaggle: notebook GPU (2x T4)', speed: '~10-12 tok/s, reads ~390 tok/s', cost: 'free — 30 GPU-hrs/week', status: lastKaggleReachable ? 'ready' : 'disconnected', usage: getKaggleUsage(), session: getKaggleSessionTime() }
+    const slot = activeKaggleSlot()
+    details = {
+      label: `Kaggle: notebook GPU (2x T4) — ${slot.label}`,
+      speed: '~10-12 tok/s, reads ~390 tok/s',
+      cost: 'free — 30 GPU-hrs/week per account',
+      status: lastKaggleReachableSlot ? 'ready' : 'disconnected',
+      usage: getKaggleUsage(slot.id),
+      session: getKaggleSessionTime(slot.id),
+      // Both accounts' quota, so the UI can show which one to switch to
+      // before this one runs out, instead of only the one in use right now.
+      accounts: KAGGLE_SLOTS.map((s) => ({ id: s.id, label: s.label, connected: lastKaggleReachableSlot === s.id, usage: getKaggleUsage(s.id) })),
+    }
   } else {
     details = { label: 'Always On: Hostinger model (KVM 8)', speed: '2–5 tok/s', cost: '$26/mo flat', status: 'ready' }
   }
@@ -217,13 +303,20 @@ export async function getLiveComputeStatus() {
   // separate path instead of threading a third mode through the RunPod logic
   // below (which fetches pod details unconditionally, for the pod picker).
   if (currentMode === 'kaggle') {
-    const ok = await kaggleReachable()
-    lastKaggleReachable = ok
-    trackKaggleUsage(ok)
-    const usage = getKaggleUsage()
+    const slot = await findReachableKaggleSlot()
+    if (slot) {
+      lastKaggleReachableSlot = slot.id
+      kaggleActiveSlot = slot.id
+      writeState({ kaggleActiveSlot })
+      trackKaggleUsage(slot.id, true)
+    } else {
+      if (kaggleActiveSlot) trackKaggleUsage(kaggleActiveSlot, false)
+      lastKaggleReachableSlot = null
+    }
+    const usage = getKaggleUsage(activeKaggleSlot().id)
     let notice = null
-    if (!ok) notice = 'The Kaggle notebook is not connected. Start it and run the tunnel cell — Nexus will pick it up automatically.'
-    else if (usage.remainingSeconds < 3600) notice = `Kaggle's weekly GPU quota is nearly used up (~${Math.round(usage.remainingSeconds / 60)} min left). It may cut off mid-turn.`
+    if (!slot) notice = 'No Kaggle notebook is connected on either account. Start one and run its tunnel cell — Nexus will pick it up automatically.'
+    else if (usage.remainingSeconds < 3600) notice = `${activeKaggleSlot().label}'s weekly GPU quota is nearly used up (~${Math.round(usage.remainingSeconds / 60)} min left). Switch to the other account, or it may cut off mid-turn.`
     return { ...getComputeStatus(), switching: Boolean(switchPromise), ...(notice ? { notice } : {}) }
   }
   await tunnel.health()

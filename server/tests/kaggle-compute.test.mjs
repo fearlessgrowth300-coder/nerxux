@@ -22,10 +22,23 @@ test('the Kaggle SSH key can only reverse-forward its one port — verified live
 
 test('computeManager exposes exactly what the adapter and routes need for Kaggle', async () => {
   const cm = await import('../lib/computeManager.js')
-  for (const name of ['KAGGLE_URL', 'getKaggleUsage', 'kaggleReachable', 'switchToKaggle', 'ensureKaggleReady']) {
+  for (const name of ['KAGGLE_URL', 'KAGGLE_SLOTS', 'isKaggleUrl', 'getKaggleUsage', 'kaggleReachable', 'switchToKaggle', 'ensureKaggleReady']) {
     assert.ok(name in cm, `computeManager must export ${name}`)
   }
-  assert.match(cm.KAGGLE_URL, /^http:\/\/127\.0\.0\.1:20140$/, 'must match the port the tunnel restriction permits')
+  assert.match(cm.KAGGLE_URL, /^http:\/\/127\.0\.0\.1:20140$/, 'must match the port the primary account tunnel restriction permits')
+  assert.equal(cm.KAGGLE_SLOTS.length, 2, 'two accounts')
+  assert.match(cm.KAGGLE_SLOTS[1].url, /^http:\/\/127\.0\.0\.1:20141$/, 'the second account must use a DIFFERENT port than the first — two notebooks sharing one port cannot both hold the tunnel')
+  assert.ok(cm.isKaggleUrl(cm.KAGGLE_SLOTS[0].url) && cm.isKaggleUrl(cm.KAGGLE_SLOTS[1].url), 'both accounts must be recognised as Kaggle targets')
+  assert.ok(!cm.isKaggleUrl('http://127.0.0.1:11435'), 'a Turbo url must not be mistaken for Kaggle')
+})
+
+test('the two Kaggle accounts each get their own restricted SSH key on their own port — verified live against the VPS', () => {
+  // Documents the manual verification of the SECOND account's authorized_keys
+  // entry, added alongside the first (see the single-port test above). Two
+  // notebooks sharing one port cannot both hold the tunnel — this is why a
+  // second account needs its own port, not just its own key.
+  const restrictionB = 'restrict,port-forwarding,permitopen="127.0.0.1:1",permitlisten="127.0.0.1:20141",command="echo tunnel-only key; exit 1"'
+  assert.match(restrictionB, /permitlisten="127\.0\.0\.1:20141"/, 'account B must reverse-forward to a port account A never uses')
 })
 
 test('switching to kaggle mode is reflected in status, with its own label and no billing claim', async () => {
@@ -48,7 +61,7 @@ test('ensureKaggleReady falls back to Always On (never Turbo) when the tunnel is
     const ready = await cm.ensureKaggleReady()
     assert.equal(ready, false)
     assert.equal(cm.getComputeStatus().mode, 'always_on', 'a dead tunnel must not strand the turn on Kaggle forever')
-    assert.match(cm.takeFallbackReason() || '', /not connected/i)
+    assert.match(cm.takeFallbackReason() || '', /no kaggle notebook is connected/i)
   } finally { globalThis.fetch = realFetch }
 })
 
@@ -65,11 +78,11 @@ test('ensureKaggleReady stays on kaggle when the tunnel answers', async () => {
 
 test('the ollama adapter treats Kaggle as a fast backend (Turbo-sized budget) but keeps its own model name', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
-  assert.match(src, /let isKaggle = targetUrl === KAGGLE_URL/, 'must be reassignable so fallBackToAlwaysOn can clear it on a mid-turn drop')
+  assert.match(src, /let isKaggle = isKaggleUrl\(targetUrl\)/, 'must recognise EITHER account\'s url, and be reassignable so fallBackToAlwaysOn can clear it on a mid-turn drop')
   assert.match(src, /let generousBudget = isRunpod \|\| isKaggle/, 'Kaggle reuses the prompt cache and reads at ~390 tok/s — it should not get the CPU-only 14k cap')
   assert.match(src, /modelForTarget\(model, isRunpod, isKaggle\)/, 'Kaggle must not have its model silently swapped for ALWAYS_ON_MODEL')
   assert.match(src, /if \(targetUrl\.includes\('11435'\) && !\(await ensureTurboReady\(\)\)\)/)
-  assert.match(src, /else if \(targetUrl === KAGGLE_URL && !\(await ensureKaggleReady\(\)\)\)/, 'Kaggle gets the same pre-flight-then-fallback treatment as Turbo, not a hang')
+  assert.match(src, /else if \(isKaggleUrl\(targetUrl\) && !\(await ensureKaggleReady\(\)\)\)/, 'Kaggle gets the same pre-flight-then-fallback treatment as Turbo, not a hang, for whichever account is active')
   assert.match(src, /postOpenAIChat/, 'Kaggle runs llama-server, so it must go through the same request/response translation as Always On llama-server')
 })
 
@@ -253,4 +266,48 @@ test('a Kaggle tunnel that drops mid-turn falls back to Always On instead of thr
     globalThis.fetch = realFetch
     cm.switchToKaggle()
   }
+})
+
+// Two-account failover: this is the entire point of a second Kaggle account —
+// when account A's tunnel is down (session ended, or never connected today)
+// but account B's notebook is up, Nexus should use B automatically instead of
+// falling all the way back to the slow CPU box.
+test('ensureKaggleReady uses account B automatically when A is down but B is up', async () => {
+  const cm = await import('../lib/computeManager.js')
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => { throw new TypeError('fetch failed') } // both down first, to clear any sticky slot from earlier tests
+  cm.switchToKaggle()
+  await cm.ensureKaggleReady()
+  try {
+    cm.switchToKaggle()
+    globalThis.fetch = async (url) => {
+      if (String(url).startsWith(cm.KAGGLE_SLOTS[0].url)) throw new TypeError('fetch failed') // account A: not connected
+      if (String(url).startsWith(cm.KAGGLE_SLOTS[1].url)) return new Response('{"status":"ok"}', { status: 200 }) // account B: connected
+      throw new Error(`unexpected url ${url}`)
+    }
+    assert.equal(await cm.ensureKaggleReady(), true, 'must succeed using account B, not fall back to Always On just because A is down')
+    const status = cm.getComputeStatus()
+    assert.equal(status.mode, 'kaggle')
+    assert.equal(status.activeUrl, cm.KAGGLE_SLOTS[1].url, 'the active url must be account B, not A')
+    assert.match(status.details.label, /Kaggle B/)
+    assert.ok(status.details.accounts.find((a) => a.id === 'b')?.connected, 'account B must be reported as connected')
+    assert.ok(!status.details.accounts.find((a) => a.id === 'a')?.connected, 'account A must be reported as not connected')
+  } finally { globalThis.fetch = realFetch }
+})
+
+// Each account has its OWN weekly 30h quota — a shared counter would have
+// made a fresh account B look like it was already almost out, just because
+// account A had been used heavily.
+test("each Kaggle account tracks its own weekly usage — one account's hours do not count against the other", async () => {
+  const cm = await import('../lib/computeManager.js')
+  const realFetch = globalThis.fetch
+  try {
+    cm.switchToKaggle()
+    globalThis.fetch = async (url) => (String(url).startsWith(cm.KAGGLE_SLOTS[0].url) ? new Response('{"status":"ok"}', { status: 200 }) : Promise.reject(new TypeError('fetch failed')))
+    await cm.ensureKaggleReady() // accrues some time on account A
+    const usageA = cm.getKaggleUsage('a')
+    const usageB = cm.getKaggleUsage('b')
+    assert.notEqual(usageA.windowStart, 0, 'account A must have a real usage window once used')
+    assert.equal(usageB.usedSeconds, 0, "account B's usage must be untouched by account A's activity")
+  } finally { globalThis.fetch = realFetch }
 })

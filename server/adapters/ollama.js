@@ -13,7 +13,7 @@ import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { fitTurn } from '../lib/compactTurn.js'
 import { alwaysOnUsesOpenAI, postOpenAIChat, openAIModels } from '../lib/llamaServerChat.js'
-import { getComputeStatus, ensureTurboReady, ensureKaggleReady, takeFallbackReason, KAGGLE_URL } from '../lib/computeManager.js'
+import { getComputeStatus, ensureTurboReady, ensureKaggleReady, takeFallbackReason, isKaggleUrl } from '../lib/computeManager.js'
 import { hasBraveKey } from '../lib/webSearch.js'
 import { withDocuments, imageAttachments } from '../lib/attachments.js'
 import { watchReadProgress } from '../lib/ollamaReadProgress.js'
@@ -39,7 +39,7 @@ const MALFORMED_TOOL_CALL = /XML syntax error|unexpected end element|invalid cha
 // (lib/llamaServerChat.js), so everything after this call sees the same
 // Ollama-shaped reply regardless of which server actually answered.
 function postChat(targetUrl, body, signal, isRunpod) {
-  if (targetUrl === KAGGLE_URL || (!isRunpod && alwaysOnUsesOpenAI())) return postOpenAIChat(targetUrl, body, { signal })
+  if (isKaggleUrl(targetUrl) || (!isRunpod && alwaysOnUsesOpenAI())) return postOpenAIChat(targetUrl, body, { signal })
   return fetch(`${targetUrl}/api/chat`, {
     dispatcher: OLLAMA_DISPATCHER,
     method: 'POST',
@@ -232,7 +232,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   if (targetUrl.includes('11435') && !(await ensureTurboReady())) {
     targetUrl = resolveTargetUrl(model)
     onProgress({ type: 'text', text: fallbackNote('Turbo') })
-  } else if (targetUrl === KAGGLE_URL && !(await ensureKaggleReady())) {
+  } else if (isKaggleUrl(targetUrl) && !(await ensureKaggleReady())) {
     targetUrl = resolveTargetUrl(model)
     onProgress({ type: 'text', text: fallbackNote('Kaggle') })
   }
@@ -246,7 +246,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // but generousBudget/targetLabel do when fallBackToAlwaysOn fires below —
   // they must be `let` and recomputed there, or a Turbo turn that drops mid-way
   // would keep Turbo's Infinity budget and label on the Always On box it fell back to.
-  let isKaggle = targetUrl === KAGGLE_URL
+  let isKaggle = isKaggleUrl(targetUrl)
   let generousBudget = isRunpod || isKaggle
   let targetLabel = isRunpod ? 'Turbo' : isKaggle ? 'Kaggle' : 'Always On'
   // Chat requests run as background jobs the client polls (routes/chat.js),
