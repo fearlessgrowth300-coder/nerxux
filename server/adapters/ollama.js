@@ -246,7 +246,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // but generousBudget/targetLabel do when fallBackToAlwaysOn fires below —
   // they must be `let` and recomputed there, or a Turbo turn that drops mid-way
   // would keep Turbo's Infinity budget and label on the Always On box it fell back to.
-  const isKaggle = targetUrl === KAGGLE_URL
+  let isKaggle = targetUrl === KAGGLE_URL
   let generousBudget = isRunpod || isKaggle
   let targetLabel = isRunpod ? 'Turbo' : isKaggle ? 'Kaggle' : 'Always On'
   // Chat requests run as background jobs the client polls (routes/chat.js),
@@ -317,15 +317,17 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // The wall-clock budget is kept as it was: shrinking it mid-turn would end a
   // turn that was already past 25 minutes on the spot.
   const fallBackToAlwaysOn = () => {
+    const fromLabel = targetLabel // capture before it's overwritten below
     targetUrl = resolveTargetUrl(model)
     isRunpod = false
+    isKaggle = false
     generousBudget = false
     targetLabel = 'Always On'
     numPredict = 3000
     numCtx = ALWAYS_ON_CTX
     promptBudget = budgetFor()
     rewriteSystem = true
-    onProgress({ type: 'text', text: fallbackNote('Turbo') })
+    onProgress({ type: 'text', text: fallbackNote(fromLabel) })
   }
   const system = composeSystem(systemPrompt, skills)
   const beforeFinish = createCompletionCheck(userId, sessionId)
@@ -508,6 +510,23 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
           step--
           continue
         }
+      }
+      // Kaggle had no equivalent of the Turbo recovery above, so a notebook
+      // whose ~12h session ended (or whose tunnel just dropped) mid-turn threw
+      // this raw socket error straight at the user instead of finishing the
+      // turn on Always On — caught live (2026-09-17): "Can't reach the Kaggle
+      // notebook's tunnel ... (terminated / UND_ERR_SOCKET)" with real work
+      // still in progress. ensureKaggleReady is a single reachability check
+      // (no pod to reboot), so one attempt is enough before falling back.
+      if (isKaggle) {
+        onProgress({ type: 'text', text: '(reconnecting to the Kaggle notebook)' })
+        if (await ensureKaggleReady()) {
+          step--
+          continue
+        }
+        fallBackToAlwaysOn()
+        step--
+        continue
       }
       const onLlamaServer = !isRunpod && !isKaggle && alwaysOnUsesOpenAI()
       const targetDesc = isRunpod ? `Runpod GPU Ollama tunnel at ${targetUrl}` : isKaggle ? `the Kaggle notebook's tunnel at ${targetUrl}` : onLlamaServer ? `the Always On llama-server at ${targetUrl}` : `local Ollama at ${targetUrl}`

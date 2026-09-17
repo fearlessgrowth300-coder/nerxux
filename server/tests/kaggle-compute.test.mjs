@@ -65,7 +65,7 @@ test('ensureKaggleReady stays on kaggle when the tunnel answers', async () => {
 
 test('the ollama adapter treats Kaggle as a fast backend (Turbo-sized budget) but keeps its own model name', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
-  assert.match(src, /const isKaggle = targetUrl === KAGGLE_URL/)
+  assert.match(src, /let isKaggle = targetUrl === KAGGLE_URL/, 'must be reassignable so fallBackToAlwaysOn can clear it on a mid-turn drop')
   assert.match(src, /let generousBudget = isRunpod \|\| isKaggle/, 'Kaggle reuses the prompt cache and reads at ~390 tok/s — it should not get the CPU-only 14k cap')
   assert.match(src, /modelForTarget\(model, isRunpod, isKaggle\)/, 'Kaggle must not have its model silently swapped for ALWAYS_ON_MODEL')
   assert.match(src, /if \(targetUrl\.includes\('11435'\) && !\(await ensureTurboReady\(\)\)\)/)
@@ -209,11 +209,48 @@ test("a Kaggle request never exceeds the notebook's real 32768 context, even wit
   }
 })
 
-test('a Turbo turn that falls back to Always On mid-way drops the Infinity budget and the Turbo label too', async () => {
+test('a Turbo or Kaggle turn that falls back to Always On mid-way drops the fast budget and label too', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
   const fallback = src.match(/const fallBackToAlwaysOn = \(\) => \{[\s\S]*?\n  \}/)
   assert.ok(fallback, 'fallBackToAlwaysOn block found')
-  assert.match(fallback[0], /generousBudget = false/, 'without this, a turn that fell back keeps Turbo-sized (Infinity) budget on the CPU box')
-  assert.match(fallback[0], /targetLabel = 'Always On'/, 'without this, later progress messages still say "Turbo" after falling back')
-  assert.match(fallback[0], /fallbackNote\('Turbo'\)/, 'this path is only reachable from a dying Turbo tunnel, never Kaggle')
+  assert.match(fallback[0], /isKaggle = false/, 'without this, a Kaggle turn that fell back keeps modelForTarget treating it as Kaggle (no model swap) on the CPU box')
+  assert.match(fallback[0], /generousBudget = false/, 'without this, a turn that fell back keeps the fast-backend (Infinity) budget on the CPU box')
+  assert.match(fallback[0], /targetLabel = 'Always On'/, 'without this, later progress messages still say the old target after falling back')
+  assert.match(fallback[0], /fallbackNote\(fromLabel\)/, 'the message must name whichever backend actually dropped (Turbo or Kaggle), not a hardcoded one')
+})
+
+// Caught live, 2026-09-17: a real chat on Kaggle failed outright mid-turn with
+// "Can't reach the Kaggle notebook's tunnel ... (terminated / UND_ERR_SOCKET)"
+// — the notebook's session had ended (or the tunnel just dropped) between
+// steps, and unlike Turbo there was no retry/fallback branch for Kaggle at
+// all, so the raw socket error was thrown straight at the user with real
+// work already done in the turn.
+test('a Kaggle tunnel that drops mid-turn falls back to Always On instead of throwing the raw socket error', async () => {
+  const cm = await import('../lib/computeManager.js')
+  const { run } = await import('../adapters/ollama.js')
+  cm.switchToKaggle()
+  const realFetch = globalThis.fetch
+  let tunnelUp = true // the pre-turn ensureKaggleReady check must see it up
+  let chatCalls = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/health')) {
+      if (!tunnelUp) throw new TypeError('fetch failed')
+      return new Response('{"status":"ok"}', { status: 200 })
+    }
+    if (String(url).includes('127.0.0.1:20140')) {
+      chatCalls++
+      tunnelUp = false // the notebook's session ends right as this first real request lands
+      const e = new TypeError('terminated'); e.cause = { code: 'UND_ERR_SOCKET' }; throw e
+    }
+    // Any other target is Always On, reached only after the fallback fires.
+    return new Response(JSON.stringify({ message: { content: 'recovered on Always On' }, done_reason: 'stop' }), { status: 200 })
+  }
+  try {
+    const res = await run({ prompt: 'keep working', model: 'orcarouter/Qwen3.8-27B-Uncensored:latest' })
+    assert.equal(res.content, 'recovered on Always On', 'the turn must finish on Always On, not end in a thrown connection error')
+    assert.doesNotMatch(res.content, /UND_ERR_SOCKET|Can't reach/, 'the raw socket error must never reach the user')
+  } finally {
+    globalThis.fetch = realFetch
+    cm.switchToKaggle()
+  }
 })
