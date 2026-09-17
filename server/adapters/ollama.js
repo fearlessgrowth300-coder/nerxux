@@ -288,7 +288,19 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // every step re-reads all of it — the turn budget, not the window, is what
   // keeps a long Always On chat from running for hours.
   const ALWAYS_ON_CTX = 32768
-  let numCtx = generousBudget ? 65536 : ALWAYS_ON_CTX
+  // 65536 is real ONLY on Turbo: Ollama loads a model with whatever num_ctx a
+  // request asks for. Kaggle and Always On both go through llama-server's
+  // OpenAI-compatible endpoint (lib/llamaServerChat.js), whose context is
+  // FIXED at process start by --ctx-size and ignores num_ctx entirely — the
+  // Kaggle notebook starts it at 32768, the same as Always On. Kaggle used to
+  // share Turbo's generousBudget flag here too, so Nexus budgeted a prompt up
+  // to ~65k tokens while the real server would only accept 32768, and sent a
+  // request llama-server flatly rejected: "request (37742 tokens) exceeds the
+  // available context size (32768 tokens)" (caught live, 2026-09-17). Every
+  // OTHER generousBudget-gated choice below is fine for Kaggle (it genuinely
+  // reads fast and reuses the prompt cache) — only the real context ceiling
+  // must track the server that will actually enforce it, not a shared flag.
+  let numCtx = isRunpod ? 65536 : ALWAYS_ON_CTX
   // What is left for the conversation once the answer's budget is set aside.
   const toolTokens = estimateTokens(JSON.stringify(agentTools))
   // Always On re-reads everything it is sent on every step, so what it is sent

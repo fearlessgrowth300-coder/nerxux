@@ -47,7 +47,7 @@ test('Always On has room for the agent, and oversized notes degrade instead of f
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
   const ctx = Number(src.match(/const ALWAYS_ON_CTX = (\d+)/)[1])
   assert.ok(ctx >= 32768, `Always On context ${ctx} cannot hold the agent's ~12k fixed tokens plus a conversation`)
-  assert.match(src, /let numCtx = generousBudget \? 65536 : ALWAYS_ON_CTX/)
+  assert.match(src, /let numCtx = isRunpod \? 65536 : ALWAYS_ON_CTX/, '65536 is real only on Turbo (Ollama); Kaggle/Always On both run llama-server, fixed at 32768 by --ctx-size, regardless of generousBudget')
   assert.match(src, /numCtx = ALWAYS_ON_CTX/, 'mid-turn fallback uses the same window')
   assert.match(src, /messages\[0\]\.content = system \+ NOTES_POINTER/, 'notes that do not fit become a pointer to NEXUS.md')
   const fixed = 3048 + 3865 + 2874 + 1592 + 256

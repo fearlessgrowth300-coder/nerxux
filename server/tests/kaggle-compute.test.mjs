@@ -166,6 +166,49 @@ test('a Nexus restart does not reset an in-progress Kaggle countdown', async () 
   } finally { globalThis.fetch = realFetch }
 })
 
+// Caught live, 2026-09-17: a real chat sent to Kaggle failed with
+// "request (37742 tokens) exceeds the available context size (32768 tokens)"
+// straight from llama-server. Cause: numCtx (Nexus's OWN budgeting ceiling)
+// was 65536 for Kaggle, copying Turbo's real window — but Kaggle's notebook
+// starts llama-server with --ctx-size 32768, a FIXED limit the OpenAI-style
+// endpoint cannot raise per request. Nexus budgeted room for a ~65k-token
+// prompt and sent something the real server could only ever reject.
+test("a Kaggle request never exceeds the notebook's real 32768 context, even with a huge conversation", async () => {
+  const cm = await import('../lib/computeManager.js')
+  const { run } = await import('../adapters/ollama.js')
+  const { estimateTokens } = await import('../lib/fitContext.js')
+  cm.switchToKaggle()
+  const realFetch = globalThis.fetch
+  let sentBody = null
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/health')) return new Response('{"status":"ok"}', { status: 200 })
+    sentBody = JSON.parse(init.body)
+    return new Response(JSON.stringify({
+      id: 'x', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }],
+      timings: { prompt_n: 300, prompt_ms: 1000 },
+    }), { status: 200 })
+  }
+  try {
+    // A conversation big enough to have produced the real 37742-token request
+    // under the old bug (generousBudget gave it a 65536 ceiling); the model
+    // here has no tool defs beyond the agent's own, keeping this deterministic.
+    const massive = Array.from({ length: 60 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user',
+      content: `turn ${i} `.padEnd(1400, 'x'),
+    }))
+    await run({ prompt: 'continue', history: massive, model: 'orcarouter/Qwen3.8-27B-Uncensored:latest' })
+    assert.ok(sentBody, 'the chat request must actually have been sent (Kaggle was reachable)')
+    const sentTokens = sentBody.messages.reduce((n, m) => n + estimateTokens(m), 0)
+    // Nexus's own reply budget (numPredict) plus the 512-token safety margin
+    // must fit alongside what was sent, inside the notebook's REAL 32768 window.
+    assert.ok(sentTokens + 12000 + 512 <= 32768,
+      `sent ${sentTokens} tokens (+ 12000 reply + 512 margin = ${sentTokens + 12512}) — must fit in Kaggle's real 32768, not Turbo's 65536`)
+  } finally {
+    globalThis.fetch = realFetch
+    cm.switchToKaggle() // leave mode as kaggle is fine; state is per-process anyway
+  }
+})
+
 test('a Turbo turn that falls back to Always On mid-way drops the Infinity budget and the Turbo label too', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
   const fallback = src.match(/const fallBackToAlwaysOn = \(\) => \{[\s\S]*?\n  \}/)
