@@ -344,3 +344,53 @@ test("each Kaggle account tracks its own weekly usage — one account's hours do
       "account B's usage must be untouched by account A's activity")
   } finally { globalThis.fetch = realFetch }
 })
+
+// Caught before it shipped, 2026-09-18: with several accounts, a mid-turn
+// reconnect could succeed via a DIFFERENT account while the retry still went
+// to the dead one's URL — looping until the turn's time limit. And accounts
+// run different windows (128k vs 32k), so the budget must follow the switch.
+test('a mid-turn drop switches to ANOTHER live account, re-targeted and re-budgeted to its window', async () => {
+  const cm = await import('../lib/computeManager.js')
+  const { run } = await import('../adapters/ollama.js')
+  const { estimateTokens } = await import('../lib/fitContext.js')
+  const realFetch = globalThis.fetch
+  const [A, B] = cm.KAGGLE_SLOTS
+  let aUp = true
+  let bUp = false // held down during setup so the turn provably starts on A
+  const sentTo = []
+  let sentToB = null
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.endsWith('/props')) {
+      if (u.startsWith(A.url) && aUp) return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 131072 }, modalities: { vision: false } }), { status: 200 })
+      if (u.startsWith(B.url) && bUp) return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 32768 }, modalities: { vision: false } }), { status: 200 })
+      throw new TypeError('fetch failed')
+    }
+    sentTo.push(u)
+    if (u.startsWith(A.url)) { aUp = false; const e = new TypeError('terminated'); e.cause = { code: 'UND_ERR_SOCKET' }; throw e }
+    if (u.startsWith(B.url)) {
+      sentToB = JSON.parse(init.body)
+      // The turn streams, so reply as llama-server does: server-sent events.
+      const ev = (o) => `data: ${JSON.stringify(o)}\n\n`
+      return new Response(ev({ choices: [{ index: 0, delta: { content: 'done on B' }, finish_reason: null }] })
+        + ev({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n',
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+    }
+    throw new Error('unexpected target ' + u)
+  }
+  try {
+    cm.switchToKaggle()
+    // Make A the active account first so the turn really starts there.
+    await cm.ensureKaggleReady()
+    assert.equal(cm.getComputeStatus().activeUrl, A.url)
+    bUp = true // B comes up; A will die on the first real request
+    const big = Array.from({ length: 60 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `turn ${i} `.padEnd(1400, 'x') }))
+    const res = await run({ prompt: 'continue', history: big, model: 'orcarouter/Qwen3.8-27B-Uncensored:latest' })
+    assert.equal(res.content, 'done on B', 'the turn must finish on the other live account')
+    assert.equal(sentTo.filter((u) => u.startsWith(A.url)).length, 1, 'the dead account must not be retried in a loop')
+    const tokens = sentToB.messages.reduce((n, m) => n + estimateTokens(m), 0)
+    assert.ok(tokens + 12000 + 512 <= 32768, `sent ${tokens} tokens to a 32k server — budget did not follow the switch`)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})

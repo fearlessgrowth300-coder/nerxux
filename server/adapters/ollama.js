@@ -395,6 +395,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const requestStart = Date.now()
   let parseRetries = 0
   let tunnelRetries = 0
+  let kaggleRetries = 0
 
   // Set when the loop ends on a real answer. If it instead runs out of rounds or
   // wall-clock while still working, nothing has summarised the turn — the reply
@@ -531,7 +532,21 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       // (no pod to reboot), so one attempt is enough before falling back.
       if (isKaggle) {
         onProgress({ type: 'text', text: '(reconnecting to the Kaggle notebook)' })
-        if (await ensureKaggleReady()) {
+        // Capped: after 3 failed reconnects stop trying Kaggle and finish the
+        // turn on Always On (fallBackToAlwaysOn clears isKaggle, so this
+        // branch cannot be re-entered).
+        if (kaggleRetries++ < 3 && await ensureKaggleReady()) {
+          // With several accounts, "ready" may mean a DIFFERENT account took
+          // over. Re-resolve, or the retry goes straight back to the dead one
+          // and loops until the turn's time limit.
+          targetUrl = resolveTargetUrl(model)
+          // The new account may have a SMALLER window (the ladder differs per
+          // run: 128k on one, 32k on another). Keeping the old budget would
+          // send a 128k-sized prompt to a 32k server — this morning's
+          // context-overflow failure, in reverse.
+          numCtx = getKaggleCtx() || ALWAYS_ON_CTX
+          promptBudget = budgetFor()
+          rewriteSystem = true
           step--
           continue
         }
