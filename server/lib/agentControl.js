@@ -6,19 +6,46 @@ import { withAgentState, addEvidence, stateSummary, safeNote, evaluateAssertions
 
 const inspections = new Set(['read_file', 'list_files', 'search_files', 'web_search', 'read_web_page'])
 const executions = new Set(['execute_command', 'run_code', 'run_on_pod', 'verify_work', 'restart_service', 'deploy_service', 'expose_site'])
-// A shell command that only reads must not bump the revision: every bump
-// staled every passing check, so a mid-turn `cat` forced a full re-proof.
-// Conservative: each &&/||/;/| segment must start with a read-only program,
-// and no redirects, exec or delete flags. Anything unsure counts as a mutation.
-const READ_ONLY = new Set(['cat', 'ls', 'pwd', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'stat', 'file', 'du', 'df', 'echo', 'which', 'date', 'ps', 'env', 'printenv'])
-export function isReadOnlyCommand(cmd) {
-  const c = String(cmd || '')
-  if (!c.trim() || /[>`]|\$\(|-exec|-delete|\btee\b/.test(c)) return false
-  return c.split(/&&|\|\||;|\|/).every(seg => {
-    const w = seg.trim().split(/\s+/)[0]
-    return READ_ONLY.has(w) || (w === 'git' && /^git\s+(status|log|diff|show)\b/.test(seg.trim()))
-  })
+// A shell command that cannot change the project's files must not bump the
+// revision: every bump staled every passing check, so a mid-turn `cat`, `curl`
+// or `git commit` forced a full re-proof (647 bumps in 1888 steps in one
+// session, 30 in 47 in another). Conservative: after dropping harmless
+// redirects (2>&1, >/dev/null) and leading VAR=value assignments, every
+// &&/||/;/| segment must start with a read-only program (or a git subcommand
+// that leaves the working tree alone, or a curl that neither writes nor
+// sends a body). Anything unsure counts as a mutation.
+const READ_ONLY = new Set(['cat', 'ls', 'pwd', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'stat', 'file', 'du', 'df', 'echo', 'which', 'date', 'ps', 'env', 'printenv', 'cd', 'sleep', 'sort', 'uniq', 'cut', 'tr', 'jq', 'ss', 'journalctl', 'uname', 'whoami', 'test', 'true', 'basename', 'dirname', 'seq', '[', '[['])
+const GIT_SAFE = /^git\s+(?:-c\s+\S+\s+)*(status|log|diff|show|add|commit|push|fetch|remote|rev-parse|ls-files)\b/
+const CURL_WRITES = /(^|\s)(-X\s*(?!GET\b|HEAD\b)\S+|--request\s+(?!GET\b|HEAD\b)\S+|-d|--data\S*|-F|--form\S*|-T|--upload-file|-O|--remote-name|--output-dir|-o\s+(?!\/dev\/null\b)\S+|--output\s+(?!\/dev\/null\b)\S+)/
+export function blockingWord(cmd) {
+  const BS = String.fromCharCode(92)
+  let raw = String(cmd || '').split(BS + String.fromCharCode(10)).join(' ') // join line continuations
+  // An escaped quote breaks the quote pairing below, so a quote could hide a command: unsure.
+  if (raw.includes(BS + '"') || raw.includes(BS + "'")) return 'escaped quote'
+  // $( ) runs even inside double quotes. Judge each innermost one by what it runs,
+  // then replace it with a placeholder. Backticks and $(( )) stay "unsure".
+  for (let m; (m = /\$\(([^()]*)\)/.exec(raw));) {
+    const inner = blockingWord(m[1])
+    if (inner !== null) return '$(' + inner + ')'
+    raw = raw.replace(m[0], 'X')
+  }
+  if (/\$\(|`/.test(raw)) return '$(...)'
+  // Quoted text is data: a "|", ";" or ">" inside a regex or a curl format string is not shell syntax.
+  const c = raw.replace(/"[^"]*"|'[^']*'/g, '""').replace(/\d?>&\d|\d?>\s*\/dev\/null/g, '')
+  if (!c.trim()) return 'empty'
+  if (/>|-exec|-delete|\btee\b/.test(c)) return 'redirect/exec'
+  for (const part of c.split(/&&|\|\||;|\n|\|/)) {
+    let seg = part.trim().replace(/^(?:\w+=\S*\s*)+/, '').replace(/^(?:(?:do|then|else|elif|if|while|until)\b\s*|[({]\s*)+/, '')
+    if (!seg || seg.startsWith('#') || /^(done|fi|esac)\b/.test(seg) || /^for\s+\w+\s+in\b/.test(seg)) continue
+    const w = seg.split(/\s+/)[0]
+    if (w === 'git') { if (!GIT_SAFE.test(seg)) return 'git ' + (seg.split(/\s+/)[1] || '') }
+    else if (w === 'curl') { if (CURL_WRITES.test(seg)) return 'curl (writes/sends)' }
+    else if (w === 'sed') { if (/(^|\s)(-[a-zA-Z]*i|--in-place)/.test(seg)) return 'sed -i' }
+    else if (!READ_ONLY.has(w)) return w
+  }
+  return null
 }
+export const isReadOnlyCommand = (cmd) => blockingWord(cmd) === null
 const ok = (stdout) => ({ ok: true, exitCode: 0, stdout, stderr: '', durationMs: 0 })
 const fail = (stderr) => ({ ok: false, exitCode: 1, stdout: '', stderr, durationMs: 0 })
 const normalizePath = (p) => {
@@ -156,8 +183,15 @@ export async function controlledAgentTool(input, execute, transfer) {
         // ("built and live" vs "is built and live"), which left the old FAIL alive
         // next to the new PASS and blocked "verified" while the model re-proved it.
         const command = args.command ? safeNote(args.command) : undefined
-        s.checks = s.checks.filter(c => !((c.label === safeNote(args.label) || (command && c.command === command)) && c.environment === s.environment))
+        s.checks = s.checks.filter(c => !((c.label === safeNote(args.label) || (command && c.command === command && c.kind === args.kind)) && c.environment === s.environment))
         s.checks.push({ id: event.id, label: safeNote(args.label), command, kind: args.kind, revision: s.revision, environment: s.environment, ok: result.ok, assertions: (Array.isArray(args.assertions) ? args.assertions : []).slice(0, 20).map(a => ({ type: a?.type, field: safeNote(a?.field), min: a?.min, value: safeNote(a?.value) })) })
+        // A pass of the same kind supersedes earlier failures in this revision. The
+        // model refines a flawed check (bad assertion, deploy still propagating)
+        // under a new label AND command, so identity cannot be matched: in one
+        // real session 3 failed attempts stayed beside the passing one and the
+        // reply was stamped "not verified" after the check had passed. A later
+        // FAIL still blocks; a fail of a different kind (build vs test) does too.
+        if (result.ok) s.checks = s.checks.filter(c => c.ok || c.kind !== args.kind || c.environment !== s.environment || c.revision !== s.revision)
         s.checks = s.checks.slice(-20)
       }
       return { ...decorated, machine: result.host || os.hostname() }

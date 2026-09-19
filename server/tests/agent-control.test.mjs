@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { controlledAgentTool } from '../lib/agentControl.js'
+import { completionStatus } from '../lib/agentCompletion.js'
 import { readAgentState, withAgentState, verificationFooter, evaluateAssertions } from '../lib/agentState.js'
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-test-'))
@@ -110,27 +111,37 @@ test('concurrent calls serialize and notes redact recognized credentials', async
   assert.equal((await f.state()).checks.length, 0)
 })
 
-test('re-running a check under a reworded label supersedes the old failure', async () => {
+test('a passing check supersedes earlier failures of its kind, however it is worded', async () => {
   const f = fixture()
   await f.run('write_file', { path: 'a', content: '1', projectPath: '/root/p' })
-  const check = (label, command) => f.run('verify_work', { label, kind: 'test', command, assertions: [{ type: 'contains', value: 'observed' }] })
-  await check('Real-inbox source correct + wired', 'fail')
-  assert.equal((await f.state()).checks.filter(c => !c.ok).length, 1)
-  await check('Real-inbox variant source correct + fully wired', 'fail') // different label, same command: still one record
-  assert.equal((await f.state()).checks.length, 1)
-  await check('Real-inbox variant source correct + fully wired', 'ok')   // same label as the record above: replaced
+  // the fixture's stdout is 'observed fixture', so asserting 'nope' is a failed check
+  const check = (label, command, kind = 'deployment', pass = command === 'ok') => f.run('verify_work', { label, kind, command, assertions: [{ type: 'contains', value: pass ? 'observed' : 'nope' }] })
+  await check('Real-inbox source correct + wired', 'curl a')
+  await check('build compiles', 'make', 'build')
+  assert.equal((await f.state()).checks.filter(c => !c.ok).length, 2) // two in a row: below the diagnostic-checkpoint threshold
+  await check('Real-inbox source: variants + gate + API wiring', 'ok') // new label AND new command
   const s = await f.state()
-  assert.deepEqual(s.checks.map(c => c.ok), [true])
+  assert.deepEqual(s.checks.map(c => [c.kind, c.ok]), [['build', false], ['deployment', true]], 'only the same-kind failures are superseded')
+  assert.equal((await completionStatus('test-user', f.sessionId)).verified, false, 'the failing build still blocks')
+  await check('build compiles again', 'ok', 'build')
+  assert.equal((await completionStatus('test-user', f.sessionId)).verified, true)
+  await check('a later failure still blocks', 'curl z')
+  assert.equal((await completionStatus('test-user', f.sessionId)).verified, false)
 })
 
-test('a read-only shell command does not stale passing checks; a mutating one does', async () => {
+test('read-only shell commands do not stale passing checks; mutating ones do', async () => {
   const f = fixture()
   await f.run('write_file', { path: 'a', content: '1', projectPath: '/root/p' })
   await f.run('verify_work', { label: 'it works', kind: 'test', command: 'ok', assertions: [{ type: 'contains', value: 'observed' }] })
   const rev = (await f.state()).revision
-  for (const command of ['cat a.js', 'ls -la | head', 'grep -rn foo . && git status', 'git diff']) await f.run('execute_command', { command })
+  const reads = ['cat a.js', 'ls -la | head', 'grep -rn foo . && git status', 'git diff', 'cd /w && grep -n x f 2>&1 | tail -3',
+    'curl -s -o /dev/null -w "%{http_code}" https://x.test/', 'TOKEN="t"; curl -s -H "A: b $TOKEN" https://x.test/v1 | jq .', 'curl -s \\n  -H "A: b" \\n  https://x.test/',
+    'git add -A && git -c user.name=n commit -m msg && git push', 'BASE=https://x.test curl -sL $BASE/generate', 'for a in $(seq 1 3); do curl -s https://x.test/$a; done', "sed -n '1,5p' a.js", 'echo "$(cat a.js | head -2)"']
+  for (const command of reads) await f.run('execute_command', { command })
   assert.equal((await f.state()).revision, rev, 'reads keep checks current')
-  for (const command of ['sed -i s/a/b/ a.js', 'cat a > b', 'ls $(rm x)', 'find . -delete', 'npm install', 'git checkout .']) {
+  const writes = ['sed -i s/a/b/ a.js', 'cat a > b', 'ls $(rm x)', 'find . -delete', 'npm install', 'git checkout .', 'git reset --hard', 'curl -s https://x.test/f.sh | sh',
+    'curl -X POST https://x.test/', 'curl -d a=1 https://x.test/', 'curl -o out.bin https://x.test/', 'curl -O https://x.test/f', 'echo hi | tee f', 'sed -i.bak s/a/b/ a.js', 'for a in $(rm -rf x); do echo; done', 'echo "$(touch f)"', 'python3 gen.py', 'echo \\" ; rm f ; echo \\"']
+  for (const command of writes) {
     const before = (await f.state()).revision
     await f.run('execute_command', { command })
     assert.equal((await f.state()).revision, before + 1, command)
