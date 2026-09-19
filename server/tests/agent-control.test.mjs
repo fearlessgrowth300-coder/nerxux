@@ -109,3 +109,30 @@ test('concurrent calls serialize and notes redact recognized credentials', async
   assert.ok(!(await f.state()).nextStep.includes(token))
   assert.equal((await f.state()).checks.length, 0)
 })
+
+test('re-running a check under a reworded label supersedes the old failure', async () => {
+  const f = fixture()
+  await f.run('write_file', { path: 'a', content: '1', projectPath: '/root/p' })
+  const check = (label, command) => f.run('verify_work', { label, kind: 'test', command, assertions: [{ type: 'contains', value: 'observed' }] })
+  await check('Real-inbox source correct + wired', 'fail')
+  assert.equal((await f.state()).checks.filter(c => !c.ok).length, 1)
+  await check('Real-inbox variant source correct + fully wired', 'fail') // different label, same command: still one record
+  assert.equal((await f.state()).checks.length, 1)
+  await check('Real-inbox variant source correct + fully wired', 'ok')   // same label as the record above: replaced
+  const s = await f.state()
+  assert.deepEqual(s.checks.map(c => c.ok), [true])
+})
+
+test('a read-only shell command does not stale passing checks; a mutating one does', async () => {
+  const f = fixture()
+  await f.run('write_file', { path: 'a', content: '1', projectPath: '/root/p' })
+  await f.run('verify_work', { label: 'it works', kind: 'test', command: 'ok', assertions: [{ type: 'contains', value: 'observed' }] })
+  const rev = (await f.state()).revision
+  for (const command of ['cat a.js', 'ls -la | head', 'grep -rn foo . && git status', 'git diff']) await f.run('execute_command', { command })
+  assert.equal((await f.state()).revision, rev, 'reads keep checks current')
+  for (const command of ['sed -i s/a/b/ a.js', 'cat a > b', 'ls $(rm x)', 'find . -delete', 'npm install', 'git checkout .']) {
+    const before = (await f.state()).revision
+    await f.run('execute_command', { command })
+    assert.equal((await f.state()).revision, before + 1, command)
+  }
+})

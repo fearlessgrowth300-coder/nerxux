@@ -6,6 +6,19 @@ import { withAgentState, addEvidence, stateSummary, safeNote, evaluateAssertions
 
 const inspections = new Set(['read_file', 'list_files', 'search_files', 'web_search', 'read_web_page'])
 const executions = new Set(['execute_command', 'run_code', 'run_on_pod', 'verify_work', 'restart_service', 'deploy_service', 'expose_site'])
+// A shell command that only reads must not bump the revision: every bump
+// staled every passing check, so a mid-turn `cat` forced a full re-proof.
+// Conservative: each &&/||/;/| segment must start with a read-only program,
+// and no redirects, exec or delete flags. Anything unsure counts as a mutation.
+const READ_ONLY = new Set(['cat', 'ls', 'pwd', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'stat', 'file', 'du', 'df', 'echo', 'which', 'date', 'ps', 'env', 'printenv'])
+export function isReadOnlyCommand(cmd) {
+  const c = String(cmd || '')
+  if (!c.trim() || /[>`]|\$\(|-exec|-delete|\btee\b/.test(c)) return false
+  return c.split(/&&|\|\||;|\|/).every(seg => {
+    const w = seg.trim().split(/\s+/)[0]
+    return READ_ONLY.has(w) || (w === 'git' && /^git\s+(status|log|diff|show)\b/.test(seg.trim()))
+  })
+}
 const ok = (stdout) => ({ ok: true, exitCode: 0, stdout, stderr: '', durationMs: 0 })
 const fail = (stderr) => ({ ok: false, exitCode: 1, stdout: '', stderr, durationMs: 0 })
 const normalizePath = (p) => {
@@ -85,7 +98,7 @@ export async function controlledAgentTool(input, execute, transfer) {
       // as the fresh look the checkpoint asks for — refusing them left the model
       // unable to gather the very evidence it was being told to gather.
       const paused = s.gateAfter !== null || s.inFlight
-      const diagnostic = name === 'execute_command' && (args.purpose === 'diagnostic' || paused)
+      const diagnostic = name === 'execute_command' && (args.purpose === 'diagnostic' || paused || isReadOnlyCommand(args.command))
       if (paused && ['write_file', 'edit_file', 'transfer_file'].includes(name)) {
         return finish(fail('Diagnostic checkpoint: file changes are paused after repeated failures. Read the failing source or run a command that shows the real error, then call diagnose_failure with the cause and the check you will rerun. Then edit.'))
       }
@@ -139,8 +152,12 @@ export async function controlledAgentTool(input, execute, transfer) {
       const event = s.events.at(-1)
       if (diagnostic) event.diagnostic = true
       if (name === 'verify_work') {
-        s.checks = s.checks.filter(c => !(c.label === safeNote(args.label) && c.environment === s.environment))
-        s.checks.push({ id: event.id, label: safeNote(args.label), kind: args.kind, revision: s.revision, environment: s.environment, ok: result.ok, assertions: (Array.isArray(args.assertions) ? args.assertions : []).slice(0, 20).map(a => ({ type: a?.type, field: safeNote(a?.field), min: a?.min, value: safeNote(a?.value) })) })
+        // Same check = same label OR same command. Labels are model prose and drift
+        // ("built and live" vs "is built and live"), which left the old FAIL alive
+        // next to the new PASS and blocked "verified" while the model re-proved it.
+        const command = args.command ? safeNote(args.command) : undefined
+        s.checks = s.checks.filter(c => !((c.label === safeNote(args.label) || (command && c.command === command)) && c.environment === s.environment))
+        s.checks.push({ id: event.id, label: safeNote(args.label), command, kind: args.kind, revision: s.revision, environment: s.environment, ok: result.ok, assertions: (Array.isArray(args.assertions) ? args.assertions : []).slice(0, 20).map(a => ({ type: a?.type, field: safeNote(a?.field), min: a?.min, value: safeNote(a?.value) })) })
         s.checks = s.checks.slice(-20)
       }
       return { ...decorated, machine: result.host || os.hostname() }
