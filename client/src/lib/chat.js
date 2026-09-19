@@ -32,16 +32,24 @@ export async function pollJob(jobId, { signal, onProgress } = {}) {
   try {
     if (signal?.aborted) { stop(); throw new Error('Stopped.') }
     let failures = 0
+    let outage = 0
     for (;;) {
-      await sleep(POLL_MS)
+      await sleep(outage ? Math.min(30_000, POLL_MS * 2 ** outage) : POLL_MS)
       if (signal?.aborted) throw new Error('Stopped.')
       let job
       try {
         job = (await api.get(`/api/chat/jobs/${jobId}`)).data
         failures = 0
+        outage = 0
       } catch (err) {
+        const status = err?.response?.status
         // 404 = the server really doesn't have it (restart/expiry) — that's final.
-        if (err?.response?.status === 404 || ++failures >= MAX_POLL_FAILURES) throw err
+        if (status === 404) throw err
+        // No response / 5xx / 429: the phone just woke up with no network yet,
+        // or the server is briefly unreachable. The job keeps running server-side
+        // (up to 70 min unwatched), so keep waiting instead of giving up.
+        if (!status || status >= 500 || status === 429) { outage = Math.min(outage + 1, 4); continue }
+        if (++failures >= MAX_POLL_FAILURES) throw err
         continue
       }
       if (job.status === 'running') { if (job.events?.length || job.live) onProgress?.(job.events || [], job.live ? { ...job.live, clockOffset: job.now ? Date.now() - job.now : 0 } : null); continue }
