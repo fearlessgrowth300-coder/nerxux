@@ -115,6 +115,7 @@ export default function Chat() {
     const controller = new AbortController()
     abortRef.current = controller
     clearLive()
+    let reattach = null
     try {
       const { messages: replies, routing, duplicate, saved } = await pollJob(job.jobId, { signal: controller.signal, onProgress: showLive })
       if (saved && await recoverFromHistory(job.conversationId)) return
@@ -134,6 +135,16 @@ export default function Chat() {
       }
     } catch (e) {
       if (e.expired && await recoverFromHistory(job.conversationId)) return
+      // The id this device remembered is gone (an older turn), but the server
+      // may still be working on this chat under a newer job — follow that one
+      // instead of telling the user to resend work that is still running.
+      if (e.expired && job.conversationId) {
+        try {
+          const running = await listRunningJobs()
+          const live = running.find((j) => j.conversationId === job.conversationId && j.jobId !== job.jobId)
+          if (live) { reattach = { jobId: live.jobId, conversationId: live.conversationId, model: job.model }; return }
+        } catch {}
+      }
       // Same rule as the success path: a failure belongs to the conversation
       // the job was started in. Appending it to whatever is on screen is how
       // "Stopped." turned up inside an unrelated chat.
@@ -145,12 +156,13 @@ export default function Chat() {
         }])
       }
     } finally {
-      setPendingJob(null)
+      setPendingJob(reattach)
       abortRef.current = null
       clearLive()
       busyRef.current = false
       setSending(false)
     }
+    if (reattach) resumePendingJob(reattach)
   }
 
   function stopGeneration() {
