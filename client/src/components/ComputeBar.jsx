@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { getComputeStatus, switchComputeMode, setHostingerIp, listPods, selectPod } from '../lib/compute'
+import { getComputeStatus, switchComputeMode, setHostingerIp, listPods, selectPod, resetKaggleUsage } from '../lib/compute'
+import { formatDuration } from '../lib/billing'
 import { apiError } from '../lib/api'
 
 export default function ComputeBar() {
@@ -14,6 +15,8 @@ export default function ComputeBar() {
   const [podModal, setPodModal] = useState(false)
   const [pods, setPods] = useState(null)
   const [stopConfirm, setStopConfirm] = useState(false)
+  // Two-click confirm for a quota reset: holds the slot id awaiting its second click.
+  const [resetSlot, setResetSlot] = useState(null)
 
   // The bar used to read the status exactly once, on mount. RunPod exits a pod
   // on its own (out of funds, GPU reclaimed) and nothing told the page, so it
@@ -75,6 +78,20 @@ export default function ComputeBar() {
       try { setStatus(await getComputeStatus()) } catch {}
     } finally {
       setLoading(false)
+    }
+  }
+
+  // Nexus counts Kaggle hours per ACCOUNT, and it cannot see that a slot now
+  // points at a different Kaggle account — a brand-new account would inherit
+  // the old one's "29h used" and warn about a cap it is nowhere near.
+  async function handleResetKaggle(slotId) {
+    if (resetSlot !== slotId) return setResetSlot(slotId)
+    setResetSlot(null)
+    setError('')
+    try {
+      setStatus(await resetKaggleUsage(slotId))
+    } catch (err) {
+      setError(apiError(err).message)
     }
   }
 
@@ -240,7 +257,35 @@ export default function ComputeBar() {
           </div>
         )}
 
-        {error && <span className="text-red-400 text-[11px] ml-2">⚠️ {error}</span>}
+        {/* Per-account Kaggle quota. Each account has its OWN 30h/week, so which
+          one to start next is a question the bar can answer instead of the
+          user guessing — with a reset for when a slot gets a new account. */}
+      {isKaggle && status.details?.accounts && (
+        <div className="flex w-full flex-wrap items-center gap-1.5 text-[11px]">
+          {status.details.accounts.map((acct) => (
+            <span
+              key={acct.id}
+              className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-gray-400"
+              title={acct.connected ? 'Tunnel is up — this is the account in use' : 'No tunnel from this account right now'}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${acct.connected ? 'bg-sky-400 animate-pulse' : 'bg-gray-600'}`} />
+              <span className="text-gray-300">{acct.label}</span>
+              <span>{formatDuration(acct.usage.remainingSeconds)} left</span>
+              <button
+                type="button"
+                onClick={() => handleResetKaggle(acct.id)}
+                onBlur={() => setResetSlot((s) => (s === acct.id ? null : s))}
+                className={`hover:underline ${resetSlot === acct.id ? 'text-amber-300' : 'text-nexus-accent2'}`}
+                title="Zero this account's weekly counter — use it when this slot gets a different Kaggle account"
+              >
+                {resetSlot === acct.id ? 'Sure?' : 'Reset'}
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {error && <span className="text-red-400 text-[11px] ml-2">⚠️ {error}</span>}
       </div>
 
       {/* Stopping a pod is not reversible in practice: RunPod hands the GPU to

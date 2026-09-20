@@ -152,6 +152,22 @@ function trackKaggleUsage(slotId, connected) {
   lastKaggleCheck[slotId] = connected ? now : 0
   persistKaggleAccounts()
 }
+// Swapping a slot onto a DIFFERENT Kaggle account resets that account's 30h —
+// the cap is per account, and a fresh one starts at zero however much the old
+// one burned. Nexus cannot detect the swap (a tunnel from a new account looks
+// identical to the old one), so it has to be told.
+export function resetKaggleUsage(slotId = null) {
+  const ids = slotId ? [String(slotId)] : KAGGLE_SLOTS.map((s) => s.id)
+  for (const id of ids) {
+    if (!kaggleSlotById(id)) throw new Error(`Unknown Kaggle account "${id}".`)
+    kaggleAccounts[id] = { usage: { windowStart: 0, seconds: 0 }, sessionStart: null }
+    // Otherwise the next health check would credit the new account with the
+    // seconds since the last check of the old one.
+    lastKaggleCheck[id] = 0
+  }
+  persistKaggleAccounts()
+  return ids
+}
 export function getKaggleUsage(slotId = kaggleActiveSlot || 'a') {
   const acct = kaggleAccounts[slotId] || kaggleAccounts.a
   const remaining = Math.max(0, KAGGLE_WEEKLY_LIMIT_S - acct.usage.seconds)

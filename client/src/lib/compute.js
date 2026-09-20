@@ -50,3 +50,10 @@ export async function getBilling() {
   const { data } = await api.get('/api/compute/billing')
   return data
 }
+
+// Zero a Kaggle account's weekly quota counter — used after putting a
+// different Kaggle account behind that slot, since its 30h starts fresh.
+export async function resetKaggleUsage(slot) {
+  const { data } = await api.post('/api/compute/kaggle/reset', { slot })
+  return data
+}

@@ -13,6 +13,7 @@ import {
   setPodId,
   terminateRunpodPod,
   getRunpodBilling,
+  resetKaggleUsage,
 } from '../lib/computeManager.js'
 
 const router = Router()
@@ -37,6 +38,18 @@ router.get('/billing', async (req, res) => {
     res.json(await getRunpodBilling())
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+// POST /api/compute/kaggle/reset — Body: { slot?: "a" | "b" | "c" }
+// Zero a Kaggle account's weekly counter after putting a different Kaggle
+// account behind that slot. Omit `slot` to reset all of them.
+router.post('/kaggle/reset', async (req, res) => {
+  try {
+    const reset = resetKaggleUsage(req.body?.slot || null)
+    res.json({ reset, ...(await getLiveComputeStatus()) })
+  } catch (err) {
+    res.status(400).json({ error: err.message })
   }
 })
 

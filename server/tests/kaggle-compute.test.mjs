@@ -456,3 +456,29 @@ test('a stale sessionStart from a slot that dropped while another was active doe
     if (saved !== null) await fs.writeFile(stateFile, saved)
   }
 })
+
+test('resetting a slot zeroes only that account, for when it gets a new Kaggle account', async () => {
+  const stateFile = new URL('../.compute-state.json', import.meta.url)
+  const saved = await fs.readFile(stateFile, 'utf8').catch(() => null)
+  await fs.writeFile(stateFile, JSON.stringify({
+    mode: 'kaggle',
+    kaggleAccounts: {
+      a: { usage: { windowStart: 1, seconds: 87953 }, sessionStart: 1 },
+      b: { usage: { windowStart: 2, seconds: 104875 }, sessionStart: null },
+      c: { usage: { windowStart: 3, seconds: 500 }, sessionStart: null },
+    },
+    kaggleActiveSlot: 'b',
+  }))
+  try {
+    const cm = await import(`../lib/computeManager.js?reset=${Date.now()}`)
+    assert.deepEqual(cm.resetKaggleUsage('a'), ['a'])
+    assert.equal(cm.getKaggleUsage('a').usedSeconds, 0, 'the swapped account starts its 30h over')
+    assert.equal(cm.getKaggleSessionTime('a'), null, 'and carries no session from the old account')
+    assert.equal(cm.getKaggleUsage('b').usedSeconds, 104875, 'the other accounts are untouched')
+    assert.throws(() => cm.resetKaggleUsage('z'), /Unknown Kaggle account/, 'an unknown slot is rejected, not silently created')
+    cm.resetKaggleUsage()
+    for (const slot of cm.KAGGLE_SLOTS) assert.equal(cm.getKaggleUsage(slot.id).usedSeconds, 0, 'no slot argument resets them all')
+  } finally {
+    if (saved !== null) await fs.writeFile(stateFile, saved)
+  }
+})
