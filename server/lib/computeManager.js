@@ -92,14 +92,27 @@ export const KAGGLE_SESSION_LIMIT_S = 12 * 3600
 
 function migrateKaggleAccounts() {
   const st = readState()
-  if (st.kaggleAccounts) return st.kaggleAccounts
   // Pre-multi-account state used one flat usage/session pair — fold it into
   // slot 'a' rather than losing the quota history that account already used.
-  const accounts = {}
-  for (const slot of KAGGLE_SLOTS) accounts[slot.id] = { usage: { windowStart: 0, seconds: 0 }, sessionStart: null }
-  if (st.kaggleUsage) accounts.a.usage = st.kaggleUsage
-  if (st.kaggleSessionStart) accounts.a.sessionStart = st.kaggleSessionStart
-  writeState({ kaggleAccounts: accounts })
+  // Slots MISSING from already-migrated state are backfilled too: state
+  // written before a slot existed (the live VPS state had only a and b when
+  // account C was added) otherwise left that slot undefined, and the first
+  // health check that found C's tunnel up threw
+  // "Cannot read properties of undefined (reading 'usage')" — swallowed by the
+  // route's catch into a plain 500, so Kaggle just looked broken with nothing
+  // in the logs. Adding a fourth account must never need a state migration.
+  const accounts = { ...(st.kaggleAccounts || {}) }
+  let added = false
+  for (const slot of KAGGLE_SLOTS) {
+    if (accounts[slot.id]) continue
+    accounts[slot.id] = { usage: { windowStart: 0, seconds: 0 }, sessionStart: null }
+    added = true
+  }
+  if (!st.kaggleAccounts) {
+    if (st.kaggleUsage) accounts.a.usage = st.kaggleUsage
+    if (st.kaggleSessionStart) accounts.a.sessionStart = st.kaggleSessionStart
+  }
+  if (added) writeState({ kaggleAccounts: accounts })
   return accounts
 }
 let kaggleAccounts = migrateKaggleAccounts()

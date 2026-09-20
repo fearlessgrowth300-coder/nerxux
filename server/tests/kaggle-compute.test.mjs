@@ -394,3 +394,34 @@ test('a mid-turn drop switches to ANOTHER live account, re-targeted and re-budge
     globalThis.fetch = realFetch
   }
 })
+
+test('a slot missing from already-migrated state is backfilled, not left undefined', async () => {
+  // The live VPS state was written when there were only two accounts, so it had
+  // no "c" — and the first health check that found account C's tunnel up threw
+  // "Cannot read properties of undefined (reading 'usage')", which the compute
+  // route turned into a bare 500. Kaggle looked dead with nothing in the logs.
+  const stateFile = new URL('../.compute-state.json', import.meta.url)
+  const saved = await fs.readFile(stateFile, 'utf8').catch(() => null)
+  const twoSlotState = {
+    mode: 'kaggle',
+    kaggleAccounts: {
+      a: { usage: { windowStart: 1789602697052, seconds: 87953.9 }, sessionStart: null },
+      b: { usage: { windowStart: 1789676806986, seconds: 104875.7 }, sessionStart: null },
+    },
+    kaggleActiveSlot: 'b',
+  }
+  await fs.writeFile(stateFile, JSON.stringify(twoSlotState))
+  try {
+    // Cache-busted so the module's import-time migration actually re-runs.
+    const cm = await import(`../lib/computeManager.js?slot-backfill=${Date.now()}`)
+    for (const slot of cm.KAGGLE_SLOTS) {
+      const usage = cm.getKaggleUsage(slot.id)
+      assert.equal(usage.slot, slot.id, `slot ${slot.id} must report its OWN quota, not fall back to account a's`)
+    }
+    const written = JSON.parse(await fs.readFile(stateFile, 'utf8'))
+    for (const slot of cm.KAGGLE_SLOTS) assert.ok(written.kaggleAccounts[slot.id], `slot ${slot.id} must be persisted`)
+    assert.equal(written.kaggleAccounts.a.usage.seconds, 87953.9, 'an existing account keeps the quota history it already used')
+  } finally {
+    if (saved !== null) await fs.writeFile(stateFile, saved)
+  }
+})
