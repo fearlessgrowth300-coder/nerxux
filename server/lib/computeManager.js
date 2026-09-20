@@ -139,7 +139,12 @@ function trackKaggleUsage(slotId, connected) {
     // lastKaggleCheck — that one resets to 0 on every server restart, which
     // used to make a plain Nexus deploy (the tunnel never actually dropping)
     // look like a brand-new session and reset the 12h countdown to full.
-    if (!acct.sessionStart) acct.sessionStart = now
+    // A sessionStart older than Kaggle's own 12h cap cannot belong to a live
+    // session — it is a leftover from a slot that dropped while ANOTHER slot
+    // was active (only the active one gets cleared on a disconnect). Without
+    // this, a fresh notebook on that account would show its countdown already
+    // expired. A restart still keeps a genuinely-running session's start time.
+    if (!acct.sessionStart || now - acct.sessionStart > KAGGLE_SESSION_LIMIT_S * 1000) acct.sessionStart = now
     if (lastKaggleCheck[slotId]) acct.usage.seconds += Math.min(300, (now - lastKaggleCheck[slotId]) / 1000)
   } else {
     acct.sessionStart = null

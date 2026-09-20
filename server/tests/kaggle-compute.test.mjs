@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import http from 'node:http'
 
 // Kaggle has no public address: the notebook opens a reverse SSH tunnel INTO
 // this VPS (the opposite direction from Turbo, where the VPS opens the tunnel
@@ -422,6 +423,36 @@ test('a slot missing from already-migrated state is backfilled, not left undefin
     for (const slot of cm.KAGGLE_SLOTS) assert.ok(written.kaggleAccounts[slot.id], `slot ${slot.id} must be persisted`)
     assert.equal(written.kaggleAccounts.a.usage.seconds, 87953.9, 'an existing account keeps the quota history it already used')
   } finally {
+    if (saved !== null) await fs.writeFile(stateFile, saved)
+  }
+})
+
+test('a stale sessionStart from a slot that dropped while another was active does not survive', async () => {
+  // Only the ACTIVE slot's session is cleared on a disconnect, so an idle
+  // account can keep a sessionStart for days. Reconnecting it must start a new
+  // 12h countdown, not resume one Kaggle already killed.
+  const stateFile = new URL('../.compute-state.json', import.meta.url)
+  const saved = await fs.readFile(stateFile, 'utf8').catch(() => null)
+  const threeDaysAgo = Date.now() - 3 * 86400 * 1000
+  await fs.writeFile(stateFile, JSON.stringify({
+    mode: 'kaggle',
+    kaggleAccounts: { a: { usage: { windowStart: threeDaysAgo, seconds: 10 }, sessionStart: threeDaysAgo } },
+    kaggleActiveSlot: 'a',
+  }))
+  const server = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ default_generation_settings: { n_ctx: 32768 }, modalities: { vision: false } }))
+  })
+  await new Promise((resolve) => server.listen(20140, '127.0.0.1', resolve))
+  try {
+    const cm = await import(`../lib/computeManager.js?stale-session=${Date.now()}`)
+    cm.switchToKaggle()
+    assert.equal(await cm.ensureKaggleReady(), true, 'account A is reachable')
+    const session = cm.getKaggleSessionTime('a')
+    assert.ok(session.startedAt > threeDaysAgo, 'the countdown must restart, not carry a 3-day-old start time')
+    assert.ok(Date.now() - session.startedAt < 60_000, 'a reconnect starts the session roughly now')
+  } finally {
+    server.close()
     if (saved !== null) await fs.writeFile(stateFile, saved)
   }
 })
