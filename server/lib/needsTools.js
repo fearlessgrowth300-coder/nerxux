@@ -20,7 +20,13 @@ const TARGET = /\b(file|files|folder|directory|dir|path|repo|repository|project|
 const HARD = /\b(git|github|npm|npx|yarn|pnpm|pip|python|node|bash|sh|curl|docker|vite|next\.?js|react|tsx?|jsx?|\.env|package\.json|requirements\.txt|dockerfile|makefile)\b|```|\.(js|ts|jsx|tsx|py|go|rs|java|rb|php|html|css|json|ya?ml|toml|md|sh)\b|(^|\s)[~/.]?\/[\w.-]+\/|[A-Za-z]:\\/i
 
 // Explicit tool names — if someone names one, they want it.
-const NAMED = /\b(write_file|read_file|edit_file|list_files|search_files|execute_command|run_code|run_on_pod|web_search|inspect_execution|set_execution_context|diagnose_failure|verify_work|record_progress|transfer_file)\b/i
+const NAMED = /\b(write_file|read_file|edit_file|list_files|search_files|execute_command|run_code|run_on_pod|web_search|inspect_execution|set_execution_context|diagnose_failure|verify_work|record_progress|transfer_file|browser_open|browser_read|browser_click|browser_fill|browser_key)\b/i
+
+// Browsing is tool work that mentions no file, repo or command, so the
+// ACTION+TARGET pair above misses it entirely: "log into my dashboard and see
+// what today's orders are" names nothing the other patterns look for. A bare
+// URL counts too — pasting one and asking about it means "go and look".
+const BROWSER = /\b(browse|browser|web ?site|webpage|web page|log ?in|login|sign ?in|signed ?in|log ?into|dashboard|inbox|my account|on the web|google it|look (?:it )?up online|search the web)\b|https?:\/\/\S+/i
 
 /**
  * @param {string} text  the latest user message
@@ -34,7 +40,7 @@ export function needsAgentTools(text = '', { projectPath = null } = {}) {
   if (!t.trim()) return false
   // A continuation must retain hands even when it does not repeat "project".
   if (/^\s*(continue|resume|carry on|keep going|retry)\b/i.test(t)) return true
-  if (NAMED.test(t) || HARD.test(t)) return true
+  if (NAMED.test(t) || HARD.test(t) || BROWSER.test(t)) return true
   return ACTION.test(t) && TARGET.test(t)
 }
 

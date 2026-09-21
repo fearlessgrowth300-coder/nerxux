@@ -64,3 +64,26 @@ test('an explicit choice always beats the heuristic', () => {
   // Anything unrecognised behaves as auto rather than silently disabling tools.
   assert.equal(shouldAttachAgentTools(undefined, 'build me an app'), true)
 })
+
+test('a browsing request gets the hands, even though it names no file or command', async () => {
+  const { needsAgentTools } = await import('../lib/needsTools.js')
+  // None of these mention a file, repo, command or any HARD keyword, so the
+  // ACTION+TARGET pair missed them and the agent was left unable to browse.
+  for (const ask of [
+    'log into my dashboard and tell me today’s orders',
+    'sign in to my email and see if the invoice arrived',
+    'browse to the pricing page and compare the plans',
+    'check my inbox',
+    'https://news.ycombinator.com what is on the front page',
+    'google it for me',
+  ]) {
+    assert.equal(needsAgentTools(ask), true, `should attach tools: ${ask}`)
+  }
+})
+
+test('ordinary conversation still does not pay for the tools', async () => {
+  const { needsAgentTools } = await import('../lib/needsTools.js')
+  for (const ask of ['what is the capital of Japan', 'write me a poem about rain', 'thanks, that worked']) {
+    assert.equal(needsAgentTools(ask), false, `should stay toolless: ${ask}`)
+  }
+})
