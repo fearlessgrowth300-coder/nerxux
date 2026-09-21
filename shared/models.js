@@ -178,4 +178,9 @@ export const ADVISOR_MODELS = [
   { provider: 'claude', model: process.env.NEXUS_ADVISOR_CLAUDE || 'claude-sonnet-5' },
   { provider: 'openai', model: process.env.NEXUS_ADVISOR_OPENAI || 'gpt-5' },
   { provider: 'gemini', model: process.env.NEXUS_ADVISOR_GEMINI || 'gemini-3.8-flash' },
+  // Same provider, second choice: gemini-3.8-flash answered 503 "experiencing
+  // high demand" on a live call, and an adviser that gives up on one busy
+  // model is an adviser that mostly does not run. (gemini-2.0-flash and
+  // 1.5-pro are RETIRED — both 404 now, so they are no use as fallbacks.)
+  { provider: 'gemini', model: process.env.NEXUS_ADVISOR_GEMINI_ALT || 'gemini-3.6-flash' },
 ]

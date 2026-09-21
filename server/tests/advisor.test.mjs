@@ -54,8 +54,12 @@ test('the adviser uses whichever strong model is actually connected', async () =
   // connected, Gemini was — so the adviser would have sat silent forever while
   // looking perfectly healthy in the code.
   const { ADVISOR_MODELS } = await import('../../shared/models.js')
-  assert.deepEqual(ADVISOR_MODELS.map((a) => a.provider), ['claude', 'openai', 'gemini'],
+  assert.deepEqual([...new Set(ADVISOR_MODELS.map((a) => a.provider))], ['claude', 'openai', 'gemini'],
     'preference order, but every one of them must be usable')
+  // A single busy model must not mean no advice: gemini-3.8-flash answered 503
+  // on a live call, so there is a second model behind it.
+  assert.ok(ADVISOR_MODELS.filter((a) => a.provider === 'gemini').length >= 2, 'a busy model needs a fallback')
+  assert.ok(!ADVISOR_MODELS.some((a) => /gemini-(1\.5|2\.0)/.test(a.model)), 'those Gemini models are retired (404)')
   const src = await fs.readFile('./lib/advisor.js', 'utf8')
   assert.match(src, /for \(const \{ provider, model \} of ADVISOR_MODELS\)/, 'must try each in turn')
   assert.match(src, /if \(!apiKey\) continue/, 'an unconnected provider is skipped, not fatal')
