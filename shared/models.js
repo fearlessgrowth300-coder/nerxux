@@ -165,3 +165,10 @@ export const getModelById = (id) => {
 
 // Model used for the lightweight intent router (Step 10).
 export const ROUTER_MODEL = 'claude-sonnet-4-6'
+
+// The adviser that reviews the local agent's execution record and says what to
+// try next (lib/advisor.js). A stronger model than the one doing the work, on
+// purpose: it runs a few times per turn on a few hundred tokens of state, so
+// the cost is small next to the tool actions it saves. Overridable without a
+// deploy if a newer model should take over.
+export const ADVISOR_MODEL = process.env.NEXUS_ADVISOR_MODEL || 'claude-sonnet-5'

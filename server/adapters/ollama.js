@@ -8,7 +8,8 @@ import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTo
 import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep, summarizeSteps } from '../lib/agentTools.js'
 import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
 import { redactToolData } from '../lib/redact.js'
-import { agentStateParts } from '../lib/agentState.js'
+import { agentStateParts, withAgentState, safeNote } from '../lib/agentState.js'
+import { advise, adviceMessage, shouldAdvise } from '../lib/advisor.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
 import { fitTurn } from '../lib/compactTurn.js'
@@ -225,6 +226,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   let targetUrl = resolveTargetUrl(model)
   const externalTools = toOpenAITools(tools)
   const externalNames = new Set(tools.map((t) => t.name))
+  // What the user actually asked for this turn — the adviser needs the goal,
+  // not just the execution record.
+  const lastUserText = String(prompt || '').slice(0, 2000)
   const agentTools = [
     ...(webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS),
     ...externalTools,
@@ -267,6 +271,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // "continue" and cut the second one off at 88% read — pure waste. The step
   // pre-check below stops a turn cleanly instead of letting the limit cut it.
   const WALL_CLOCK_BUDGET_MS = 60 * 60 * 1000
+  // The last minutes of a turn belong to landing it, not to starting another
+  // tool call. Measured over one project's 74 turns: 53% ran into the wall
+  // mid-action, so the model never reached record_progress and the NEXT turn
+  // opened blind — re-running git status, py_compile and the same probes to
+  // work out where it was. Stopping early enough to write a handoff is what
+  // turns a guillotined turn into a checkpoint.
+  const WRAP_UP_RESERVE_MS = 5 * 60 * 1000
   // This model tends to produce long hidden "thinking" before its actual
   // answer. num_predict bounds a single call so one runaway generation can't
   // eat the whole budget; Turbo (30-65 tok/s) gets a much higher ceiling.
@@ -407,11 +418,16 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   let timedOut = false
   // The model actually sent (Always On swaps the 27B for ALWAYS_ON_MODEL).
   let usedModel = modelForTarget(model, isRunpod, isKaggle)
+  // The adviser: a stronger model deciding WHAT to do while this one does it.
+  // Only for turns that actually have hands — a plain chat answer has no
+  // execution record worth reviewing.
+  let adviceCount = 0
+  let failuresSinceAdvice = 0
 
   for (let step = 0; step < MAX_STEPS; step++) {
     // The budget check used to live only on the text-answer path, so a model
     // that kept calling tools ran straight past it — one turn went 84 minutes.
-    if (Date.now() - requestStart > WALL_CLOCK_BUDGET_MS) break
+    if (Date.now() - requestStart > WALL_CLOCK_BUDGET_MS - WRAP_UP_RESERVE_MS) { timedOut = true; break }
     // Ollama reuses the prefix of the previous request byte-for-byte; the
     // execution record changes after every tool call, so writing it into the
     // system prompt (message 0) made every step re-read the whole conversation
@@ -454,6 +470,19 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       ].filter(Boolean).join('\n\n')
       finished = true
       break
+    }
+    // Plan the turn, and re-plan when the work starts failing. Placed AFTER the
+    // budget pre-check above: a step that is about to be refused for lack of
+    // time must not first pay for a round trip to the adviser. The advice is
+    // appended to the conversation, so the local model carries it for the rest
+    // of the turn instead of being told once and forgetting.
+    if (shouldAdvise({ step, failuresSinceAdvice, adviceCount })) {
+      const guidance = await advise({ userId, record: state.record, goal: lastUserText, signal })
+      if (guidance) {
+        messages.push(adviceMessage(guidance))
+        adviceCount++
+        failuresSinceAdvice = 0
+      }
     }
     if (readSeconds > 90) {
       onProgress({ type: 'text', text: `(${targetLabel} is reading about ${Math.round(promptTokens / 1000)}k tokens — roughly ${fmtMinutes(readSeconds)} before it can reply${generousBudget ? '' : '. Turbo reads this in under a minute'}.)` })
@@ -768,6 +797,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
 
         const step = toStep(call.name, call.args, result)
         toolSteps.push(step)
+        // Two failures in a row is the signal that the model is guessing, and
+        // guessing is what the adviser is there to interrupt.
+        failuresSinceAdvice = result.ok ? 0 : failuresSinceAdvice + 1
         onProgress({ type: 'tool', ...step, stdout: step.stdout.slice(0, 2000), stderr: step.stderr.slice(0, 2000) })
 
         // A test rerun after a patch is new work, even with identical args.
@@ -781,6 +813,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       } catch (err) {
         const step = { tool: call.name, args: call.args, ok: false, exitCode: 1, stderr: err.message, target: 'error' }
         toolSteps.push(step)
+        failuresSinceAdvice++
         onProgress({ type: 'tool', ...step })
         observe(call.name, `[Tool Execution Failed: ${call.name}]\nError: ${err.message}`)
       }
@@ -809,7 +842,10 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         content:
           'This turn has used its whole step budget and must stop NOW. Do not call any tools. ' +
           'In a few short lines tell the user: what you completed (name the files you changed), ' +
-          'what you verified and how, and what is still left to do.',
+          'what you verified and how, and what is still left to do. ' +
+          'Then end with one final line starting exactly "NEXT: " giving the single concrete next ' +
+          'action — the exact command to run or the exact edit to make — so the next turn can start ' +
+          'there instead of working out where you got to.',
       },
     ], wrapBudget).messages
     const wrapTokens = wrapMessages.reduce((n, m) => n + estimateTokens(m), 0)
@@ -826,6 +862,16 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         }, signal ? AbortSignal.any([signal, wrapDeadline]) : wrapDeadline, isRunpod || isKaggle)
         if (r.ok) summary = String((await r.json()).message?.content || '').trim()
       } catch {}
+    }
+    // Carry the handoff into the execution record. Without this the "NEXT:"
+    // line only ever reached the user, who then typed "continue" and got a
+    // model that had to rediscover its own place — 49 of one project's 87
+    // messages were that bare nudge.
+    const next = /^NEXT:\s*(.+)$/im.exec(summary)?.[1]?.trim()
+    if (next) {
+      try {
+        await withAgentState(userId, sessionId, (s) => { s.nextStep = safeNote(next) })
+      } catch { /* a handoff that cannot be stored must not lose the reply */ }
     }
     const n = toolSteps.length
     const why = timedOut
