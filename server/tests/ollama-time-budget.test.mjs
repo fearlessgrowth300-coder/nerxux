@@ -1,3 +1,4 @@
+process.env.NEXUS_DISABLE_ADVISER = '1' // keep the live Claude CLI out of timing-sensitive run() tests
 import test from 'node:test'
 import assert from 'node:assert/strict'
 

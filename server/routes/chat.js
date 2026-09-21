@@ -67,7 +67,7 @@ router.use(requireAuth)
 const TOOL_META = {
   claude: { label: 'Claude Sonnet', model: 'claude-sonnet' },
   openai: { label: 'GPT-4o', model: 'gpt-4o' },
-  gemini: { label: 'Gemini 1.5 Pro', model: 'gemini-1.5-pro' },
+  gemini: { label: 'Gemini Pro (latest)', model: 'gemini-pro-latest' },
   elevenlabs: { label: 'ElevenLabs', gen: true },
   higgsfield: { label: 'Higgsfield', gen: true },
 }

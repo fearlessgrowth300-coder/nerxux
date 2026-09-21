@@ -5,6 +5,7 @@ import {
   getConnections,
   addConnection,
   removeConnection,
+  getAdviserStatus,
 } from '../lib/connections'
 import { PROVIDERS } from '@shared/models'
 import {
@@ -223,6 +224,7 @@ function ApiKeyVault() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(null)
+  const [adviser, setAdviser] = useState(null)
 
   // Add-key modal state.
   const [adding, setAdding] = useState(false)
@@ -245,6 +247,7 @@ function ApiKeyVault() {
   }
   useEffect(() => {
     refresh()
+    getAdviserStatus().then(setAdviser).catch(() => {})
   }, [])
 
   function openAdd() {
@@ -310,6 +313,13 @@ function ApiKeyVault() {
       </div>
       {error && (
         <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>
+      )}
+      {adviser?.available && (
+        <p className="mb-4 flex items-center gap-2 rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          Claude is connected on the server via your subscription and powers the agent adviser.
+          No API key needed here for that.
+        </p>
       )}
       {loading ? (
         <div className="space-y-3">

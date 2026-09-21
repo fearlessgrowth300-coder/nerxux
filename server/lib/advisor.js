@@ -49,6 +49,10 @@ function runClaudeCli(prompt, system) {
 }
 
 export async function adviseViaCli(prompt, system) {
+  // Off under tests: otherwise a machine that happens to be signed into the
+  // Claude CLI shells out to it during unit tests, adding seconds of real
+  // latency that throws off the timing-sensitive budget tests.
+  if (process.env.NEXUS_DISABLE_ADVISER === '1') return null
   if (Date.now() < cliUnavailableUntil) return null
   try {
     return await runClaudeCli(prompt, system)
@@ -56,6 +60,30 @@ export async function adviseViaCli(prompt, system) {
     cliUnavailableUntil = Date.now() + CLI_RECHECK_MS
     return null
   }
+}
+
+// Whether the server-side Claude subscription is signed in, for the UI — this
+// login lives in /root/.claude on the host, not in the per-user key vault, so
+// the Connections page can't otherwise tell it apart from "not connected".
+// Reads `claude auth status --json` rather than spending a real advice call.
+export function cliAdviserStatus() {
+  return new Promise((resolve) => {
+    execFile(
+      process.env.CLAUDE_CLI_BIN || 'claude',
+      ['auth', 'status', '--json'],
+      { timeout: 8000, cwd: tmpdir() },
+      (err, stdout) => {
+        if (err) return resolve({ available: false })
+        try {
+          const j = JSON.parse(String(stdout || '{}'))
+          resolve({ available: Boolean(j.loggedIn), method: j.authMethod || null })
+        } catch {
+          // Older CLIs may not support --json; fall back to the text form.
+          resolve({ available: /logged ?in|claude\.ai/i.test(String(stdout || '')) })
+        }
+      }
+    )
+  })
 }
 
 // The provider adapters already handle keys, errors and response shapes, so
@@ -94,6 +122,7 @@ export function shouldAdvise({ step, failuresSinceAdvice, adviceCount }) {
  * must treat null as "carry on unchanged", never as an error.
  */
 export async function advise({ userId, record, goal = '', signal = null }) {
+  if (process.env.NEXUS_DISABLE_ADVISER === '1') return null
   const prompt =
     `The user's request for this turn:\n${String(goal || '(continuing earlier work)').slice(0, 1500)}\n\n` +
     `The agent's execution record:\n${String(record || '').slice(0, 6000)}`

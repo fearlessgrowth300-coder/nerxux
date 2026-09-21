@@ -24,6 +24,19 @@ router.get('/', async (req, res, next) => {
   }
 })
 
+// GET /api/connections/adviser — is the server-side Claude subscription signed
+// in? That login lives on the host, not in the key vault, so the Connections
+// page shows Claude as absent even while the adviser runs on it. This surfaces
+// the truth. Never returns a token, only whether one is present.
+router.get('/adviser', async (req, res, next) => {
+  try {
+    const { cliAdviserStatus } = await import('../lib/advisor.js')
+    res.json(await cliAdviserStatus())
+  } catch (err) {
+    next(err)
+  }
+})
+
 // GET /api/connections/models — chat models for the dropdown: the actual
 // current lineup from each connected provider's own API (cached 10 min),
 // falling back to a curated list for any provider whose live fetch fails.

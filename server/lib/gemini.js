@@ -45,7 +45,9 @@ export async function analyzeVideo({ apiKey, filePath, mimeType, displayName }) 
 
   // 3) Ask Gemini 1.5 Pro to analyze it.
   const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' })
+  // The alias rather than a pinned version — this was gemini-1.5-pro, which
+  // Google has since retired (404 "no longer available").
+  const model = genAI.getGenerativeModel({ model: 'gemini-pro-latest' })
   const result = await model.generateContent([
     { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
     { text: ANALYSIS_PROMPT },

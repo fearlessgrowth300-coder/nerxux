@@ -201,6 +201,29 @@ export async function restartService(name, { exec = null, env = process.env } = 
   return { ok: r.code === 0, exitCode: r.code, stdout: (r.stdout || '').trim().slice(-2000) + summary, stderr: (r.stderr || '').trim().slice(-2000), durationMs: Date.now() - start, target: 'host' }
 }
 
+// The agent can now act inside the user's logged-in sessions, and it runs as a
+// background job — there is no human watching each click to approve it. So a
+// destructive or money-moving action is refused by default and handed back to
+// the user, who does it themselves on the Browser takeover panel. This is the
+// same promise the tool descriptions already make; this is what enforces it.
+// Set NEXUS_BROWSER_AUTONOMOUS=1 to let the agent do these unattended.
+const RISKY_ACTION = /\b(buy|purchase|pay|payment|checkout|place ?order|confirm ?(order|purchase|payment)|subscribe|delete|remove|deactivate|close ?account|transfer|withdraw|send ?(money|payment)|wire|donate|book|reserve|order now)\b/i
+
+export function browserActionBlocked(name, args = {}) {
+  if (process.env.NEXUS_BROWSER_AUTONOMOUS === '1') return null
+  const text = name === 'browser_click' ? String(args.text || '')
+    : name === 'browser_fill' ? `${args.field || ''} ${args.value || ''}`
+    : name === 'browser_key' && String(args.key) === 'Enter' ? 'enter' : ''
+  if (name === 'browser_click' && RISKY_ACTION.test(text)) {
+    return `Refused: "${args.text}" looks like it commits or deletes something inside a logged-in account. ` +
+      `Ask the user to do this themselves on the Browser panel — do not click it for them.`
+  }
+  if (name === 'browser_fill' && RISKY_ACTION.test(text)) {
+    return `Refused: filling "${args.field}" looks like part of a purchase or account change. Hand this to the user on the Browser panel.`
+  }
+  return null
+}
+
 // The real browser on the host. Every result is shaped like a sandbox result
 // ({ok, stdout, stderr, ...}) because that is what the adapters already know
 // how to turn into a tool observation.
@@ -214,6 +237,8 @@ async function runBrowserTool(name, args = {}) {
     durationMs: Date.now() - start,
     target: 'browser',
   })
+  const blocked = browserActionBlocked(name, args)
+  if (blocked) return done(false, blocked)
   try {
     const b = await import('./browserSession.js')
     // What the page says plus where it can go — a text-only model cannot see

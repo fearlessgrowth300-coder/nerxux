@@ -142,7 +142,10 @@ async function runInner({ prompt, systemPrompt, skills, apiKey, model, media, at
   const genAI = new GoogleGenerativeAI(apiKey)
   const system = composeSystem(systemPrompt, skills)
   const hasTools = Array.isArray(tools) && tools.length > 0 && typeof onToolCall === 'function'
-  const modelName = model || 'gemini-1.5-pro'
+  // A `-latest` alias, not a pinned version: gemini-1.5-pro was the default
+  // here until Google retired it, and every call that reached this fallback
+  // got a 404 instead of an answer.
+  const modelName = model || 'gemini-flash-latest'
   // Native "grounding" — Gemini itself runs the search and cites real sources,
   // no scraping/API key of ours needed. Skipped when MCP/native tools are also
   // active: Gemini rejects mixing its built-in search tool with custom

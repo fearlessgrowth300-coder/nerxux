@@ -67,3 +67,24 @@ test('browsing does not count as changing the project', async () => {
     assert.ok(list.includes(`'${tool}'`), `${tool} must not bump the project revision`)
   }
 })
+
+test('destructive and money-moving browser actions are refused unless explicitly allowed', async () => {
+  // The agent runs unattended and can act inside the user's logged-in accounts.
+  // A "Buy now" or "Delete account" click must go to the user, not be done for them.
+  const { browserActionBlocked } = await import('../lib/agentLoop.js')
+  delete process.env.NEXUS_BROWSER_AUTONOMOUS
+  for (const text of ['Buy now', 'Place order', 'Confirm purchase', 'Delete account', 'Transfer', 'Withdraw funds']) {
+    assert.ok(browserActionBlocked('browser_click', { text }), `should block: ${text}`)
+  }
+  // Ordinary navigation is untouched.
+  for (const text of ['Sign in', 'Next', 'Search', 'View orders', 'Learn more']) {
+    assert.equal(browserActionBlocked('browser_click', { text }), null, `should allow: ${text}`)
+  }
+  // A payment field is blocked too.
+  assert.ok(browserActionBlocked('browser_fill', { field: 'card number for payment', value: '4111' }))
+  assert.equal(browserActionBlocked('browser_fill', { field: 'search', value: 'shoes' }), null)
+  // The escape hatch turns it off for someone who wants unattended action.
+  process.env.NEXUS_BROWSER_AUTONOMOUS = '1'
+  assert.equal(browserActionBlocked('browser_click', { text: 'Buy now' }), null, 'opt-in disables the gate')
+  delete process.env.NEXUS_BROWSER_AUTONOMOUS
+})

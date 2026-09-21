@@ -91,3 +91,15 @@ test('a missing or signed-out CLI resolves null instead of throwing into the tur
     delete process.env.CLAUDE_CLI_BIN
   }
 })
+
+test('no retired Gemini model is left as a default anywhere', async () => {
+  // gemini-1.5-pro and gemini-2.0-flash now 404 ("no longer available").
+  // They were still the fallback in three live code paths, so anything that
+  // reached a default got an error instead of an answer.
+  for (const file of ['./adapters/gemini.js', './lib/gemini.js', './routes/chat.js', '../shared/models.js']) {
+    const src = await fs.readFile(file, 'utf8')
+    const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+    assert.ok(!/['"]gemini-1\.5-pro['"]/.test(code), `${file} still defaults to a retired model`)
+    assert.ok(!/['"]gemini-2\.0-flash['"]/.test(code), `${file} still offers a retired model`)
+  }
+})

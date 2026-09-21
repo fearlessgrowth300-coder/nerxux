@@ -39,18 +39,33 @@ export const CHAT_MODELS = [
     apiModel: 'gpt-4o',
     vision: true,
   },
+  // gemini-1.5-pro and gemini-2.0-flash used to be here. Both are RETIRED —
+  // Google answers 404 "no longer available" — so picking either was a dead
+  // entry in the model menu. Checked against the live ListModels for this
+  // account (2026-09-21) rather than trusting the previous list.
+  //
+  // The two `-latest` aliases are deliberate: they follow Google's current
+  // model without another edit here the next time one is retired. The pinned
+  // 3.8 entry sits alongside them for when a specific version matters.
   {
-    id: 'gemini-1.5-pro',
-    label: 'Gemini 1.5 Pro',
+    id: 'gemini-pro-latest',
+    label: 'Gemini Pro (latest)',
     provider: 'gemini',
-    apiModel: 'gemini-1.5-pro',
+    apiModel: 'gemini-pro-latest',
     vision: true,
   },
   {
-    id: 'gemini-2.0-flash',
-    label: 'Gemini 2.0 Flash',
+    id: 'gemini-flash-latest',
+    label: 'Gemini Flash (latest)',
     provider: 'gemini',
-    apiModel: 'gemini-2.0-flash',
+    apiModel: 'gemini-flash-latest',
+    vision: true,
+  },
+  {
+    id: 'gemini-3.8-flash',
+    label: 'Gemini 3.8 Flash',
+    provider: 'gemini',
+    apiModel: 'gemini-3.8-flash',
     vision: true,
   },
   // ---- OmniRoute: the VPS gateway picks a working (often free) provider ----

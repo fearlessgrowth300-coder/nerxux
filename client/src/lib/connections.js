@@ -13,6 +13,17 @@ export async function getConnections() {
   }
 }
 
+// Whether the server-side Claude subscription is signed in (drives the agent
+// adviser). Separate from the key vault — that login lives on the host.
+export async function getAdviserStatus() {
+  try {
+    const { data } = await api.get('/api/connections/adviser')
+    return data
+  } catch {
+    return { available: false }
+  }
+}
+
 // The chat model dropdown's options: whatever each connected provider's own
 // API actually lists right now (cached server-side ~10 min), falling back to
 // a curated list per provider if a live fetch fails.
