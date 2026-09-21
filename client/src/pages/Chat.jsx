@@ -485,6 +485,19 @@ export default function Chat() {
       busyRef.current = false
       setOpening(false)
     }
+    // A reply may still be generating on the server for THIS conversation — a
+    // turn started, then the user left for Settings or another chat and came
+    // back through History. listMessages only has what was already saved, so
+    // without this the live turn looks like it vanished. Re-attach to it.
+    try {
+      const running = await listRunningJobs()
+      const mine = running.find((j) => j.conversationId === id)
+      if (mine && convIdRef.current === id && !busyRef.current) {
+        const job = { jobId: mine.jobId, conversationId: id, model: null }
+        setPendingJob(job)
+        resumePendingJob(job)
+      }
+    } catch {}
   }
 
   async function removeConversation(id, e) {
