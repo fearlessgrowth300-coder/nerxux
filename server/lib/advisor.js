@@ -11,8 +11,52 @@
 // Deliberately cheap: a few hundred tokens of state, never the transcript, and
 // a hard cap per turn. If no Anthropic key is connected it returns null and the
 // loop runs exactly as before.
+import { execFile } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { getProviderKey } from './vault.js'
 import { ADVISOR_MODELS } from '../../shared/models.js'
+
+// The Claude Code CLI, signed in with the user's own Claude subscription
+// (`claude auth login --claudeai`). Tried BEFORE the API providers: it costs
+// nothing on top of a subscription they already pay for, where an API key is
+// billed per token. Slower than an API call and subject to the plan's rate
+// limits, which is why everything below stays optional.
+const CLI_TIMEOUT_MS = 90_000
+// Probing the CLI costs a process spawn, so a "not signed in" answer is
+// remembered rather than re-learned on every step of every turn.
+const CLI_RECHECK_MS = 10 * 60 * 1000
+let cliUnavailableUntil = 0
+
+function runClaudeCli(prompt, system) {
+  return new Promise((resolve) => {
+    execFile(
+      process.env.CLAUDE_CLI_BIN || 'claude',
+      ['-p', prompt, '--append-system-prompt', system, '--output-format', 'text'],
+      // The temp dir, not a project directory: this is a question about a
+      // record, not work on a repo, and the CLI should not wander into one.
+      { timeout: CLI_TIMEOUT_MS, cwd: tmpdir(), maxBuffer: 1024 * 1024 },
+      (err, stdout) => {
+        const text = String(stdout || '').trim()
+        // The CLI exits 0 while printing this, so the exit code cannot be trusted.
+        if (err || !text || /not logged in|please run \/login/i.test(text)) {
+          cliUnavailableUntil = Date.now() + CLI_RECHECK_MS
+          return resolve(null)
+        }
+        resolve(text)
+      }
+    )
+  })
+}
+
+export async function adviseViaCli(prompt, system) {
+  if (Date.now() < cliUnavailableUntil) return null
+  try {
+    return await runClaudeCli(prompt, system)
+  } catch {
+    cliUnavailableUntil = Date.now() + CLI_RECHECK_MS
+    return null
+  }
+}
 
 // The provider adapters already handle keys, errors and response shapes, so
 // the adviser reuses them rather than speaking three SDKs of its own.
@@ -53,6 +97,9 @@ export async function advise({ userId, record, goal = '', signal = null }) {
   const prompt =
     `The user's request for this turn:\n${String(goal || '(continuing earlier work)').slice(0, 1500)}\n\n` +
     `The agent's execution record:\n${String(record || '').slice(0, 6000)}`
+  // Subscription first, metered keys second.
+  const fromCli = await adviseViaCli(prompt, SYSTEM)
+  if (fromCli) return fromCli
   for (const { provider, model } of ADVISOR_MODELS) {
     let apiKey = null
     try {

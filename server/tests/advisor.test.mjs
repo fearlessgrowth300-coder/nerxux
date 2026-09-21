@@ -64,3 +64,30 @@ test('the adviser uses whichever strong model is actually connected', async () =
   assert.match(src, /for \(const \{ provider, model \} of ADVISOR_MODELS\)/, 'must try each in turn')
   assert.match(src, /if \(!apiKey\) continue/, 'an unconnected provider is skipped, not fatal')
 })
+
+test('the subscription CLI is tried before any metered API key', async () => {
+  // The user pays for Claude on a subscription and has no API credit. An
+  // adviser that reached for a key first would either cost money or, with no
+  // key, silently never run.
+  const src = await fs.readFile('./lib/advisor.js', 'utf8')
+  const cliAt = src.indexOf('const fromCli = await adviseViaCli')
+  const loopAt = src.indexOf('for (const { provider, model } of ADVISOR_MODELS)')
+  assert.ok(cliAt > 0 && loopAt > cliAt, 'the CLI must be consulted before the API providers')
+  assert.match(src, /'--output-format', 'text'/, 'print mode, not an interactive session')
+  assert.ok(src.includes('not logged in|please run'), 'a signed-out CLI exits 0 while printing that — the exit code cannot be trusted')
+  assert.match(src, /cwd: tmpdir\(\)/, 'a question about a record must not be run inside a project directory')
+})
+
+test('a missing or signed-out CLI resolves null instead of throwing into the turn', async () => {
+  // Pointed at a binary that does not exist, so the result does not depend on
+  // whether the machine running the tests happens to be signed in.
+  process.env.CLAUDE_CLI_BIN = 'claude-not-installed-here'
+  try {
+    const { adviseViaCli } = await import(`../lib/advisor.js?cli=${Date.now()}`)
+    assert.equal(await adviseViaCli('hello', 'be brief'), null)
+    // Second call takes the cached-unavailable path — also null, never an error.
+    assert.equal(await adviseViaCli('hello', 'be brief'), null)
+  } finally {
+    delete process.env.CLAUDE_CLI_BIN
+  }
+})
