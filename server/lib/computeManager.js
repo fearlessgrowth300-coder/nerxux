@@ -215,20 +215,34 @@ export function getKaggleSessionTime(slotId = kaggleActiveSlot) {
 // And vision depends on whether that run found an mmproj to load, so sending
 // images to a server without one would fail the request outright.
 const kaggleProps = {} // slot id -> { ctx, vision }
+const kaggleSlotUp = {} // slot id -> boolean, from the last time that slot was probed
 async function kaggleSlotReachable(slot) {
   try {
     const r = await fetch(`${slot.url}/props`, { signal: AbortSignal.timeout(2500) })
-    if (!r.ok) return false
+    if (!r.ok) {
+      kaggleSlotUp[slot.id] = false
+      return false
+    }
     const j = await r.json()
     const n = j?.default_generation_settings?.n_ctx
     kaggleProps[slot.id] = {
       ctx: Number.isFinite(n) && n > 0 ? n : undefined,
       vision: Boolean(j?.modalities?.vision),
     }
+    kaggleSlotUp[slot.id] = true
     return true
   } catch {
+    kaggleSlotUp[slot.id] = false
     return false
   }
+}
+// Every account at once, for the status poll. findReachableKaggleSlot() stops
+// at the first one that answers — right for routing a turn, wrong for the bar,
+// which then showed two live spare notebooks as "down" because nothing had
+// looked at them. Probed in parallel: three localhost requests on a 20s poll.
+async function probeAllKaggleSlots() {
+  await Promise.all(KAGGLE_SLOTS.map((s) => kaggleSlotReachable(s)))
+  return kaggleSlotUp
 }
 // The active account's real context window, or null when it has not been seen.
 // Callers must fall back to a safe floor rather than assuming a size.
@@ -427,7 +441,7 @@ export function getComputeStatus() {
       session: getKaggleSessionTime(slot.id),
       // Both accounts' quota, so the UI can show which one to switch to
       // before this one runs out, instead of only the one in use right now.
-      accounts: KAGGLE_SLOTS.map((s) => ({ id: s.id, label: s.label, connected: lastKaggleReachableSlot === s.id, usage: getKaggleUsage(s.id) })),
+      accounts: KAGGLE_SLOTS.map((s) => ({ id: s.id, label: s.label, connected: Boolean(kaggleSlotUp[s.id]), usage: getKaggleUsage(s.id) })),
     }
   } else {
     details = { label: 'Always On: Hostinger model (KVM 8)', speed: '2–5 tok/s', cost: '$26/mo flat', status: 'ready' }
@@ -442,14 +456,21 @@ export async function getLiveComputeStatus() {
   // separate path instead of threading a third mode through the RunPod logic
   // below (which fetches pod details unconditionally, for the pod picker).
   if (currentMode === 'kaggle') {
-    const slot = await findReachableKaggleSlot()
+    const up = await probeAllKaggleSlots()
+    // Every connected notebook burns ITS OWN weekly quota while it runs —
+    // Kaggle charges the session, not the requests Nexus happens to send — so
+    // a live account that is only a spare still accrues, and one that dropped
+    // still has its session cleared.
+    for (const s of KAGGLE_SLOTS) trackKaggleUsage(s.id, Boolean(up[s.id]))
+    // Sticky: keep using the account already in use while it answers, rather
+    // than bouncing onto whichever one replied first.
+    const chosen = (kaggleActiveSlot && up[kaggleActiveSlot] && kaggleActiveSlot) || KAGGLE_SLOTS.find((s) => up[s.id])?.id || null
+    const slot = chosen ? kaggleSlotById(chosen) : null
     if (slot) {
       lastKaggleReachableSlot = slot.id
       kaggleActiveSlot = slot.id
       writeState({ kaggleActiveSlot })
-      trackKaggleUsage(slot.id, true)
     } else {
-      if (kaggleActiveSlot) trackKaggleUsage(kaggleActiveSlot, false)
       lastKaggleReachableSlot = null
     }
     const usage = getKaggleUsage(activeKaggleSlot().id)

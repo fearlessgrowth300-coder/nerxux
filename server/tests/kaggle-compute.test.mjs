@@ -528,3 +528,36 @@ test('the bar says WHY there is no tunnel — booting, or Kaggle refusing on quo
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
+
+test('the status poll probes every account, so live spares are not shown as down', async () => {
+  // Routing only needs the first account that answers, but the bar lists all
+  // three — and listing a live spare notebook as "down" reads as two dead
+  // accounts when they are in fact hot standby.
+  const stateFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-')), 'compute-state.json')
+  process.env.NEXUS_COMPUTE_STATE = stateFile
+  const props = (req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ default_generation_settings: { n_ctx: 131072 }, modalities: { vision: true } }))
+  }
+  // A and C answer; B has no notebook running.
+  const servers = [http.createServer(props), http.createServer(props)]
+  await new Promise((r) => servers[0].listen(20140, '127.0.0.1', r))
+  await new Promise((r) => servers[1].listen(20142, '127.0.0.1', r))
+  try {
+    const cm = await import(`../lib/computeManager.js?probe-all=${Date.now()}`)
+    cm.switchToKaggle()
+    await cm.getLiveComputeStatus()
+    const status = await cm.getLiveComputeStatus()
+    const byId = Object.fromEntries(status.details.accounts.map((a) => [a.id, a.connected]))
+    assert.deepEqual(byId, { a: true, b: false, c: true }, 'every account reports its OWN tunnel state')
+    assert.match(status.details.label, /Kaggle A/, 'the first answering account is the one in use')
+    assert.equal(status.details.status, 'ready')
+    // C is only a spare, but its notebook is running and burning its own
+    // 30h — Kaggle charges the session, not the requests Nexus sends it.
+    assert.ok(cm.getKaggleUsage('c').usedSeconds >= 0 && cm.getKaggleSessionTime('c'), 'a live spare accrues its own session')
+    assert.equal(cm.getKaggleSessionTime('b'), null, 'an account with no tunnel has no session')
+  } finally {
+    for (const s of servers) s.close()
+    delete process.env.NEXUS_COMPUTE_STATE
+  }
+})
