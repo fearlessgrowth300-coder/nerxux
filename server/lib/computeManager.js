@@ -47,7 +47,9 @@ function kaggleSlotById(id) {
 }
 const KAGGLE_WEEKLY_LIMIT_S = 30 * 3600
 const SSH_KEY_PATH = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_ed25519')
-const STATE_FILE = path.join(__dirname, '../.compute-state.json')
+// Overridable so a test can point at a temp file instead of racing other test
+// files for the one real state file.
+const STATE_FILE = process.env.NEXUS_COMPUTE_STATE || path.join(__dirname, '../.compute-state.json')
 
 function readState() {
   try {
@@ -244,6 +246,42 @@ function activeKaggleSlot() {
   return kaggleSlotById(kaggleActiveSlot) || KAGGLE_SLOTS[0]
 }
 
+// The cron watchdog (/root/.kaggle-accounts) restarts dead accounts over the
+// Kaggle API and already knows WHY a slot has no tunnel — it just kept that to
+// its own log, so the bar said "start a notebook and run its tunnel cell" while
+// a notebook was in fact booting, or while Kaggle was refusing every push
+// because the weekly cap was spent. Read its stamps and log instead of guessing.
+const WATCHDOG_DIR = process.env.KAGGLE_WATCHDOG_DIR || '/root/.kaggle-accounts'
+// A cold start (CUDA build + the model download) measured ~25-30 min; past that
+// a run that still has not opened its tunnel is not "booting", it is stuck.
+const KAGGLE_BOOT_S = 35 * 60
+
+function kaggleSlotReason(slotId) {
+  try {
+    const stamp = Number(fs.readFileSync(path.join(WATCHDOG_DIR, `.last_restart_${slotId}`), 'utf8').trim())
+    const age = (Date.now() - stamp * 1000) / 1000
+    if (Number.isFinite(age) && age >= 0 && age < KAGGLE_BOOT_S) return `starting (${Math.round(age / 60)}m in, takes ~25-30m)`
+  } catch {}
+  try {
+    const lines = fs.readFileSync(path.join(WATCHDOG_DIR, 'watchdog.log'), 'utf8').trimEnd().split('\n')
+    const last = lines.reverse().find((l) => l.includes(` ${slotId}: `))
+    if (last && /quota/i.test(last)) return "Kaggle's weekly GPU quota is used up"
+    if (last && /error/i.test(last)) return last.slice(last.indexOf(` ${slotId}: `) + slotId.length + 3).trim()
+  } catch {}
+  return null
+}
+
+// One line naming every account's real state, or null when the watchdog is not
+// on this machine (a dev box) and there is nothing better to say than the
+// generic message.
+function kaggleDownReason() {
+  const parts = KAGGLE_SLOTS.map((s) => {
+    const reason = kaggleSlotReason(s.id)
+    return reason ? `${s.label}: ${reason}` : null
+  }).filter(Boolean)
+  return parts.length ? parts.join(' · ') : null
+}
+
 export function switchToKaggle() {
   setCurrentMode('kaggle')
   return getComputeStatus()
@@ -379,7 +417,12 @@ export async function getLiveComputeStatus() {
     }
     const usage = getKaggleUsage(activeKaggleSlot().id)
     let notice = null
-    if (!slot) notice = 'No Kaggle notebook is connected on either account. Start one and run its tunnel cell — Nexus will pick it up automatically.'
+    if (!slot) {
+      const why = kaggleDownReason()
+      notice = why
+        ? `No Kaggle tunnel yet — ${why}.`
+        : 'No Kaggle notebook is connected on either account. Start one and run its tunnel cell — Nexus will pick it up automatically.'
+    }
     else if (usage.remainingSeconds < 3600) notice = `${activeKaggleSlot().label}'s weekly GPU quota is nearly used up (~${Math.round(usage.remainingSeconds / 60)} min left). Switch to the other account, or it may cut off mid-turn.`
     return { ...getComputeStatus(), switching: Boolean(switchPromise), ...(notice ? { notice } : {}) }
   }

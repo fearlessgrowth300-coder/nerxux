@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
 
 // Kaggle has no public address: the notebook opens a reverse SSH tunnel INTO
 // this VPS (the opposite direction from Turbo, where the VPS opens the tunnel
@@ -401,8 +403,8 @@ test('a slot missing from already-migrated state is backfilled, not left undefin
   // no "c" — and the first health check that found account C's tunnel up threw
   // "Cannot read properties of undefined (reading 'usage')", which the compute
   // route turned into a bare 500. Kaggle looked dead with nothing in the logs.
-  const stateFile = new URL('../.compute-state.json', import.meta.url)
-  const saved = await fs.readFile(stateFile, 'utf8').catch(() => null)
+  const stateFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-')), 'compute-state.json')
+  process.env.NEXUS_COMPUTE_STATE = stateFile
   const twoSlotState = {
     mode: 'kaggle',
     kaggleAccounts: {
@@ -423,7 +425,7 @@ test('a slot missing from already-migrated state is backfilled, not left undefin
     for (const slot of cm.KAGGLE_SLOTS) assert.ok(written.kaggleAccounts[slot.id], `slot ${slot.id} must be persisted`)
     assert.equal(written.kaggleAccounts.a.usage.seconds, 87953.9, 'an existing account keeps the quota history it already used')
   } finally {
-    if (saved !== null) await fs.writeFile(stateFile, saved)
+    delete process.env.NEXUS_COMPUTE_STATE
   }
 })
 
@@ -431,8 +433,8 @@ test('a stale sessionStart from a slot that dropped while another was active doe
   // Only the ACTIVE slot's session is cleared on a disconnect, so an idle
   // account can keep a sessionStart for days. Reconnecting it must start a new
   // 12h countdown, not resume one Kaggle already killed.
-  const stateFile = new URL('../.compute-state.json', import.meta.url)
-  const saved = await fs.readFile(stateFile, 'utf8').catch(() => null)
+  const stateFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-')), 'compute-state.json')
+  process.env.NEXUS_COMPUTE_STATE = stateFile
   const threeDaysAgo = Date.now() - 3 * 86400 * 1000
   await fs.writeFile(stateFile, JSON.stringify({
     mode: 'kaggle',
@@ -453,13 +455,13 @@ test('a stale sessionStart from a slot that dropped while another was active doe
     assert.ok(Date.now() - session.startedAt < 60_000, 'a reconnect starts the session roughly now')
   } finally {
     server.close()
-    if (saved !== null) await fs.writeFile(stateFile, saved)
+    delete process.env.NEXUS_COMPUTE_STATE
   }
 })
 
 test('resetting a slot zeroes only that account, for when it gets a new Kaggle account', async () => {
-  const stateFile = new URL('../.compute-state.json', import.meta.url)
-  const saved = await fs.readFile(stateFile, 'utf8').catch(() => null)
+  const stateFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-')), 'compute-state.json')
+  process.env.NEXUS_COMPUTE_STATE = stateFile
   await fs.writeFile(stateFile, JSON.stringify({
     mode: 'kaggle',
     kaggleAccounts: {
@@ -479,6 +481,36 @@ test('resetting a slot zeroes only that account, for when it gets a new Kaggle a
     cm.resetKaggleUsage()
     for (const slot of cm.KAGGLE_SLOTS) assert.equal(cm.getKaggleUsage(slot.id).usedSeconds, 0, 'no slot argument resets them all')
   } finally {
-    if (saved !== null) await fs.writeFile(stateFile, saved)
+    delete process.env.NEXUS_COMPUTE_STATE
+  }
+})
+
+test('the bar says WHY there is no tunnel — booting, or Kaggle refusing on quota', async () => {
+  // "Start one and run its tunnel cell" is wrong advice when a notebook is
+  // already starting, or when Kaggle is rejecting every push because the
+  // weekly cap is spent. The watchdog knows which; it just never said so.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'kaggle-watchdog-'))
+  const stateFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-')), 'compute-state.json')
+  process.env.NEXUS_COMPUTE_STATE = stateFile
+  await fs.writeFile(stateFile, JSON.stringify({ mode: 'kaggle', kaggleActiveSlot: null }))
+  await fs.writeFile(path.join(dir, '.last_restart_a'), String(Math.floor(Date.now() / 1000) - 300))
+  await fs.writeFile(path.join(dir, 'watchdog.log'), [
+    '2026-09-21T03:05:04Z b: tunnel down and kernel idle -> pushing adebayorola/notebookfd1ceb9e6b',
+    '2026-09-21T03:05:05Z b: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.',
+    '2026-09-21T03:05:07Z c: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.',
+  ].join('\n'))
+  process.env.KAGGLE_WATCHDOG_DIR = dir
+  try {
+    const cm = await import(`../lib/computeManager.js?watchdog=${Date.now()}`)
+    cm.switchToKaggle()
+    const status = await cm.getLiveComputeStatus()
+    assert.match(status.notice, /Kaggle A: starting \(5m in/, 'a booting account is not something the user should be told to start')
+    assert.match(status.notice, /Kaggle B: Kaggle's weekly GPU quota is used up/)
+    assert.match(status.notice, /Kaggle C: Kaggle's weekly GPU quota is used up/)
+    assert.doesNotMatch(status.notice, /run its tunnel cell/, 'the generic advice is only for when nothing better is known')
+  } finally {
+    delete process.env.KAGGLE_WATCHDOG_DIR
+    delete process.env.NEXUS_COMPUTE_STATE
+    await fs.rm(dir, { recursive: true, force: true })
   }
 })
