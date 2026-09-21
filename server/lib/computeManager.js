@@ -61,9 +61,26 @@ function readState() {
 
 function writeState(patch) {
   const next = { ...readState(), ...patch }
-  const temporary = `${STATE_FILE}.tmp`
+  // Per-process temp name: two processes writing state at once (the live
+  // server plus a one-off `node -e` beside it, or parallel test runners) would
+  // otherwise fight over one .tmp and rename each other's half-written file.
+  const temporary = `${STATE_FILE}.tmp.${process.pid}`
   fs.writeFileSync(temporary, JSON.stringify(next))
-  fs.renameSync(temporary, STATE_FILE)
+  try {
+    fs.renameSync(temporary, STATE_FILE)
+  } catch {
+    // Windows refuses a rename onto a file another process still has open
+    // (EPERM), which threw all the way out of a chat turn through
+    // ensureKaggleReady. This file is advisory bookkeeping — usage counters
+    // and the selected mode — so a rare in-place write is a far better outcome
+    // than failing the request.
+    try {
+      fs.writeFileSync(STATE_FILE, JSON.stringify(next))
+    } catch {}
+    try {
+      fs.unlinkSync(temporary)
+    } catch {}
+  }
   return next
 }
 
@@ -257,18 +274,35 @@ const WATCHDOG_DIR = process.env.KAGGLE_WATCHDOG_DIR || '/root/.kaggle-accounts'
 const KAGGLE_BOOT_S = 35 * 60
 
 function kaggleSlotReason(slotId) {
+  // The watchdog stamps a restart whether the push SUCCEEDED or was refused,
+  // so a stamp alone cannot mean "starting" — a slot Kaggle rejected on quota
+  // would claim to be booting forever. The log line it writes straight after
+  // the stamp settles it, but only when it is NEWER than the stamp: an older
+  // failure belongs to a previous attempt that has since been superseded
+  // (account A's key swap pushed by hand, with no log line of its own).
+  let stamp = 0
   try {
-    const stamp = Number(fs.readFileSync(path.join(WATCHDOG_DIR, `.last_restart_${slotId}`), 'utf8').trim())
-    const age = (Date.now() - stamp * 1000) / 1000
-    if (Number.isFinite(age) && age >= 0 && age < KAGGLE_BOOT_S) return `starting (${Math.round(age / 60)}m in, takes ~25-30m)`
+    stamp = Number(fs.readFileSync(path.join(WATCHDOG_DIR, `.last_restart_${slotId}`), 'utf8').trim()) || 0
   } catch {}
+
+  let failure = null
+  let failureAt = 0
   try {
-    const lines = fs.readFileSync(path.join(WATCHDOG_DIR, 'watchdog.log'), 'utf8').trimEnd().split('\n')
+    const lines = fs.readFileSync(path.join(WATCHDOG_DIR, 'watchdog.log'), 'utf8').trimEnd().split(/\r?\n/)
     const last = lines.reverse().find((l) => l.includes(` ${slotId}: `))
-    if (last && /quota/i.test(last)) return "Kaggle's weekly GPU quota is used up"
-    if (last && /error/i.test(last)) return last.slice(last.indexOf(` ${slotId}: `) + slotId.length + 3).trim()
+    if (last) {
+      const said = last.slice(last.indexOf(` ${slotId}: `) + slotId.length + 3).trim()
+      const at = Date.parse(last.slice(0, last.indexOf(' ')))
+      if (/quota/i.test(said)) failure = "Kaggle's weekly GPU quota is used up"
+      else if (/error/i.test(said)) failure = said
+      if (failure) failureAt = Number.isFinite(at) ? Math.floor(at / 1000) : 0
+    }
   } catch {}
-  return null
+
+  if (failure && failureAt >= stamp) return failure
+  const age = (Date.now() - stamp * 1000) / 1000
+  if (stamp && age >= 0 && age < KAGGLE_BOOT_S) return `starting (${Math.round(age / 60)}m in, takes ~25-30m)`
+  return failure
 }
 
 // One line naming every account's real state, or null when the watchdog is not

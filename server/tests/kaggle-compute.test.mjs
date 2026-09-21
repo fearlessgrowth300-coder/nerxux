@@ -493,11 +493,21 @@ test('the bar says WHY there is no tunnel — booting, or Kaggle refusing on quo
   const stateFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-')), 'compute-state.json')
   process.env.NEXUS_COMPUTE_STATE = stateFile
   await fs.writeFile(stateFile, JSON.stringify({ mode: 'kaggle', kaggleActiveSlot: null }))
-  await fs.writeFile(path.join(dir, '.last_restart_a'), String(Math.floor(Date.now() / 1000) - 300))
+  const nowS = Math.floor(Date.now() / 1000)
+  const at = (secondsAgo) => new Date((nowS - secondsAgo) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  // A was pushed BY HAND 5 minutes ago (a key swap onto a new account), which
+  // writes a stamp but no log line — its own older failure is stale history.
+  await fs.writeFile(path.join(dir, '.last_restart_a'), String(nowS - 300))
+  // B and C were stamped by the watchdog at the moment their push was REFUSED.
+  // The stamp is written whether the push worked or not, so a fresh stamp on
+  // its own must not be read as "booting".
+  await fs.writeFile(path.join(dir, '.last_restart_b'), String(nowS - 600))
+  await fs.writeFile(path.join(dir, '.last_restart_c'), String(nowS - 600))
   await fs.writeFile(path.join(dir, 'watchdog.log'), [
-    '2026-09-21T03:05:04Z b: tunnel down and kernel idle -> pushing adebayorola/notebookfd1ceb9e6b',
-    '2026-09-21T03:05:05Z b: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.',
-    '2026-09-21T03:05:07Z c: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.',
+    `${at(3600)} a: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.`,
+    `${at(601)} b: tunnel down and kernel idle -> pushing adebayorola/notebookfd1ceb9e6b`,
+    `${at(599)} b: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.`,
+    `${at(599)} c: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.`,
   ].join('\n'))
   process.env.KAGGLE_WATCHDOG_DIR = dir
   try {
