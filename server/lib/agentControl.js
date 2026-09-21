@@ -4,7 +4,11 @@ import { redactToolData } from './redact.js'
 import path from 'node:path'
 import { withAgentState, addEvidence, stateSummary, safeNote, evaluateAssertions } from './agentState.js'
 
-const inspections = new Set(['read_file', 'list_files', 'search_files', 'web_search', 'read_web_page'])
+// Reading and browsing, not building. The browser_* tools act on a web page,
+// never on the project's files, so they must not bump the revision — that
+// would stale every check that had already passed.
+const inspections = new Set(['read_file', 'list_files', 'search_files', 'web_search', 'read_web_page',
+  'browser_open', 'browser_read', 'browser_click', 'browser_fill', 'browser_key'])
 const executions = new Set(['execute_command', 'run_code', 'run_on_pod', 'verify_work', 'restart_service', 'deploy_service', 'expose_site'])
 // A shell command that cannot change the project's files must not bump the
 // revision: every bump staled every passing check, so a mid-turn `cat`, `curl`

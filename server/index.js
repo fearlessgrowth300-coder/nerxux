@@ -15,6 +15,7 @@ import accountRouter from './routes/account.js'
 import trainingRouter from './routes/training.js'
 import sandboxRouter from './routes/sandbox.js'
 import computeRouter from './routes/compute.js'
+import browserRouter from './routes/browser.js'
 import { ensureModelServer } from './lib/modelServer.js'
 import { restoreComputeMode } from './lib/computeManager.js'
 import { saveGraveyard } from './lib/chatJobs.js'
@@ -104,6 +105,7 @@ app.use('/api/account', accountRouter)
 app.use('/api/training', trainingRouter)
 app.use('/api/sandbox', sandboxRouter)
 app.use('/api/compute', computeRouter)
+app.use('/api/browser', browserRouter)
 
 // ---- Central error handler ----
 // Every route added in later steps should `next(err)` so errors land here

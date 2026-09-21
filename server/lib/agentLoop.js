@@ -201,6 +201,53 @@ export async function restartService(name, { exec = null, env = process.env } = 
   return { ok: r.code === 0, exitCode: r.code, stdout: (r.stdout || '').trim().slice(-2000) + summary, stderr: (r.stderr || '').trim().slice(-2000), durationMs: Date.now() - start, target: 'host' }
 }
 
+// The real browser on the host. Every result is shaped like a sandbox result
+// ({ok, stdout, stderr, ...}) because that is what the adapters already know
+// how to turn into a tool observation.
+async function runBrowserTool(name, args = {}) {
+  const start = Date.now()
+  const done = (ok, text) => ({
+    ok,
+    stdout: ok ? String(text) : '',
+    stderr: ok ? '' : String(text),
+    exitCode: ok ? 0 : 1,
+    durationMs: Date.now() - start,
+    target: 'browser',
+  })
+  try {
+    const b = await import('./browserSession.js')
+    // What the page says plus where it can go — a text-only model cannot see
+    // the screenshot, so links are how it moves without inventing URLs.
+    const describe = async (prefix = '') => {
+      const [page, { text, truncated }, hrefs] = await Promise.all([b.state(), b.readText(), b.links()])
+      const linkList = hrefs.length ? `\n\nLinks:\n${hrefs.map((l) => `- ${l.text} -> ${l.href}`).join('\n')}` : ''
+      return done(true, `${prefix}${page.title ? `${page.title}\n` : ''}${page.url}\n\n${text}${truncated ? '\n…(truncated)' : ''}${linkList}`)
+    }
+    if (name === 'browser_open') {
+      await b.goto(args.url)
+      return describe()
+    }
+    if (name === 'browser_read') return describe()
+    if (name === 'browser_click') {
+      const hit = await b.clickText(args.text)
+      if (!hit.ok) return done(false, `Nothing clickable matching "${args.text}" (${hit.reason}). Use browser_read to see what is on the page.`)
+      return describe(`Clicked ${hit.tag}: "${hit.clicked}"\n\n`)
+    }
+    if (name === 'browser_fill') {
+      const hit = await b.fillField(args.field, args.value)
+      if (!hit.ok) return done(false, `No form field matching "${args.field}" (${hit.reason}).`)
+      return done(true, `Filled "${hit.field}". Press Enter or click the submit button next.`)
+    }
+    if (name === 'browser_key') {
+      await b.pressKey(String(args.key))
+      return describe(`Pressed ${args.key}.\n\n`)
+    }
+    return done(false, `Unknown browser tool ${name}`)
+  } catch (err) {
+    return done(false, err.message)
+  }
+}
+
 async function executeRawAgentTool({ name, args = {}, sessionId = 'default', projectPath = null, userId = null, chatText = '', executionEnvironment = 'sandbox' }) {
   const cleanSession = sessionId || 'default'
   if (name === 'restart_service') return restartService(args.name)
@@ -209,6 +256,7 @@ async function executeRawAgentTool({ name, args = {}, sessionId = 'default', pro
   if (name === 'read_web_page') {
     return executeInSandbox({ code: webPageCode(args.url), language: 'python', sessionId: cleanSession, profile: 'full', timeoutSeconds: 100 })
   }
+  if (name.startsWith('browser_')) return runBrowserTool(name, args)
   const targetProj = projectPath
   const onPod = executionEnvironment === 'pod'
   if (name === 'web_search') {
