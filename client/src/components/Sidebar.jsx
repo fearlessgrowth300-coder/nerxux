@@ -8,10 +8,12 @@ import {
   CloseIcon,
   BrainIcon,
   FileIcon,
+  BrowserIcon,
 } from './icons'
 
 const NAV = [
   { to: '/chat', label: 'Chat', Icon: ChatIcon },
+  { to: '/browser', label: 'Browser', Icon: BrowserIcon },
   { to: '/notes', label: 'Notes', Icon: FileIcon },
   { to: '/skills', label: 'Skills', Icon: SkillsIcon },
   { to: '/instructions', label: 'Instructions', Icon: InstructionsIcon },

@@ -12,6 +12,7 @@ import Skills from './pages/Skills'
 import Instructions from './pages/Instructions'
 import Connections from './pages/Connections'
 import Notes from './pages/Notes'
+import Browser from './pages/Browser'
 import TrainModel from './pages/TrainModel'
 import Settings from './pages/Settings'
 
@@ -50,6 +51,7 @@ export default function App() {
             <Route path="/skills" element={<Skills />} />
             <Route path="/instructions" element={<Instructions />} />
             <Route path="/connections" element={<Connections />} />
+            <Route path="/browser" element={<Browser />} />
             <Route path="/notes" element={<Notes />} />
             <Route path="/train" element={<TrainModel />} />
             <Route path="/settings" element={<Settings />} />
