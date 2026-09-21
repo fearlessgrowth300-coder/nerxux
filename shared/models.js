@@ -169,6 +169,13 @@ export const ROUTER_MODEL = 'claude-sonnet-4-6'
 // The adviser that reviews the local agent's execution record and says what to
 // try next (lib/advisor.js). A stronger model than the one doing the work, on
 // purpose: it runs a few times per turn on a few hundred tokens of state, so
-// the cost is small next to the tool actions it saves. Overridable without a
-// deploy if a newer model should take over.
-export const ADVISOR_MODEL = process.env.NEXUS_ADVISOR_MODEL || 'claude-sonnet-5'
+// the cost is small next to the tool actions it saves.
+//
+// Whichever of these the user actually has connected is used, in this order —
+// tying it to one provider meant an adviser that silently never ran. Each is
+// overridable without a deploy.
+export const ADVISOR_MODELS = [
+  { provider: 'claude', model: process.env.NEXUS_ADVISOR_CLAUDE || 'claude-sonnet-5' },
+  { provider: 'openai', model: process.env.NEXUS_ADVISOR_OPENAI || 'gpt-5' },
+  { provider: 'gemini', model: process.env.NEXUS_ADVISOR_GEMINI || 'gemini-3.8-flash' },
+]

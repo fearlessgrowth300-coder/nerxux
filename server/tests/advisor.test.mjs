@@ -48,3 +48,15 @@ test('the turn keeps time back to land itself instead of being guillotined', asy
     'and that handoff must reach the execution record, not just the user',
   )
 })
+
+test('the adviser uses whichever strong model is actually connected', async () => {
+  // Built Claude-only at first, then checked the live account: Claude was not
+  // connected, Gemini was — so the adviser would have sat silent forever while
+  // looking perfectly healthy in the code.
+  const { ADVISOR_MODELS } = await import('../../shared/models.js')
+  assert.deepEqual(ADVISOR_MODELS.map((a) => a.provider), ['claude', 'openai', 'gemini'],
+    'preference order, but every one of them must be usable')
+  const src = await fs.readFile('./lib/advisor.js', 'utf8')
+  assert.match(src, /for \(const \{ provider, model \} of ADVISOR_MODELS\)/, 'must try each in turn')
+  assert.match(src, /if \(!apiKey\) continue/, 'an unconnected provider is skipped, not fatal')
+})

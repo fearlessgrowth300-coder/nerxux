@@ -11,9 +11,16 @@
 // Deliberately cheap: a few hundred tokens of state, never the transcript, and
 // a hard cap per turn. If no Anthropic key is connected it returns null and the
 // loop runs exactly as before.
-import Anthropic from '@anthropic-ai/sdk'
 import { getProviderKey } from './vault.js'
-import { ADVISOR_MODEL } from '../../shared/models.js'
+import { ADVISOR_MODELS } from '../../shared/models.js'
+
+// The provider adapters already handle keys, errors and response shapes, so
+// the adviser reuses them rather than speaking three SDKs of its own.
+const ADAPTERS = {
+  claude: () => import('../adapters/claude.js'),
+  openai: () => import('../adapters/openai.js'),
+  gemini: () => import('../adapters/gemini.js'),
+}
 
 // Enough calls to plan a turn and to break out of being stuck, not enough to
 // turn into a second agent having a conversation with the first.
@@ -43,34 +50,27 @@ export function shouldAdvise({ step, failuresSinceAdvice, adviceCount }) {
  * must treat null as "carry on unchanged", never as an error.
  */
 export async function advise({ userId, record, goal = '', signal = null }) {
-  try {
-    const apiKey = await getProviderKey(userId, 'claude')
-    if (!apiKey) return null
-    const client = new Anthropic({ apiKey })
-    const message = await client.messages.create(
-      {
-        model: ADVISOR_MODEL,
-        max_tokens: 400,
-        system: SYSTEM,
-        messages: [{
-          role: 'user',
-          content: `The user's request for this turn:\n${String(goal || '(continuing earlier work)').slice(0, 1500)}\n\n` +
-            `The agent's execution record:\n${String(record || '').slice(0, 6000)}`,
-        }],
-      },
-      signal ? { signal } : {}
-    )
-    const text = (message?.content || [])
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    return text || null
-  } catch {
-    // An adviser that errors, rate-limits or has no credit must never fail the
-    // turn — the agent is perfectly able to continue without it.
-    return null
+  const prompt =
+    `The user's request for this turn:\n${String(goal || '(continuing earlier work)').slice(0, 1500)}\n\n` +
+    `The agent's execution record:\n${String(record || '').slice(0, 6000)}`
+  for (const { provider, model } of ADVISOR_MODELS) {
+    let apiKey = null
+    try {
+      apiKey = await getProviderKey(userId, provider)
+    } catch { /* a vault miss is just "not connected" */ }
+    if (!apiKey) continue
+    try {
+      const { run } = await ADAPTERS[provider]()
+      const res = await run({ prompt, systemPrompt: SYSTEM, skills: [], apiKey, model, signal })
+      const text = String(res?.content || '').trim()
+      if (text) return text
+    } catch {
+      // This provider is out of credit, rate-limited or refusing — try the
+      // next one rather than failing the turn. An adviser is an optimisation,
+      // never a dependency.
+    }
   }
+  return null
 }
 
 // How the advice reaches the working model: as an observation in the
