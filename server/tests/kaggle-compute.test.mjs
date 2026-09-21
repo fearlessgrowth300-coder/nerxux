@@ -508,6 +508,10 @@ test('the bar says WHY there is no tunnel — booting, or Kaggle refusing on quo
     `${at(601)} b: tunnel down and kernel idle -> pushing adebayorola/notebookfd1ceb9e6b`,
     `${at(599)} b: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.`,
     `${at(599)} c: Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.`,
+    // The heartbeat the watchdog writes every 5 min afterwards is the NEWEST
+    // line for each slot, and says nothing about why the slot is down.
+    `${at(300)} b: down but restarted 300s ago (<2700s), leaving it to boot`,
+    `${at(300)} c: down but restarted 300s ago (<2700s), leaving it to boot`,
   ].join('\n'))
   process.env.KAGGLE_WATCHDOG_DIR = dir
   try {

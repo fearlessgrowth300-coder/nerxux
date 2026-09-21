@@ -289,7 +289,10 @@ function kaggleSlotReason(slotId) {
   let failureAt = 0
   try {
     const lines = fs.readFileSync(path.join(WATCHDOG_DIR, 'watchdog.log'), 'utf8').trimEnd().split(/\r?\n/)
-    const last = lines.reverse().find((l) => l.includes(` ${slotId}: `))
+    // The NEWEST line for a slot is usually the 5-minutely "down but restarted
+    // Ns ago, leaving it to boot" heartbeat, which says nothing about why. Only
+    // an OUTCOME line does.
+    const last = lines.reverse().find((l) => l.includes(` ${slotId}: `) && /quota|error|successfully pushed/i.test(l))
     if (last) {
       const said = last.slice(last.indexOf(` ${slotId}: `) + slotId.length + 3).trim()
       const at = Date.parse(last.slice(0, last.indexOf(' ')))
