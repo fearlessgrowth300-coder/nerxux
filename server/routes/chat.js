@@ -13,7 +13,7 @@ import { callMcpTool, queuedJobHint } from '../lib/mcp.js'
 import { shouldAttachAgentTools } from '../lib/needsTools.js'
 import { savePending, takePending } from '../lib/pendingApprovals.js'
 import { buildNativeToolset } from '../lib/nativeTools.js'
-import { createJob, completeJob, failJob, touchJob, cancelJob, setRescueHandler, listRunningJobs } from '../lib/chatJobs.js'
+import { createJob, completeJob, failJob, touchJob, cancelJob, setRescueHandler, listRunningJobs, takeInterrupted } from '../lib/chatJobs.js'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { executeAgentTool, AGENT_GUIDANCE } from '../lib/agentLoop.js'
 import { AGENT_TOOL_DEFS, AGENT_TOOL_NAMES, observationText, toStep } from '../lib/agentTools.js'
@@ -61,6 +61,36 @@ setRescueHandler(async (job) => {
   // Bump the chat so History shows it as the latest one.
   await supabaseAdmin.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', job.conversationId)
 })
+// A turn that was still generating when the server restarted (a deploy) leaves
+// no reply — the generation lived in memory and died with the process. Without
+// this the chat just shows the user's message and nothing after it, and a
+// reload brings nothing back. On startup, drop one visible assistant note into
+// each affected conversation so History shows an honest "resume" prompt instead
+// of silence. Runs once; the graveyard file is one-shot.
+;(async () => {
+  const hit = takeInterrupted()
+  if (!hit.length) return
+  const now = Date.now()
+  for (const { conversationId, userId } of hit) {
+    if (!conversationId) continue
+    try {
+      await supabaseAdmin.from('conversation_messages').insert({
+        conversation_id: conversationId,
+        user_id: userId,
+        role: 'assistant',
+        content: '⚠️ This turn was interrupted by a server update before it finished, so no reply was saved. ' +
+          'Your message above is kept — send "continue" to pick up where it left off. Any files or commits it already made are still there.',
+        model: null,
+        data: { id: randomUUID(), interrupted: true },
+        created_at: new Date(now).toISOString(),
+      })
+      await supabaseAdmin.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', conversationId)
+    } catch (err) {
+      logErrorSummary('recoverInterrupted', err)
+    }
+  }
+})()
+
 router.use(requireAuth)
 
 // Provider/model metadata for router "tools".

@@ -67,17 +67,35 @@ const graveyard = new Map() // id -> userId
 const savedJobs = new Map() // id -> { userId, conversationId, at }
 export const SAVED_TTL_MS = 24 * 60 * 60_000
 // Exported for tests — production just calls it once at import time, below.
+// Jobs that were mid-generation when the process last exited, with the
+// conversation each belonged to — so startup can leave a visible breadcrumb in
+// that chat (see recoverInterrupted in routes/chat.js). Drained once.
+let interrupted = []
 export function loadGraveyard() {
   try {
-    for (const { id, userId } of JSON.parse(fs.readFileSync(GRAVEYARD_FILE, 'utf8'))) graveyard.set(id, userId)
+    const entries = JSON.parse(fs.readFileSync(GRAVEYARD_FILE, 'utf8'))
+    for (const e of entries) {
+      graveyard.set(e.id, e.userId)
+      if (e.conversationId) interrupted.push({ conversationId: e.conversationId, userId: e.userId })
+    }
     fs.unlinkSync(GRAVEYARD_FILE) // one-shot — only the immediately-next poll needs this
   } catch {}
 }
 loadGraveyard()
 
+// Startup drains this to write "interrupted, send continue" into each chat that
+// had a live turn killed by the restart. Returns them once, then forgets.
+export function takeInterrupted() {
+  const out = interrupted
+  interrupted = []
+  return out
+}
+
 // Called on SIGTERM/SIGINT (see index.js) just before the process exits.
 export function saveGraveyard() {
-  const running = [...jobs.values()].filter((j) => j.status === 'running').map((j) => ({ id: j.id, userId: j.userId }))
+  const running = [...jobs.values()]
+    .filter((j) => j.status === 'running')
+    .map((j) => ({ id: j.id, userId: j.userId, conversationId: j.conversationId || null }))
   if (!running.length) return
   try { fs.writeFileSync(GRAVEYARD_FILE, JSON.stringify(running)) } catch {}
 }

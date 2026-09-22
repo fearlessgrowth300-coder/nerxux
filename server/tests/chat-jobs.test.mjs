@@ -57,15 +57,30 @@ test('saveGraveyard records only still-running jobs, keyed to their owner', () =
   // Other tests in this file leave their own running/finished jobs behind
   // (module-level `jobs` Map) — assert on this test's own entries, not on
   // the file being exactly these two.
-  const survivor = createJob('graveyard-test-user', new AbortController(), 0)
+  const survivor = createJob('graveyard-test-user', new AbortController(), 0, 'conv-abc')
   const finished = createJob('graveyard-test-user', new AbortController(), 0)
   completeJob(finished, { messages: [] }, 1) // already done — not the server's fault, not recorded
 
   saveGraveyard()
   const written = JSON.parse(fs.readFileSync(GRAVEYARD_FILE, 'utf8'))
-  assert.deepEqual(written.find((w) => w.id === survivor.id), { id: survivor.id, userId: 'graveyard-test-user' })
+  // conversationId rides along so startup can leave a breadcrumb in that chat.
+  assert.deepEqual(written.find((w) => w.id === survivor.id),
+    { id: survivor.id, userId: 'graveyard-test-user', conversationId: 'conv-abc' })
   assert.equal(written.some((w) => w.id === finished.id), false)
   fs.unlinkSync(GRAVEYARD_FILE)
+})
+
+test('an interrupted job hands its conversation to startup once, for a breadcrumb', async () => {
+  const { takeInterrupted } = await import('../lib/chatJobs.js')
+  // The file a prior process wrote: a running job with its conversation.
+  fs.writeFileSync(GRAVEYARD_FILE, JSON.stringify([
+    { id: 'j1', userId: 'bob', conversationId: 'conv-1' },
+    { id: 'j2', userId: 'bob', conversationId: null }, // no chat to write into — skipped
+  ]))
+  loadGraveyard()
+  const got = takeInterrupted()
+  assert.deepEqual(got, [{ conversationId: 'conv-1', userId: 'bob' }], 'only jobs with a conversation are recoverable')
+  assert.deepEqual(takeInterrupted(), [], 'drained once — a second startup pass writes nothing')
 })
 
 test('a job the graveyard remembers gets an honest, specific answer instead of a bare 404 — and only for its owner', () => {
