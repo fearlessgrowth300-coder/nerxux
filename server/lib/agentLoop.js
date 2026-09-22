@@ -82,6 +82,8 @@ Available Tools:
 - run_code(language, code, profile, projectPath): Runs a code snippet in the sandbox.
 - run_on_pod(command): Runs a shell command directly on the RunPod GPU pod.
 - web_search(query): Searches the live web and returns real results (only offered when the user has web search turned on).
+- read_web_page(url): Reads a public page as plain text — a simple fetch, no JavaScript and no login. Use it for documentation.
+- browser_open(url) / browser_read / browser_click(text) / browser_fill(field,value) / browser_key(key): a REAL browser on the host that runs JavaScript and keeps the user's saved logins. Use these — not read_web_page — for anything read_web_page cannot reach: a page behind a sign-in, a dashboard, an app that renders its content with JavaScript, or a site that returned nothing useful as plain text. Typical flow: browser_open the page, browser_read to see it, browser_click / browser_fill / browser_key to move through it, browser_read again to see what changed. If a page needs a login, do NOT ask for the password — tell the user to sign in on the Browser panel, then continue in the same session.
 
 Git works in the sandbox (clone, commit, branch, diff all work with no setup).
 COMMIT your work as you go on a feature branch, with clear messages — that is
