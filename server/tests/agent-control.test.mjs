@@ -6,7 +6,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { controlledAgentTool } from '../lib/agentControl.js'
 import { completionStatus } from '../lib/agentCompletion.js'
-import { readAgentState, withAgentState, verificationFooter, evaluateAssertions } from '../lib/agentState.js'
+import { readAgentState, withAgentState, verificationFooter, evaluateAssertions, readProjectCheckpoint, agentStatePrompt } from '../lib/agentState.js'
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-test-'))
 process.env.NEXUS_AGENT_STATE_DIR = dir
@@ -146,4 +146,42 @@ test('read-only shell commands do not stale passing checks; mutating ones do', a
     await f.run('execute_command', { command })
     assert.equal((await f.state()).revision, before + 1, command)
   }
+})
+
+test('later turns can retrieve exact redacted output and search the command that produced it', async () => {
+  const f = fixture()
+  const token = 'ghp_' + 'a'.repeat(36)
+  const output = 'start\n' + 'important result\n'.repeat(350) + token + '\nend'
+  const run = (name, args = {}) => controlledAgentTool({ name, args, sessionId: f.sessionId, userId: f.userId }, async () => ({ ...success, stdout: output }))
+  const executed = await run('execute_command', { command: 'npm test' })
+  const found = await f.run('inspect_execution', { query: 'npm test' })
+  assert.match(found.stdout, new RegExp(`"id": ${executed.evidenceId}`))
+  const page = await f.run('inspect_execution', { evidenceId: executed.evidenceId, start: 4000, limit: 5000 })
+  assert.match(page.stdout, /important result/)
+  assert.doesNotMatch(page.stdout, new RegExp(token))
+  assert.equal((await f.state()).events.find(e => e.id === executed.evidenceId).outputChars > 600, true)
+})
+
+test('successful work and verified checkpoints are remembered per project with stale revisions visible', async () => {
+  const f = fixture()
+  await f.run('list_files', { projectPath: '/root/checkpoint-project' })
+  await f.run('write_file', { path: 'src/initial.js', content: 'first version' })
+  const build = await f.run('execute_command', { command: 'node build.js' })
+  const checked = await f.run('verify_work', { label: 'Build output is present', kind: 'build', command: 'node test.js', assertions: [{ type: 'contains', value: 'observed' }] })
+  const memory = await readProjectCheckpoint(f.userId, '/root/checkpoint-project')
+  assert.equal(memory.latestVerified.evidenceId, checked.evidenceId)
+  assert.equal(memory.successfulRuns.at(-1).command, 'node build.js')
+  const otherSession = randomUUID()
+  const otherRun = (name, args) => controlledAgentTool({ name, args, sessionId: otherSession, userId: f.userId }, async () => success)
+  await otherRun('list_files', { projectPath: '/root/checkpoint-project' })
+  assert.match(await agentStatePrompt(f.userId, otherSession), /Build output is present/)
+  const recovered = await otherRun('inspect_execution', { sessionId: f.sessionId, evidenceId: build.evidenceId })
+  assert.match(recovered.stdout, /node build\.js/)
+  assert.match(recovered.stdout, /observed fixture/)
+  assert.equal((await otherRun('inspect_execution', { sessionId: f.sessionId, evidenceId: 99999 })).ok, false)
+  assert.equal((await completionStatus(f.userId, f.sessionId)).verified, true)
+  await otherRun('write_file', { path: 'src/external.js', content: 'another chat changed the project' })
+  assert.equal((await completionStatus(f.userId, f.sessionId)).verified, false, 'another chat makes the old proof stale')
+  await f.run('write_file', { path: 'src/new.js', content: 'changed' })
+  assert.equal((await f.state()).latestVerified.revision < (await f.state()).revision, true)
 })

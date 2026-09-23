@@ -23,6 +23,7 @@ import {
 } from '../lib/conversations'
 import { getModelById } from '@shared/models'
 import { readWorkspace, writeWorkspace, editedHistory, mergeHistory, hasReplyToLastMessage } from '../lib/chatWorkspace'
+import { modelHistory } from '../lib/modelHistory'
 
 const CHIPS = [
   { label: 'Code', Icon: FileIcon, text: 'Help me write code that ' },
@@ -344,7 +345,7 @@ export default function Chat() {
     try {
       const systemPrompt = await buildSystemPrompt()
       const { messages: replies, routing, duplicate, saved } = await sendChat({
-        history: history.map(({ role, content }) => ({ role, content })),
+        history: modelHistory(history),
         modelA, modelB, pipeline, systemPrompt, videoContext, auto,
         attachments: media,
         webSearch,

@@ -89,6 +89,23 @@ supabase/schema.sql
 scripts/deploy_hostinger_server.py
 ```
 
+### Agent evidence and project checkpoints
+
+The web client includes a bounded excerpt of saved tool steps in the next
+model request. The server keeps redacted command output in per-conversation
+evidence files under `NEXUS_AGENT_STATE_DIR` (default:
+`~/.local/state/nexus-agent`). The agent can call `inspect_execution` with a
+`query`, or with `evidenceId` plus `start` and `limit`, to recover exact output
+that no longer fits in chat context. A project outcome from another chat also
+requires its indexed `sessionId`. Back up this state directory with VPS app
+data; deleting it loses the evidence archive.
+
+Successful commands and passing `verify_work` checks are saved per user and
+project path. Project checkpoints are historical evidence, not proof that the
+current files still match. Every potentially mutating Nexus tool advances the
+project generation, including changes made from another chat; later responses
+mark an older check stale until the current revision is verified again.
+
 ---
 
 ## Deploying

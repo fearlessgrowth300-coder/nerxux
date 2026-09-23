@@ -134,8 +134,8 @@ export const AGENT_TOOL_DEFS = [
     input_schema: { type: 'object', properties: { command: str('Command to run on the pod') }, required: ['command'] },
   },
   {
-    name: 'inspect_execution', description: 'Read the durable machine, project, diagnostic checkpoint, recent evidence IDs, verification checks and next step. Use at the start of resumed work.',
-    input_schema: { type: 'object', properties: {} },
+    name: 'inspect_execution', description: 'Read durable execution state, or retrieve exact redacted command/output by evidenceId. Use start and limit to page through long output. Check the revision of a past success against the current revision.',
+    input_schema: { type: 'object', properties: { evidenceId: { type: 'integer', minimum: 1 }, sessionId: str('Only for an evidence ID indexed in this project from another conversation'), query: str('Find older evidence by command, path, result preview, or date'), start: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 20000 } } },
   },
   {
     name: 'set_execution_context', description: 'Explicitly change execution machine or project. Does not transfer files. Keep application work on the VPS; select pod only for a task that needs execution there, never merely because Turbo is selected.',

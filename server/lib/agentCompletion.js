@@ -1,14 +1,16 @@
-import { readAgentState, verificationFooter } from './agentState.js'
+import { readAgentState, readProjectCheckpoint, verificationFooter } from './agentState.js'
 import { redactSecrets } from './redact.js'
 
 export async function completionStatus(userId, sessionId) {
   const s = await readAgentState(userId, sessionId)
   const checks = s.checks.filter(c => c.revision === s.revision)
+  const projectMemory = s.projectPath ? await readProjectCheckpoint(userId, s.projectPath) : null
+  const projectCurrent = !s.projectPath || (s.latestVerified?.projectGeneration === (projectMemory?.generation || 0))
   // Only FILE changes call for a verification record. Counting every command
   // meant "what is in this folder?" -> ls -> the reply came back stamped
   // "Work is not verified complete", which is noise, not rigor.
   const changed = (s.changes || []).length > 0
-  const verified = changed && checks.some(c => c.ok) && !checks.some(c => !c.ok) && !s.inFlight && s.gateAfter === null && !(s.jobs || []).some(j => j.status === 'running')
+  const verified = changed && projectCurrent && checks.some(c => c.ok) && !checks.some(c => !c.ok) && !s.inFlight && s.gateAfter === null && !(s.jobs || []).some(j => j.status === 'running')
   return { changed, verified, needsVerification: changed && !verified, revision: s.revision }
 }
 
@@ -31,7 +33,7 @@ export function createCompletionCheck(userId, sessionId) {
 
 export async function finishAgentResponse(content, userId, sessionId) {
   const status = await completionStatus(userId, sessionId)
-  const heading = status.needsVerification ? '**Work is not verified complete.** The model’s report below has not passed the required checks.\n\n' : ''
+  const heading = status.needsVerification ? '**Current revision needs verification.** The command results below are preserved, but the required checks have not all passed.\n\n' : ''
   // A read-only turn (orientation, a question answered with ls/cat) changed
   // nothing, so "Deployment is unverified" under it is noise. The footer is
   // for turns that changed files.

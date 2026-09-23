@@ -2,7 +2,7 @@ import os from 'node:os'
 import { sandboxJob } from './sandboxJobs.js'
 import { redactToolData } from './redact.js'
 import path from 'node:path'
-import { withAgentState, addEvidence, stateSummary, safeNote, evaluateAssertions } from './agentState.js'
+import { withAgentState, addEvidence, saveEvidenceOutput, inspectEvidenceOutput, findEvidence, saveProjectCheckpoint, saveProjectOutcome, readProjectCheckpoint, bumpProjectRevision, stateSummary, safeNote, evaluateAssertions } from './agentState.js'
 
 // Reading and browsing, not building. The browser_* tools act on a web page,
 // never on the project's files, so they must not bump the revision — that
@@ -62,13 +62,28 @@ const normalizePath = (p) => {
 export async function controlledAgentTool(input, execute, transfer) {
   const { userId, sessionId, name, args = {} } = input
   return withAgentState(userId, sessionId, async (s, persist) => {
-    const finish = (r) => {
+    const finish = async (r) => {
       r = redactToolData(r)
       const event = addEvidence(s, name, args, r)
-      return { ...r, evidenceId: event.id, context: { ...stateSummary(s), recentEvidence: undefined, checks: undefined } }
+      await saveEvidenceOutput(userId, sessionId, event, r)
+      const projectMemory = await readProjectCheckpoint(userId, s.projectPath)
+      return { ...r, evidenceId: event.id, context: { ...stateSummary(s, projectMemory), recentEvidence: undefined, checks: undefined } }
     }
     try {
-      if (name === 'inspect_execution') return finish(ok(JSON.stringify(stateSummary(s), null, 2)))
+      if (name === 'inspect_execution') {
+        const projectMemory = await readProjectCheckpoint(userId, s.projectPath)
+        const otherSession = args.sessionId && args.sessionId !== sessionId ? args.sessionId : null
+        if (otherSession && ![
+          projectMemory?.latestVerified,
+          ...(projectMemory?.successfulRuns || []),
+        ].some(ref => ref?.sessionId === otherSession && ref?.evidenceId === args.evidenceId)) {
+          return finish(fail('That evidence ID is not indexed for this project.'))
+        }
+        const output = Number.isSafeInteger(args.evidenceId)
+          ? await inspectEvidenceOutput(userId, otherSession || sessionId, args.evidenceId, args.start, args.limit, otherSession ? null : s)
+          : args.query ? JSON.stringify({ conversation: findEvidence(s, args.query), project: (projectMemory?.successfulRuns || []).filter(run => [run.command, run.observed, run.at].some(v => String(v || '').toLowerCase().includes(String(args.query).toLowerCase()))).slice(-30) }, null, 2) : JSON.stringify({ ...stateSummary(s, projectMemory), projectMemory }, null, 2)
+        return finish(ok(output))
+      }
       if (name === 'job_status' || name === 'stop_job') {
         const job = (s.jobs || []).find(j => j.id === args.jobId)
         if (!job) return finish(fail('Unknown job for this conversation. Use inspect_execution to find its job ID.'))
@@ -138,6 +153,7 @@ export async function controlledAgentTool(input, execute, transfer) {
       const mayMutate = !inspections.has(name) && name !== 'verify_work' && !diagnostic
       if (mayMutate) s.projectLocked = true
       if (mayMutate) s.revision++
+      if (mayMutate && s.projectPath) s.projectGeneration = await bumpProjectRevision(userId, s.projectPath)
       const previousFlight = s.inFlight
       s.inFlight = { tool: name, startedAt: new Date().toISOString() }
       await persist()
@@ -179,8 +195,15 @@ export async function controlledAgentTool(input, execute, transfer) {
         if (!result.ok) { s.failures++; if (s.failures >= 3 && s.gateAfter === null) s.gateAfter = s.sequence + 1 }
         else s.failures = 0
       }
-      const decorated = finish(result)
+      const decorated = await finish(result)
       const event = s.events.at(-1)
+      if (result.ok && result.stdout && ['execute_command', 'run_code', 'run_on_pod'].includes(name)) {
+        await saveProjectOutcome(userId, s.projectPath, {
+          sessionId, evidenceId: event.id, revision: s.revision, at: event.at,
+          command: safeNote(args.command).slice(0, 240), observed: safeNote(result.stdout).slice(0, 360),
+          verified: false,
+        })
+      }
       if (diagnostic) event.diagnostic = true
       if (name === 'verify_work') {
         // Same check = same label OR same command. Labels are model prose and drift
@@ -197,6 +220,17 @@ export async function controlledAgentTool(input, execute, transfer) {
         // FAIL still blocks; a fail of a different kind (build vs test) does too.
         if (result.ok) s.checks = s.checks.filter(c => c.ok || c.kind !== args.kind || c.environment !== s.environment || c.revision !== s.revision)
         s.checks = s.checks.slice(-20)
+        if (result.ok) {
+          s.latestVerified = {
+            evidenceId: event.id, revision: s.revision, environment: s.environment,
+            projectPath: s.projectPath, label: safeNote(args.label), kind: args.kind,
+            command: safeNote(args.command || `job ${args.jobId}`),
+            observed: safeNote(result.stdout), at: event.at,
+            projectGeneration: s.projectPath ? (await readProjectCheckpoint(userId, s.projectPath))?.generation || 0 : null,
+          }
+          s.nextStep = `Verified ${s.latestVerified.label} at revision ${s.revision}; evidence #${event.id}. Continue remaining requirements or inspect this evidence before changing files.`
+          await saveProjectCheckpoint(userId, s.projectPath, { ...s.latestVerified, sessionId, historical: true })
+        }
       }
       return { ...decorated, machine: result.host || os.hostname() }
     } catch (e) { return finish(fail(e.message)) }
