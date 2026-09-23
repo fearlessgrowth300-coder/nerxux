@@ -4,6 +4,7 @@ Unlike deploy_hostinger_server.py this does not reset Git or rewrite .env.
 Run after committing and pushing the exact local source being deployed.
 """
 import hashlib
+import json
 import os
 import posixpath
 import subprocess
@@ -63,6 +64,11 @@ def main():
         if '--status' in sys.argv:
             print('PM2 PID:', run(ssh, 'pm2 pid nexus-server'))
             print(wait_health(ssh)[:250])
+            try:
+                props = json.loads(run(ssh, 'curl -fsS --max-time 5 http://127.0.0.1:20140/props'))
+                print('Kaggle A:', {'context': props.get('default_generation_settings', {}).get('n_ctx'), 'vision': props.get('modalities', {}).get('vision')})
+            except (RuntimeError, ValueError):
+                print('Kaggle A: endpoint unavailable')
             return
         targets = ' '.join(FILES)
         remote_dirty = run(ssh, f'cd {REMOTE} && git status --porcelain -- {targets}')

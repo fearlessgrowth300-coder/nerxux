@@ -110,19 +110,21 @@ mark an older check stale until the current revision is verified again.
 
 ## Deploying
 
+From the repo root, after committing and pushing reviewed changes:
+
 ```bash
-cd scripts && python deploy_hostinger_server.py
+python scripts/release_nexus_safe.py
+python scripts/release_nexus_safe.py --status
 ```
 
-It SSHes to the VPS, does `git fetch origin main && git reset --hard
-origin/main`, `npm ci`, restarts PM2, and **asserts the deployed commit equals
-local HEAD**, printing `Deployed commit: <sha>`.
+The safe release copies only its listed server files after checking those
+exact VPS files have no local edits. It backs them up, restarts PM2 and waits
+for health. It does not rewrite `.env`, touch Viewe, or reset the worktree.
+Update its `FILES` list when another server file must ship. The older
+`deploy_hostinger_server.py` still uses `git reset --hard`; do not run it over
+unreviewed VPS changes.
 
-* **Push before deploying** — it deploys what is on GitHub, not your working tree.
-* If the printed sha is not your HEAD, the deploy did nothing. (It used to
-  ignore exit codes and report success while shipping nothing; it now fails loudly.)
-* **Never `sftp` files into `/root/nerxux`** — `reset --hard` discards them.
-* The client deploys itself via Vercel on push to `main`. Client-only changes
+* **Push before deploying** — the client auto-deploys via Vercel on `main`; client-only changes
   need no server restart.
 * **A deploy restarts the server, which kills the GPU tunnel and any in-flight
   chat job.** Do not deploy while the user is mid-task.
