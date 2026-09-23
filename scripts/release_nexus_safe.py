@@ -8,6 +8,7 @@ import os
 import posixpath
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import paramiko
@@ -37,6 +38,17 @@ def run(ssh, command):
     return out.strip()
 
 
+def wait_health(ssh):
+    last = None
+    for _ in range(15):
+        try:
+            return run(ssh, 'curl -fsS --max-time 5 http://127.0.0.1:4000/api/health')
+        except RuntimeError as error:
+            last = error
+            time.sleep(3)
+    raise last
+
+
 def main():
     env = require('HOSTINGER_HOST', 'HOSTINGER_USER', 'HOSTINGER_SSH_KEY_PATH')
     commit = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], cwd=ROOT, text=True).strip()
@@ -48,6 +60,10 @@ def main():
     ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
     ssh.connect(env['HOSTINGER_HOST'], username=env['HOSTINGER_USER'], key_filename=env['HOSTINGER_SSH_KEY_PATH'])
     try:
+        if '--status' in sys.argv:
+            print('PM2 PID:', run(ssh, 'pm2 pid nexus-server'))
+            print(wait_health(ssh)[:250])
+            return
         targets = ' '.join(FILES)
         remote_dirty = run(ssh, f'cd {REMOTE} && git status --porcelain -- {targets}')
         if remote_dirty:
@@ -73,7 +89,7 @@ def main():
                 sftp.posix_rename(staged, remote)
                 installed.append(rel)
             run(ssh, 'pm2 restart nexus-server --update-env >/dev/null')
-            health = run(ssh, 'curl -fsS --max-time 15 http://127.0.0.1:4000/api/health')
+            health = wait_health(ssh)
             print(f'Released {commit}: {len(installed)} server files; health={health[:250]}')
             print(f'Previous files preserved at {backup}')
         except Exception:
@@ -83,6 +99,7 @@ def main():
                 run(ssh, f'cp -- {old} {remote}')
             if installed:
                 run(ssh, 'pm2 restart nexus-server --update-env >/dev/null')
+                print('Release failed; previous server files restored.')
             raise
         finally:
             sftp.close()
