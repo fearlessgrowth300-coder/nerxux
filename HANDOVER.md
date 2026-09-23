@@ -131,6 +131,32 @@ local HEAD**, printing `Deployed commit: <sha>`.
 
 ## Compute: "Always On" vs "Turbo" vs "Kaggle"
 
+### Live Kaggle slots (verified 2026-09-23)
+
+The 2026-09-16 single-account notes below are historical: the live VPS now has
+three independent slots, A/B/C, on reverse-tunnel ports 20140/20141/20142.
+The current slot A owner is `olasales1`; B and C were not changed in this swap.
+Do not put Kaggle API tokens or tunnel-key contents in this repository.
+
+- On the VPS, `/root/.kaggle-accounts/token_a` is the private (0600) API token.
+  A's previous token is kept in a private rollback file alongside it.
+- `/root/.kaggle-accounts/kernels/a/kernel-metadata.json` identifies
+  `olasales1/notebook5db41fbc2c` and its private input dataset
+  `olasales1/nexus-tunnel-key`. The notebook reads the restricted A tunnel key
+  from that dataset. Its source remains in the same staging directory.
+- `/root/.kaggle-accounts/watchdog.sh` checks all three ports every five minutes
+  and pushes a stopped notebook after its 45-minute startup cooldown. It uses
+  `token_a` and A's staged metadata, so keep those together when swapping A.
+- The 2026-09-23 A run mounted the dataset, validated the SSH key, built and
+  downloaded the model, opened port 20140, returned OK from `/health`, reported
+  131072 context and vision from `/props`, and generated `READY` via `/completion`.
+  Nexus's saved compute selection was `kaggle` on slot `a`. A full authenticated
+  Nexus chat turn was not separately exercised in this handover check.
+
+The older bullets below describe the original one-slot setup; in particular,
+their claims that the tunnel key is absent from the VPS, that only Kaggle Secrets
+are used, and that outbound SSH is unverified are no longer current.
+
 **Kaggle (added 2026-09-16)** is a third mode: a Kaggle notebook's 2x T4 GPU (free,
 ~30 GPU-hrs/week), reached over a **reverse** SSH tunnel — the notebook opens it INTO
 this VPS (backwards from Turbo, where the VPS opens the tunnel out to RunPod), because
