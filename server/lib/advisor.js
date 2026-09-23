@@ -128,7 +128,10 @@ export async function advise({ userId, record, goal = '', signal = null }) {
     `The agent's execution record:\n${String(record || '').slice(0, 6000)}`
   // Subscription first, metered keys second.
   const fromCli = await adviseViaCli(prompt, SYSTEM)
-  if (fromCli) return fromCli
+  if (fromCli) {
+    console.log('[nexus-ai adviser] advised the agent via the Claude subscription (CLI)')
+    return fromCli
+  }
   for (const { provider, model } of ADVISOR_MODELS) {
     let apiKey = null
     try {
@@ -139,13 +142,19 @@ export async function advise({ userId, record, goal = '', signal = null }) {
       const { run } = await ADAPTERS[provider]()
       const res = await run({ prompt, systemPrompt: SYSTEM, skills: [], apiKey, model, signal })
       const text = String(res?.content || '').trim()
-      if (text) return text
+      if (text) {
+        console.log(`[nexus-ai adviser] advised the agent via ${provider} (${model})`)
+        return text
+      }
     } catch {
       // This provider is out of credit, rate-limited or refusing — try the
       // next one rather than failing the turn. An adviser is an optimisation,
       // never a dependency.
     }
   }
+  // Reached only when the CLI is signed out AND no API key is connected, or
+  // every provider errored — so the agent ran with no stronger-model advice.
+  console.log('[nexus-ai adviser] no adviser available this turn (agent ran on the local model alone)')
   return null
 }
 
