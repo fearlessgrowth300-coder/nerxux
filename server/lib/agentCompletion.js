@@ -10,8 +10,10 @@ export async function completionStatus(userId, sessionId) {
   // meant "what is in this folder?" -> ls -> the reply came back stamped
   // "Work is not verified complete", which is noise, not rigor.
   const changed = (s.changes || []).length > 0
-  const verified = changed && projectCurrent && checks.some(c => c.ok) && !checks.some(c => !c.ok) && !s.inFlight && s.gateAfter === null && !(s.jobs || []).some(j => j.status === 'running')
-  return { changed, verified, needsVerification: changed && !verified, revision: s.revision }
+  const criteria = s.acceptanceCriteria || []
+  const missingCriteria = criteria.filter(criterion => !checks.some(c => c.ok && c.criterionId === criterion.id)).map(c => c.text)
+  const verified = changed && projectCurrent && checks.some(c => c.ok) && !checks.some(c => !c.ok) && !missingCriteria.length && !s.inFlight && s.gateAfter === null && !(s.jobs || []).some(j => j.status === 'running')
+  return { changed, verified, needsVerification: changed && !verified, revision: s.revision, missingCriteria }
 }
 
 export function createCompletionCheck(userId, sessionId) {
@@ -24,7 +26,7 @@ export function createCompletionCheck(userId, sessionId) {
     const status = await completionStatus(userId, sessionId)
     if (status.revision !== revision) { revision = status.revision; requests = 0 }
     if (!status.needsVerification || requests++ >= 2) return null
-    return 'Before finishing, run verify_work against the actual requirement and inspect its result. ' +
+    return `Before finishing, run verify_work against the actual requirement and inspect its result.${status.missingCriteria.length ? ` Unverified criteria: ${status.missingCriteria.join('; ').slice(0, 500)}.` : ''} ` +
       'There is no current complete verification record, or a failure/background job is unresolved. ' +
       'Use job_status for running work. Do not rewrite source merely to make an assertion pass. ' +
       'If verification is blocked, state the exact blocker and say the work is incomplete; do not claim success or a working public URL.'

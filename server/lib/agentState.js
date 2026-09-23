@@ -48,6 +48,25 @@ export async function withAgentState(userId, sessionId, action) {
   try { return await work } finally { if (queues.get(key) === work) queues.delete(key) }
 }
 
+// Save a handoff before the first tool call, so interrupted turns still have
+// the user's current task when they resume.
+export async function startAgentTurn(userId, sessionId, task) {
+  return withAgentState(userId, sessionId, s => {
+    const nextTask = clean(task, 500)
+    if (nextTask && !/^(continue|go on|carry on|keep going)[.!\s]*$/i.test(nextTask) && nextTask !== s.currentTask) {
+      s.acceptanceCriteria = []
+      s.currentTask = nextTask
+    }
+    s.workCheckpoint = {
+      task: s.currentTask || nextTask, revision: s.revision,
+      lastEvidenceId: s.events.at(-1)?.id ?? null,
+      lastObserved: s.events.at(-1)?.detail?.slice(0, 300) || '',
+      nextAction: s.nextStep || 'Inspect current project state and continue the request.',
+      updatedAt: new Date().toISOString(),
+    }
+  })
+}
+
 export function addEvidence(s, name, args, result) {
   const event = {
     id: ++s.sequence, tool: name, ok: result.ok === true, exitCode: result.exitCode,
@@ -60,6 +79,15 @@ export function addEvidence(s, name, args, result) {
   }
   s.events.push(event)
   s.events = s.events.slice(-2000)
+  s.workCheckpoint = {
+    task: s.currentTask || s.workCheckpoint?.task || '',
+    revision: s.revision, lastEvidenceId: event.id,
+    lastObserved: `${name} ${event.ok ? 'succeeded' : 'failed'}: ${event.detail.slice(0, 300)}`,
+    nextAction: name === 'record_progress' ? s.nextStep : event.ok
+      ? 'Continue the request; verify current files before claiming completion.'
+      : `Inspect evidence #${event.id} and diagnose the failure before another edit.`,
+    updatedAt: event.at,
+  }
   if (event.ok && ['write_file', 'edit_file', 'transfer_file'].includes(name)) {
     s.changes = [...(s.changes || []).filter(c => !(c.path === event.path && c.environment === event.environment)), { id: event.id, path: event.path, environment: event.environment, revision: event.revision }].slice(-100)
   }
@@ -141,6 +169,9 @@ export function stateSummary(s, projectMemory = null) {
     projectPath: s.projectPath, cwd: s.environment === 'pod' ? s.projectPath : s.projectPath ? '/workspace/project' : '/workspace',
     revision: s.revision, diagnosticRequired: s.gateAfter !== null,
     interruptedAction: s.inFlight, nextStep: s.nextStep,
+    workCheckpoint: s.workCheckpoint || null,
+    lastPerformance: s.lastPerformance || null,
+    acceptanceCriteria: (s.acceptanceCriteria || []).map(c => ({ id: c.id, text: c.text, verified: s.checks.some(v => v.ok && v.criterionId === c.id && v.revision === s.revision) })),
     jobs: (s.jobs || []).slice(-10),
     checks: s.checks.filter(c => c.revision === s.revision).slice(-8),
     changedFiles: (s.changes || []).slice(-10),
@@ -168,7 +199,10 @@ export async function projectNotes(projectPath) {
     const raw = await fs.readFile(path.join(projectPath, PROJECT_NOTES_FILE), 'utf8')
     const text = redactSecrets(raw).trim()
     if (!text) return ''
-    const cut = text.length > PROJECT_NOTES_MAX ? text.slice(0, PROJECT_NOTES_MAX) + '\n[... NEXUS.md truncated; read the file for the rest]' : text
+    const half = Math.floor((PROJECT_NOTES_MAX - 100) / 2)
+    const cut = text.length > PROJECT_NOTES_MAX
+      ? text.slice(0, half) + '\n[... NEXUS.md middle truncated; read the file for the rest ...]\n' + text.slice(-half)
+      : text
     return `\n\n# Project notes (${PROJECT_NOTES_FILE} at the project root — maintained by the team; update it when you change how the project is built, run or deployed)\n${cut}`
   } catch (e) {
     if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return ''

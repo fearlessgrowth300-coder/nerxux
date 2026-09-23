@@ -1076,6 +1076,7 @@ function Message({ message, sessionId, onEdit, disabled, retryOnly = false }) {
           ) : (
             <>
               {message.toolSteps?.length > 0 && <ToolStepsCard steps={message.toolSteps} />}
+              {message.performance && <p className="mb-2 text-xs text-gray-400">{message.performance.target} · {message.performance.modelCalls} model calls · {message.performance.tokensPerSecond ?? '—'} tokens/s · {Math.round(message.performance.wallMs / 1000)}s total</p>}
               <Markdown sessionId={sessionId}>{message.content}</Markdown>
               <MediaBlock media={message.media} type={message.mediaType} list={message.mediaList} />
             </>

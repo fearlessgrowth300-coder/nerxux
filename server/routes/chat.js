@@ -129,6 +129,7 @@ function toMessage(result, { modelLabel, stage } = {}) {
     ...(result.media ? { media: result.media, mediaType: result.type } : {}),
     ...(result.mediaList?.length ? { mediaList: result.mediaList } : {}),
     ...(result.toolSteps?.length ? { toolSteps: result.toolSteps } : {}),
+    ...(result.performance ? { performance: result.performance } : {}),
   }
 }
 

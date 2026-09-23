@@ -6,7 +6,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { controlledAgentTool } from '../lib/agentControl.js'
 import { completionStatus } from '../lib/agentCompletion.js'
-import { readAgentState, withAgentState, verificationFooter, evaluateAssertions, readProjectCheckpoint, agentStatePrompt } from '../lib/agentState.js'
+import { readAgentState, withAgentState, verificationFooter, evaluateAssertions, readProjectCheckpoint, agentStatePrompt, startAgentTurn } from '../lib/agentState.js'
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-state-test-'))
 process.env.NEXUS_AGENT_STATE_DIR = dir
@@ -118,7 +118,10 @@ test('a passing check supersedes earlier failures of its kind, however it is wor
   const check = (label, command, kind = 'deployment', pass = command === 'ok') => f.run('verify_work', { label, kind, command, assertions: [{ type: 'contains', value: pass ? 'observed' : 'nope' }] })
   await check('Real-inbox source correct + wired', 'curl a')
   await check('build compiles', 'make', 'build')
-  assert.equal((await f.state()).checks.filter(c => !c.ok).length, 2) // two in a row: below the diagnostic-checkpoint threshold
+  assert.equal((await f.state()).checks.filter(c => !c.ok).length, 2)
+  assert.notEqual((await f.state()).gateAfter, null, 'two failed verification cycles require a diagnosis')
+  await f.run('read_file', { path: 'failing-source.js' })
+  assert.ok((await f.run('diagnose_failure', { cause: 'The output assertions identified two independent unmet requirements', nextCheck: 'Rerun the deployment and build checks' })).ok)
   await check('Real-inbox source: variants + gate + API wiring', 'ok') // new label AND new command
   const s = await f.state()
   assert.deepEqual(s.checks.map(c => [c.kind, c.ok]), [['build', false], ['deployment', true]], 'only the same-kind failures are superseded')
@@ -146,6 +149,25 @@ test('read-only shell commands do not stale passing checks; mutating ones do', a
     await f.run('execute_command', { command })
     assert.equal((await f.state()).revision, before + 1, command)
   }
+})
+
+test('checkpoint survives every tool action and acceptance criteria require separate current proofs', async () => {
+  const f = fixture()
+  await startAgentTurn(f.userId, f.sessionId, 'Build and test a fixture')
+  await f.run('write_file', { path: 'a.py', content: 'pass' })
+  const checkpoint = (await f.state()).workCheckpoint
+  assert.equal(checkpoint.task, 'Build and test a fixture')
+  assert.ok(checkpoint.lastEvidenceId > 0)
+  assert.match(checkpoint.lastObserved, /write_file succeeded/)
+  const criteria = await f.run('set_acceptance_criteria', { criteria: ['Build passes', 'Feature test passes'] })
+  assert.ok(criteria.ok)
+  const check = id => f.run('verify_work', { criterionId: id, label: `criterion ${id}`, kind: 'test', command: 'positive', assertions: [{ type: 'json_number', field: 'items', min: 1 }] })
+  assert.ok((await check(1)).ok)
+  assert.equal((await completionStatus(f.userId, f.sessionId)).verified, false)
+  assert.ok((await check(2)).ok)
+  assert.equal((await completionStatus(f.userId, f.sessionId)).verified, true)
+  await f.run('write_file', { path: 'a.py', content: 'pass' })
+  assert.equal((await completionStatus(f.userId, f.sessionId)).verified, false)
 })
 
 test('later turns can retrieve exact redacted output and search the command that produced it', async () => {

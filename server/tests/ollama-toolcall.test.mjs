@@ -31,10 +31,11 @@ test('unrelated errors are not swallowed as parse failures', () => {
 // one already found to be too small for a file-writing tool call.
 test('Always On has room for a real tool call', async () => {
   const src = await import('node:fs').then((fs) => fs.promises.readFile('./adapters/ollama.js', 'utf8'))
-  const line = src.split('\n').find((l) => /\b(const|let) numPredict = generousBudget/.test(l))
-  const [, turbo, always] = line.match(/generousBudget \? (\d+) : (\d+)/)
+  const line = src.split('\n').find((l) => /\b(const|let) numPredict = isRunpod/.test(l))
+  const [, turbo, kaggle, always] = line.match(/isRunpod \? (\d+) : isKaggle \? (\d+) : (\d+)/)
   assert.ok(Number(always) >= 3000, `Always On cap ${always} is too small for a write_file call`)
   assert.ok(Number(turbo) > Number(always), 'Turbo should still get the bigger budget')
+  assert.ok(Number(kaggle) >= Number(always), 'Kaggle can emit a full tool call')
   // A turn that falls back to Always On mid-way must use the same Always On cap.
   const fallback = src.match(/const fallBackToAlwaysOn = \(\) => \{[\s\S]*?numPredict = (\d+)/)
   assert.ok(fallback, 'fallBackToAlwaysOn should set numPredict')

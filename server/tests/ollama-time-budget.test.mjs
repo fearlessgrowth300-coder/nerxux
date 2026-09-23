@@ -10,6 +10,8 @@ const { run, estimateReadSeconds, WRAPUP_MAX_READ_S, modelForTarget, ALWAYS_ON_M
 // A dense model with no learned speed: held to the 27B's measured read times.
 const DENSE = 'some-dense-model'
 const { createJob, sweepJobs, MAX_RUNTIME_MS, STALE_MS } = await import('../lib/chatJobs.js')
+const { switchToAlwaysOn } = await import('../lib/computeManager.js')
+switchToAlwaysOn()
 
 test('the read-time estimate matches what the Always On box measured', () => {
   // Ollama journal: 4,096 tokens in 282 s; 21,196 tokens in 3,343 s.
@@ -48,7 +50,7 @@ test('a slow step shows why it is slow instead of a silent spinner', async () =>
   try {
     const events = []
     // ~6k tokens with the tool definitions: minutes on the CPU, allowed.
-    const res = await run({ prompt: 'y'.repeat(3.2 * 3000), model: DENSE, onProgress: (e) => events.push(e) })
+    const res = await run({ prompt: 'y'.repeat(3.2 * 3000), model: ALWAYS_ON_MODEL, onProgress: (e) => events.push(e) })
     assert.equal(res.content, 'hi')
     assert.ok(events.some((e) => e.type === 'text' && /reading about \d+k tokens/.test(e.text)), 'a progress note explains the wait')
   } finally {
@@ -156,5 +158,5 @@ test('Always On sends a capped prompt, and never starts a step it cannot read AN
   assert.ok(ALWAYS_ON_ANSWER_S >= 120, 'time is kept free to write the answer')
   const src = await import('node:fs').then((fs) => fs.promises.readFile('./adapters/ollama.js', 'utf8'))
   assert.match(src, /\(readSeconds \+ ALWAYS_ON_ANSWER_S\) \* 1000 > remainingMs/, 'the pre-check counts reading + answering')
-  assert.match(src, /const WALL_CLOCK_BUDGET_MS = 60 \* 60 \* 1000/, 'Always On gets the same 60-minute turn as Turbo')
+  assert.match(src, /const WALL_CLOCK_BUDGET_MS = 15 \* 60 \* 1000/, 'a turn is capped at 15 minutes')
 })

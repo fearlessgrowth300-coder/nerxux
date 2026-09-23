@@ -240,7 +240,7 @@ for (const serverCtx of [32768, 131072]) {
     const sentTokens = sentBody.messages.reduce((n, m) => n + estimateTokens(m), 0)
     // Nexus's own reply budget (numPredict) plus the 512-token safety margin
     // must fit alongside what was sent, inside the window the server declared.
-    assert.ok(sentTokens + 12000 + 512 <= serverCtx,
+    assert.ok(sentTokens + sentBody.max_tokens + 512 <= serverCtx,
       `sent ${sentTokens} tokens (+ 12000 reply + 512 margin = ${sentTokens + 12512}) — must fit in the server's reported ${serverCtx}`)
   } finally {
     globalThis.fetch = realFetch
@@ -392,7 +392,7 @@ test('a mid-turn drop switches to ANOTHER live account, re-targeted and re-budge
     assert.equal(res.content, 'done on B', 'the turn must finish on the other live account')
     assert.equal(sentTo.filter((u) => u.startsWith(A.url)).length, 1, 'the dead account must not be retried in a loop')
     const tokens = sentToB.messages.reduce((n, m) => n + estimateTokens(m), 0)
-    assert.ok(tokens + 12000 + 512 <= 32768, `sent ${tokens} tokens to a 32k server — budget did not follow the switch`)
+    assert.ok(tokens + sentToB.max_tokens + 512 <= 32768, `sent ${tokens} tokens to a 32k server — budget did not follow the switch`)
   } finally {
     globalThis.fetch = realFetch
   }

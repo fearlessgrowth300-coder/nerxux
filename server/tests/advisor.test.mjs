@@ -37,7 +37,7 @@ test('advice enters the conversation labelled as guidance, not as the user', asy
 
 test('the turn keeps time back to land itself instead of being guillotined', async () => {
   const src = await fs.readFile('./adapters/ollama.js', 'utf8')
-  assert.match(src, /WRAP_UP_RESERVE_MS = 5 \* 60 \* 1000/, 'a reserve must exist')
+  assert.match(src, /WRAP_UP_RESERVE_MS = 2 \* 60 \* 1000/, 'a reserve must exist')
   assert.match(
     src, /WALL_CLOCK_BUDGET_MS - WRAP_UP_RESERVE_MS\) \{ timedOut = true; break \}/,
     'the tool loop must stop early enough to write a handoff',

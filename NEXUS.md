@@ -20,3 +20,16 @@ keys, or their encoded contents in this repository or in chat summaries.
 - A token by itself does not make the model available. Check the notebook run,
   the port-20140 `/props` response, and Nexus's selected mode before claiming
   connection. The watchdog may need about 30-45 minutes for a cold build.
+
+## Agent reliability (2026-09-23)
+
+- Agent state saves the current task, last observed tool result and evidence ID
+  after every action. On resume, inspect exact output before repeating work.
+- The client pins a small index of relevant old tool evidence to the latest
+  request. Historical results still require checking against current files.
+- Multi-part work uses `set_acceptance_criteria`; each criterion needs its own
+  current `verify_work` proof. Two failed verification attempts pause edits
+  until a fresh diagnosis. A turn has a 15-minute cap and 2-minute reserve.
+- Reply timing shows measured generation speed and wall time; it is diagnostic,
+  not a promise of task completion. A truncated response or intermediate
+  success is not evidence the whole project passed.

@@ -403,6 +403,11 @@ the agent loads it automatically.
 
 ## Gotchas that cost real time
 
+* Agent turns now have a 15-minute cap and a 2-minute wrap-up reserve. Each tool action persists a factual work checkpoint and evidence ID; the next turn can use `inspect_execution` for exact output.
+* The client pins a bounded index of relevant older tool evidence to the latest request. Project notes include both the beginning and end of a long `NEXUS.md` so recent handoffs remain visible.
+* For multi-part tasks the agent records acceptance criteria; each needs its own current `verify_work` proof. Two failed verification attempts on one revision pause edits until a fresh diagnosis.
+* Chat replies now show model calls, measured generation speed, and wall time. A slow Kaggle model is a compute limit, not evidence the task is complete.
+
 * Chat must stay an **async job** — Vercel kills requests at ~120 s.
 * `num_predict` too low truncates a tool call into an unparseable fragment.
 * Ollama returns `{error: {...}}` as an **object**; `new Error(obj)` becomes

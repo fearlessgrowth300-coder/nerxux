@@ -8,7 +8,7 @@ import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL, executeAgentTo
 import { toOpenAITools, AGENT_TOOL_NAMES, observationText, toStep, summarizeSteps } from '../lib/agentTools.js'
 import { createCompletionCheck, finishAgentResponse } from '../lib/agentCompletion.js'
 import { redactToolData } from '../lib/redact.js'
-import { agentStateParts, withAgentState, safeNote } from '../lib/agentState.js'
+import { agentStateParts, withAgentState, safeNote, startAgentTurn } from '../lib/agentState.js'
 import { advise, adviceMessage, shouldAdvise } from '../lib/advisor.js'
 import { createToolRecovery } from '../lib/toolRecovery.js'
 import { fitMessages, estimateTokens } from '../lib/fitContext.js'
@@ -228,7 +228,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const externalNames = new Set(tools.map((t) => t.name))
   // What the user actually asked for this turn — the adviser needs the goal,
   // not just the execution record.
-  const lastUserText = String(prompt || '').slice(0, 2000)
+  const lastUserText = String([...(history || [])].reverse().find(m => m?.role === 'user')?.content || prompt || '').split('\n\n[Saved tool evidence index')[0].slice(0, 2000)
   const agentTools = [
     ...(webSearch && hasBraveKey() ? [...AGENT_TOOLS, WEB_SEARCH_AGENT_TOOL] : AGENT_TOOLS),
     ...externalTools,
@@ -270,14 +270,14 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // (~12 min on a 22k-token chat, 2026-09-15) that allowed ONE step per
   // "continue" and cut the second one off at 88% read — pure waste. The step
   // pre-check below stops a turn cleanly instead of letting the limit cut it.
-  const WALL_CLOCK_BUDGET_MS = 60 * 60 * 1000
+  const WALL_CLOCK_BUDGET_MS = 15 * 60 * 1000
   // The last minutes of a turn belong to landing it, not to starting another
   // tool call. Measured over one project's 74 turns: 53% ran into the wall
   // mid-action, so the model never reached record_progress and the NEXT turn
   // opened blind — re-running git status, py_compile and the same probes to
   // work out where it was. Stopping early enough to write a handoff is what
   // turns a guillotined turn into a checkpoint.
-  const WRAP_UP_RESERVE_MS = 5 * 60 * 1000
+  const WRAP_UP_RESERVE_MS = 2 * 60 * 1000
   // This model tends to produce long hidden "thinking" before its actual
   // answer. num_predict bounds a single call so one runaway generation can't
   // eat the whole budget; Turbo (30-65 tok/s) gets a much higher ceiling.
@@ -290,7 +290,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   // too small above. A write_file carrying a real file cannot fit in 900
   // tokens, so the call was cut mid-emission and Ollama's tool parser
   // rejected the fragment ("XML syntax error ... unexpected end element").
-  let numPredict = generousBudget ? 12000 : 3000
+  let numPredict = isRunpod ? 8000 : isKaggle ? 4000 : 3000
   // The model supports far more, but Ollama defaults it to 32,768 — which a
   // build conversation crosses, after which EVERY message in that chat fails
   // with "exceeds the available context size". 64k is verified to fit on the
@@ -404,6 +404,8 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
   const recovery = createToolRecovery()
   const seenTexts = new Set()
   const requestStart = Date.now()
+  const performance = { modelCalls: 0, promptTokens: 0, generatedTokens: 0, promptEvalMs: 0, generationMs: 0, modelWallMs: 0, toolWallMs: 0, target: targetLabel }
+  if (userId && sessionId) await startAgentTurn(userId, sessionId, lastUserText)
   let parseRetries = 0
   let tunnelRetries = 0
   let kaggleRetries = 0
@@ -636,6 +638,13 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
       )
     }
 
+    performance.modelCalls++
+    performance.modelWallMs += Date.now() - readStart
+    performance.promptTokens += Number(data.prompt_eval_count) || 0
+    performance.generatedTokens += Number(data.eval_count) || 0
+    performance.promptEvalMs += (Number(data.prompt_eval_duration) || 0) / 1e6
+    performance.generationMs += (Number(data.eval_duration) || 0) / 1e6
+    performance.target = targetLabel
     learnReadSpeed(sendModel, generousBudget, promptTokens, data)
     const msg = data.message || {}
     const rawContent = msg.content || ''
@@ -733,6 +742,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     }
 
     for (const call of detectedCalls) {
+      const toolStartedAt = Date.now()
       if (call.name === 'read_file' && !generousBudget && call.args && call.args.limit == null) {
         call.args = { ...call.args, limit: ALWAYS_ON_READ_LINES }
       }
@@ -796,6 +806,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
         })
 
         const step = toStep(call.name, call.args, result)
+        performance.toolWallMs += Date.now() - toolStartedAt
         toolSteps.push(step)
         // Two failures in a row is the signal that the model is guessing, and
         // guessing is what the adviser is there to interrupt.
@@ -889,6 +900,9 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
 
   const completion = toolSteps.some(s => AGENT_TOOL_NAMES.has(s.tool) && !['web_search', 'read_web_page'].includes(s.tool))
     ? await finishAgentResponse(finalContent, userId, sessionId) : { content: finalContent }
+  performance.wallMs = Date.now() - requestStart
+  performance.tokensPerSecond = performance.generationMs > 0 ? Math.round(performance.generatedTokens * 100000 / performance.generationMs) / 100 : null
+  if (userId && sessionId) await withAgentState(userId, sessionId, s => { s.lastPerformance = performance })
   return {
     ok: true,
     provider: 'ollama',
@@ -897,6 +911,7 @@ export async function run({ prompt, history, systemPrompt, skills, model, sessio
     verificationStatus: completion.verificationStatus,
     model: usedModel,
     toolSteps: redactToolData(toolSteps),
+    performance,
     ...(mediaOut.length ? { media: mediaOut[0], mediaList: mediaOut } : {}),
   }
 }

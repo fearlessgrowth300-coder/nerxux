@@ -95,6 +95,17 @@ export async function controlledAgentTool(input, execute, transfer) {
         s.nextStep = safeNote(args.nextStep)
         return finish(ok('Next step saved. Completed changes and checks are tracked from actual tool results.'))
       }
+      if (name === 'set_acceptance_criteria') {
+        const items = Array.isArray(args.criteria) ? args.criteria : []
+        if (!items.length || items.length > 12 || items.some(v => typeof v !== 'string' || !v.trim())) return finish(fail('Supply 1-12 concrete criteria from the request.'))
+        const current = s.acceptanceCriteria || []
+        for (const item of items) {
+          const text = safeNote(item).slice(0, 240)
+          if (!current.some(c => c.text.toLowerCase() === text.toLowerCase())) current.push({ id: (current.at(-1)?.id || 0) + 1, text })
+        }
+        s.acceptanceCriteria = current.slice(0, 12)
+        return finish(ok(`Acceptance criteria saved: ${JSON.stringify(s.acceptanceCriteria)}. Each needs a current verify_work check with criterionId.`))
+      }
       if (name === 'set_execution_context') {
         if (!['sandbox', 'pod'].includes(args.environment) || !String(args.reason || '').trim()) return finish(fail('Specify environment and the reason for changing it.'))
         const project = normalizePath(args.projectPath)
@@ -128,6 +139,7 @@ export async function controlledAgentTool(input, execute, transfer) {
         }
         s.gateAfter = null
         s.failures = 0
+        s.verificationFailures = 0
         s.inFlight = null
         s.nextStep = safeNote(args.nextCheck)
         return finish(ok('Diagnostic evidence recorded; one focused repair may proceed. The fix still needs verify_work.'))
@@ -152,7 +164,7 @@ export async function controlledAgentTool(input, execute, transfer) {
       // diagnostic and verification commands are explicitly scoped read-only.
       const mayMutate = !inspections.has(name) && name !== 'verify_work' && !diagnostic
       if (mayMutate) s.projectLocked = true
-      if (mayMutate) s.revision++
+      if (mayMutate) { s.revision++; s.verificationFailures = 0 }
       if (mayMutate && s.projectPath) s.projectGeneration = await bumpProjectRevision(userId, s.projectPath)
       const previousFlight = s.inFlight
       s.inFlight = { tool: name, startedAt: new Date().toISOString() }
@@ -165,6 +177,7 @@ export async function controlledAgentTool(input, execute, transfer) {
           result = await transfer(runInput)
         } else if (name === 'verify_work') {
           if (!String(args.label || '').trim() || !['test', 'build', 'deployment'].includes(args.kind)) throw new Error('Verification requires a label and kind (test, build, deployment).')
+          if (s.acceptanceCriteria?.length && !s.acceptanceCriteria.some(c => c.id === args.criterionId)) throw new Error('Choose a criterionId from the current acceptance checklist for this check.')
           // Validate the assertion schema before spending time running a command.
           if (!Array.isArray(args.assertions) || !args.assertions.length) throw new Error('Verification requires output assertions, not just exit code zero.')
           if (args.background) throw new Error('Verification must wait for completion. Start long checks with execute_command background:true, then verify_work with jobId.')
@@ -206,12 +219,16 @@ export async function controlledAgentTool(input, execute, transfer) {
       }
       if (diagnostic) event.diagnostic = true
       if (name === 'verify_work') {
+        if (!result.ok) {
+          s.verificationFailures = (s.verificationFailures || 0) + 1
+          if (s.verificationFailures >= 2 && s.gateAfter === null) s.gateAfter = event.id
+        } else s.verificationFailures = 0
         // Same check = same label OR same command. Labels are model prose and drift
         // ("built and live" vs "is built and live"), which left the old FAIL alive
         // next to the new PASS and blocked "verified" while the model re-proved it.
         const command = args.command ? safeNote(args.command) : undefined
-        s.checks = s.checks.filter(c => !((c.label === safeNote(args.label) || (command && c.command === command && c.kind === args.kind)) && c.environment === s.environment))
-        s.checks.push({ id: event.id, label: safeNote(args.label), command, kind: args.kind, revision: s.revision, environment: s.environment, ok: result.ok, assertions: (Array.isArray(args.assertions) ? args.assertions : []).slice(0, 20).map(a => ({ type: a?.type, field: safeNote(a?.field), min: a?.min, value: safeNote(a?.value) })) })
+        s.checks = s.checks.filter(c => !((args.criterionId && c.criterionId ? c.criterionId === args.criterionId : (c.label === safeNote(args.label) || (command && c.command === command && c.kind === args.kind))) && c.environment === s.environment))
+        s.checks.push({ id: event.id, label: safeNote(args.label), command, kind: args.kind, criterionId: args.criterionId, revision: s.revision, environment: s.environment, ok: result.ok, assertions: (Array.isArray(args.assertions) ? args.assertions : []).slice(0, 20).map(a => ({ type: a?.type, field: safeNote(a?.field), min: a?.min, value: safeNote(a?.value) })) })
         // A pass of the same kind supersedes earlier failures in this revision. The
         // model refines a flawed check (bad assertion, deploy still propagating)
         // under a new label AND command, so identity cannot be matched: in one
@@ -229,6 +246,7 @@ export async function controlledAgentTool(input, execute, transfer) {
             projectGeneration: s.projectPath ? (await readProjectCheckpoint(userId, s.projectPath))?.generation || 0 : null,
           }
           s.nextStep = `Verified ${s.latestVerified.label} at revision ${s.revision}; evidence #${event.id}. Continue remaining requirements or inspect this evidence before changing files.`
+          if (s.workCheckpoint) s.workCheckpoint.nextAction = s.nextStep
           await saveProjectCheckpoint(userId, s.projectPath, { ...s.latestVerified, sessionId, historical: true })
         }
       }
